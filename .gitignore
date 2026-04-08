@@ -12,3 +12,4 @@ Cargo.lock
 .env
 /logs
 /data/*
+out*.txt
