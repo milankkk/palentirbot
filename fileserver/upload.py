@@ -3,9 +3,9 @@ from flask import Flask, request, jsonify
 import os, uuid
 
 app = Flask(__name__)
-UPLOAD_DIR = "/media/storage/replays/"
-SECRET = "somethingYouMakeUp123!"
-BASE_URL = "https://replays.insertdomainname.be"
+UPLOAD_DIR = "" # directory to store rendered replays
+SECRET = "" # secret for UPLOAD_SECRET
+BASE_URL = ""  #url to domain/ static fileserver like caddy or nginx
 
 @app.route("/upload", methods=["POST"])
 def upload():
@@ -20,4 +20,4 @@ def upload():
     return jsonify({"error": 0, "text": url})
 
 
-app.run(port=5555)
+app.run(port=5555) # port to run at
