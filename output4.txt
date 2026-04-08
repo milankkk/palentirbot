@@ -1,0 +1,607 @@
+   Compiling proc-macro2 v1.0.106
+   Compiling quote v1.0.45
+   Compiling unicode-ident v1.0.24
+   Compiling libc v0.2.184
+   Compiling cfg-if v1.0.4
+   Compiling once_cell v1.21.4
+   Compiling find-msvc-tools v0.1.9
+   Compiling shlex v1.3.0
+   Compiling pin-project-lite v0.2.17
+   Compiling serde_core v1.0.228
+   Compiling version_check v0.9.5
+   Compiling bytes v1.11.1
+   Compiling serde v1.0.228
+   Compiling itoa v1.0.18
+   Compiling futures-core v0.3.32
+   Compiling untrusted v0.9.0
+   Compiling subtle v2.6.1
+   Compiling stable_deref_trait v1.2.1
+   Compiling typenum v1.19.0
+   Compiling autocfg v1.5.0
+   Compiling futures-sink v0.3.32
+   Compiling zerocopy v0.8.48
+   Compiling writeable v0.6.3
+   Compiling futures-task v0.3.32
+   Compiling litemap v0.8.2
+   Compiling slab v0.4.12
+   Compiling utf8_iter v1.0.4
+   Compiling icu_normalizer_data v2.2.0
+   Compiling scopeguard v1.2.0
+   Compiling icu_properties_data v2.2.0
+   Compiling untrusted v0.7.1
+   Compiling rustls v0.20.9
+   Compiling bitflags v2.11.0
+   Compiling spin v0.5.2
+   Compiling log v0.4.29
+   Compiling fnv v1.0.7
+   Compiling num-conv v0.2.1
+   Compiling futures-channel v0.3.32
+   Compiling lock_api v0.4.14
+   Compiling time-core v0.1.8
+   Compiling powerfmt v0.2.0
+   Compiling cc v1.2.59
+   Compiling equivalent v1.0.2
+   Compiling memchr v2.8.0
+   Compiling tracing-core v0.1.36
+   Compiling httparse v1.10.1
+   Compiling hashbrown v0.16.1
+   Compiling parking_lot_core v0.8.6
+   Compiling zeroize v1.8.2
+   Compiling instant v0.1.13
+   Compiling futures-util v0.3.32
+   Compiling smallvec v1.15.1
+   Compiling percent-encoding v2.3.2
+   Compiling pkg-config v0.3.32
+   Compiling zmij v1.0.21
+   Compiling allocator-api2 v0.2.21
+   Compiling crossbeam-utils v0.8.21
+   Compiling serde_json v1.0.149
+   Compiling try-lock v0.2.5
+   Compiling cpufeatures v0.2.17
+   Compiling deranged v0.5.8
+   Compiling time-macros v0.2.27
+   Compiling rustls v0.23.37
+   Compiling want v0.3.1
+   Compiling rustls-pki-types v1.14.0
+   Compiling base64 v0.21.7
+   Compiling tower-service v0.3.3
+   Compiling generic-array v0.14.7
+   Compiling ahash v0.8.12
+   Compiling ahash v0.7.8
+   Compiling form_urlencoded v1.2.2
+   Compiling rustix v1.1.4
+   Compiling thiserror v1.0.69
+   Compiling parking_lot_core v0.9.12
+   Compiling tinyvec_macros v0.1.1
+   Compiling minimal-lexical v0.2.1
+   Compiling tinyvec v1.11.0
+   Compiling vcpkg v0.2.15
+   Compiling linux-raw-sys v0.12.1
+   Compiling num-traits v0.2.19
+   Compiling indexmap v1.9.3
+   Compiling atomic-waker v1.1.2
+   Compiling paste v1.0.15
+   Compiling crc-catalog v2.4.0
+   Compiling hashbrown v0.12.3
+   Compiling syn v1.0.109
+   Compiling rustls-pemfile v1.0.4
+   Compiling unicode_categories v0.1.1
+   Compiling crc32fast v1.5.0
+   Compiling unicode-bidi v0.3.18
+   Compiling unicode-properties v0.1.4
+   Compiling crc v3.4.0
+   Compiling http v1.4.0
+   Compiling http v0.2.12
+   Compiling nom v7.1.3
+   Compiling clap_lex v1.1.0
+   Compiling adler2 v2.0.1
+   Compiling regex-syntax v0.8.10
+   Compiling unicode-normalization v0.1.25
+   Compiling openssl-probe v0.2.1
+   Compiling event-listener v2.5.3
+   Compiling simd-adler32 v0.3.9
+   Compiling dotenvy v0.15.7
+   Compiling indexmap v2.13.1
+   Compiling crossbeam-queue v0.3.12
+   Compiling anstyle v1.0.14
+   Compiling either v1.15.0
+   Compiling hex v0.4.3
+   Compiling whoami v1.6.1
+   Compiling miniz_oxide v0.8.9
+   Compiling syn v2.0.117
+   Compiling rustls-native-certs v0.8.3
+   Compiling webpki-roots v1.0.6
+   Compiling lazy_static v1.5.0
+   Compiling thiserror v2.0.18
+   Compiling httpdate v1.0.3
+   Compiling openssl-probe v0.1.6
+   Compiling futures-io v0.3.32
+   Compiling bitflags v1.3.2
+   Compiling byteorder v1.5.0
+   Compiling fastrand v2.4.0
+   Compiling unicode-segmentation v1.13.2
+   Compiling base64 v0.13.1
+   Compiling rustls-native-certs v0.6.3
+   Compiling sharded-slab v0.1.7
+   Compiling stringprep v0.1.5
+   Compiling tracing-log v0.2.0
+   Compiling thread_local v1.1.9
+   Compiling iana-time-zone v0.1.65
+   Compiling sha1_smol v1.0.1
+   Compiling condtype v1.3.0
+   Compiling simdutf8 v0.1.5
+   Compiling regex-lite v0.1.9
+   Compiling base64 v0.22.1
+   Compiling ordered-float v2.10.1
+   Compiling atoi v1.0.0
+   Compiling eyre v0.6.12
+   Compiling chrono v0.4.44
+   Compiling crossbeam-channel v0.5.15
+   Compiling http-body v1.0.1
+   Compiling rosu-mods v0.4.1
+   Compiling endian-type v0.1.2
+   Compiling http-body v0.4.6
+   Compiling indenter v0.3.4
+   Compiling http-body-util v0.1.3
+   Compiling rosu-map v0.2.1
+   Compiling dotenv v0.15.0
+   Compiling heck v0.4.1
+   Compiling time v0.3.47
+   Compiling socket2 v0.6.3
+   Compiling mio v1.2.0
+   Compiling getrandom v0.2.17
+   Compiling ring v0.17.14
+   Compiling errno v0.3.14
+   Compiling block-buffer v0.10.4
+   Compiling ring v0.16.20
+   Compiling crypto-common v0.1.7
+   Compiling libz-sys v1.1.28
+   Compiling signal-hook-registry v1.4.8
+   Compiling digest v0.10.7
+   Compiling dirs-sys v0.3.7
+   Compiling terminal_size v0.4.4
+   Compiling rand_core v0.6.4
+   Compiling bzip2-sys v0.1.13+1.0.8
+   Compiling clap_builder v4.6.0
+   Compiling dirs v4.0.0
+   Compiling socket2 v0.5.10
+   Compiling hmac v0.12.1
+   Compiling md-5 v0.10.6
+   Compiling parking_lot v0.11.2
+   Compiling sha2 v0.10.9
+   Compiling sha1 v0.10.6
+   Compiling hkdf v0.12.4
+   Compiling tokio v1.51.0
+   Compiling regex-automata v0.4.14
+   Compiling num_cpus v1.17.0
+   Compiling time v0.1.45
+   Compiling flate2 v1.1.9
+   Compiling futures-intrusive v0.4.2
+   Compiling seize v0.2.5
+   Compiling futures v0.3.32
+   Compiling sqlformat v0.2.6
+   Compiling osu-db v0.3.0
+   Compiling bzip2 v0.4.4
+   Compiling clap v4.6.0
+   Compiling matchers v0.2.0
+   Compiling command-macros v0.1.0 (/home/serverx/Documents/osudcbots/shishabot/command-macros)
+warning: unused variable: `dm_permission`
+   --> command-macros/src/msg_command/mod.rs:152:9
+    |
+152 |     let dm_permission = OptionWrapper(dm_permission);
+    |         ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_dm_permission`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling ppv-lite86 v0.2.21
+warning: struct `Parenthesised` is never constructed
+  --> command-macros/src/util.rs:11:12
+   |
+11 | pub struct Parenthesised<T>(pub Punctuated<T, Comma>);
+   |            ^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: trait `LitExt` is never used
+  --> command-macros/src/util.rs:22:11
+   |
+22 | pub trait LitExt {
+   |           ^^^^^^
+
+warning: struct `AsOption` is never constructed
+  --> command-macros/src/util.rs:53:12
+   |
+53 | pub struct AsOption<T>(pub Option<T>);
+   |            ^^^^^^^^
+
+   Compiling hashbrown v0.14.5
+warning: `command-macros` (lib) generated 4 warnings (run `cargo fix --lib -p command-macros` to apply 1 suggestion)
+   Compiling rand_chacha v0.3.1
+   Compiling synstructure v0.13.2
+   Compiling rand v0.8.5
+   Compiling hashlink v0.8.4
+   Compiling serde_derive v1.0.228
+   Compiling tokio-macros v2.7.0
+   Compiling zerofrom-derive v0.1.7
+   Compiling yoke-derive v0.8.2
+   Compiling zerovec-derive v0.11.3
+   Compiling displaydoc v0.2.5
+   Compiling tracing-attributes v0.1.31
+   Compiling serde_repr v0.1.20
+   Compiling thiserror-impl v1.0.69
+   Compiling divan-macros v0.1.21
+   Compiling thiserror-impl v2.0.18
+   Compiling twilight-interactions-derive v0.16.1 (https://github.com/MaxOhn/twilight-interactions?branch=with-help-16#f24136c6)
+   Compiling webpki v0.22.4
+   Compiling sct v0.7.1
+   Compiling rustls-webpki v0.103.10
+   Compiling webpki-roots v0.22.6
+   Compiling divan v0.1.21
+   Compiling zerofrom v0.1.7
+   Compiling yoke v0.8.2
+   Compiling tracing v0.1.44
+   Compiling tokio-stream v0.1.18
+   Compiling zerovec v0.11.6
+   Compiling zerotrie v0.2.4
+   Compiling zip v0.5.13
+   Compiling tinystr v0.8.3
+   Compiling potential_utf v0.1.5
+   Compiling icu_collections v2.2.0
+   Compiling rosu-pp v3.1.0 (https://github.com/MaxOhn/rosu-pp?branch=next#a5c40c83)
+   Compiling icu_locale_core v2.2.0
+   Compiling icu_provider v2.2.0
+   Compiling tokio-rustls v0.23.4
+   Compiling sqlx-rt v0.6.3
+   Compiling icu_properties v2.2.0
+   Compiling icu_normalizer v2.2.0
+   Compiling serde-value v0.7.0
+   Compiling smallstr v0.2.0
+   Compiling nibble_vec v0.1.0
+   Compiling tracing-subscriber v0.3.23
+   Compiling twilight-model v0.16.0
+   Compiling radix_trie v0.2.1
+   Compiling dashmap v5.5.3
+   Compiling parking_lot v0.12.5
+   Compiling flurry v0.4.0
+   Compiling idna_adapter v1.2.1
+   Compiling idna v1.1.0
+   Compiling url v2.5.8
+   Compiling tracing-appender v0.2.4
+   Compiling sqlx-core v0.6.3
+   Compiling tokio-util v0.7.18
+   Compiling tokio-rustls v0.26.4
+   Compiling twilight-http-ratelimiting v0.16.0
+   Compiling leaky-bucket-lite v0.5.2
+   Compiling twilight-gateway-queue v0.16.0
+   Compiling flexmap v0.1.0 (https://github.com/MaxOhn/flexmap#46f163d3)
+   Compiling rustls-platform-verifier v0.5.3
+   Compiling h2 v0.4.13
+   Compiling h2 v0.3.27
+   Compiling tokio-websockets v0.11.4
+   Compiling hyper v0.14.32
+   Compiling hyper v1.9.0
+   Compiling hyper-util v0.1.20
+   Compiling hyper-rustls v0.23.2
+   Compiling sqlx-macros v0.6.3
+   Compiling rosu-v2 v0.7.0 (https://github.com/MaxOhn/rosu-v2?rev=996ec7c1db07e8bbcfaad07d555c9d56b763d414#996ec7c1)
+   Compiling hyper-rustls v0.27.7
+   Compiling sqlx v0.6.3
+   Compiling twilight-validate v0.16.0
+   Compiling twilight-interactions v0.16.1 (https://github.com/MaxOhn/twilight-interactions?branch=with-help-16#f24136c6)
+   Compiling twilight-standby v0.16.0
+   Compiling twilight-cache-inmemory v0.16.0
+   Compiling twilight-http v0.16.0
+   Compiling twilight-gateway v0.16.0
+   Compiling shishabot v0.1.0 (/home/serverx/Documents/osudcbots/shishabot)
+warning: use of deprecated field `twilight_model::application::interaction::Interaction::channel_id`: channel_id is deprecated in the discord API and will no be sent in the future, users should use the channel field instead.
+  --> src/core/events/interaction/mod.rs:23:9
+   |
+23 |         channel_id,
+   |         ^^^^^^^^^^
+   |
+   = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated field `twilight_model::application::command::Command::dm_permission`: use contexts instead
+  --> src/commands/danser/render_score.rs:18:1
+   |
+18 | #[msg_command(name = "Render score")]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this warning originates in the attribute macro `msg_command` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: enum `ShowHideOption` is never used
+  --> src/commands/mod.rs:13:10
+   |
+13 | pub enum ShowHideOption {
+   |          ^^^^^^^^^^^^^^
+   |
+note: the lint level is defined here
+  --> src/main.rs:2:9
+   |
+ 2 | #![warn(unused)]
+   |         ^^^^^^
+   = note: `#[warn(dead_code)]` implied by `#[warn(unused)]`
+
+warning: enum `EnableDisable` is never used
+  --> src/commands/mod.rs:21:10
+   |
+21 | pub enum EnableDisable {
+   |          ^^^^^^^^^^^^^
+
+warning: enum `ThreadChannel` is never used
+  --> src/commands/mod.rs:29:10
+   |
+29 | pub enum ThreadChannel {
+   |          ^^^^^^^^^^^^^
+
+warning: struct `ParsedEmbed` is never constructed
+   --> src/commands/danser/render_score.rs:153:8
+    |
+153 | struct ParsedEmbed {
+    |        ^^^^^^^^^^^
+
+warning: function `parse_embed` is never used
+   --> src/commands/danser/render_score.rs:158:4
+    |
+158 | fn parse_embed(input_data: &CommandInputData<'_>) -> Option<ParsedEmbed> {
+    |    ^^^^^^^^^^^
+
+warning: function `get_timestamp_from_minimized_embed` is never used
+   --> src/commands/danser/render_score.rs:179:4
+    |
+179 | fn get_timestamp_from_minimized_embed(embed: &Embed) -> Option<Timestamp> {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `extend_replay_bytes` is never used
+   --> src/commands/danser/render_score.rs:194:4
+    |
+194 | fn extend_replay_bytes(bytes: &mut Vec<u8>, score: &Score) {
+    |    ^^^^^^^^^^^^^^^^^^^
+
+warning: function `encode_byte` is never used
+   --> src/commands/danser/render_score.rs:248:4
+    |
+248 | fn encode_byte(bytes: &mut Vec<u8>, byte: u8) -> usize {
+    |    ^^^^^^^^^^^
+
+warning: function `encode_short` is never used
+   --> src/commands/danser/render_score.rs:254:4
+    |
+254 | fn encode_short(bytes: &mut Vec<u8>, short: u16) -> usize {
+    |    ^^^^^^^^^^^^
+
+warning: function `encode_int` is never used
+   --> src/commands/danser/render_score.rs:260:4
+    |
+260 | fn encode_int(bytes: &mut Vec<u8>, int: u32) -> usize {
+    |    ^^^^^^^^^^
+
+warning: function `encode_long` is never used
+   --> src/commands/danser/render_score.rs:266:4
+    |
+266 | fn encode_long(bytes: &mut Vec<u8>, long: u64) -> usize {
+    |    ^^^^^^^^^^^
+
+warning: function `encode_string` is never used
+   --> src/commands/danser/render_score.rs:272:4
+    |
+272 | fn encode_string(bytes: &mut Vec<u8>, s: &str) -> usize {
+    |    ^^^^^^^^^^^^^
+
+warning: function `encode_leb128` is never used
+   --> src/commands/danser/render_score.rs:287:4
+    |
+287 | fn encode_leb128(bytes: &mut Vec<u8>, mut n: usize) -> usize {
+    |    ^^^^^^^^^^^^^
+
+warning: function `encode_datetime` is never used
+   --> src/commands/danser/render_score.rs:308:4
+    |
+308 | fn encode_datetime(bytes: &mut Vec<u8>, datetime: OffsetDateTime) -> usize {
+    |    ^^^^^^^^^^^^^^^
+
+warning: function `game_version` is never used
+   --> src/commands/danser/render_score.rs:322:4
+    |
+322 | fn game_version(date: Date) -> u32 {
+    |    ^^^^^^^^^^^^
+
+warning: field `current_user` is never read
+  --> src/core/cache/mod.rs:24:5
+   |
+22 | pub struct Cache {
+   |            ----- field in this struct
+23 |     inner: InMemoryCache,
+24 |     current_user: Option<CurrentUser>,
+   |     ^^^^^^^^^^^^
+
+warning: field `osu_api_key` is never read
+  --> src/core/config.rs:76:9
+   |
+72 | pub struct Tokens {
+   |            ------ field in this struct
+...
+76 |     pub osu_api_key: String,
+   |         ^^^^^^^^^^^
+   |
+   = note: `Tokens` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: variant `Message` is never constructed
+  --> src/core/commands/slash/command.rs:16:5
+   |
+14 | pub enum Command {
+   |          ------- variant in this enum
+15 |     Slash(&'static SlashCommand),
+16 |     Message(&'static MessageCommand),
+   |     ^^^^^^^
+   |
+   = note: `Command` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: field `name` is never read
+  --> src/core/commands/slash/command.rs:37:9
+   |
+34 | pub struct MessageCommand {
+   |            -------------- field in this struct
+...
+37 |     pub name: &'static str,
+   |         ^^^^
+
+warning: variant `Encoding` is never constructed
+  --> src/core/replay_queue/data.rs:76:5
+   |
+72 | pub enum ReplayStatus {
+   |          ------------ variant in this enum
+...
+76 |     Encoding(u8),
+   |     ^^^^^^^^
+   |
+   = note: `ReplayStatus` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: fields `count_geki`, `count_katsu`, and `max_combo` are never read
+  --> src/core/replay_queue/data.rs:86:9
+   |
+81 | pub struct ReplaySlim {
+   |            ---------- fields in this struct
+...
+86 |     pub count_geki: u16,
+   |         ^^^^^^^^^^
+87 |     pub count_katsu: u16,
+   |         ^^^^^^^^^^^
+88 |     pub count_miss: u16,
+89 |     pub max_combo: u16,
+   |         ^^^^^^^^^
+   |
+   = note: `ReplaySlim` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: variant `OsuReplay` is never constructed
+  --> src/custom_client/mod.rs:33:5
+   |
+29 | enum Site {
+   |      ---- variant in this enum
+...
+33 |     OsuReplay,
+   |     ^^^^^^^^^
+   |
+   = note: `Site` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: method `get_raw_replay` is never used
+   --> src/custom_client/mod.rs:166:18
+    |
+ 60 | impl CustomClient {
+    | ----------------- method in this implementation
+...
+166 |     pub async fn get_raw_replay(&self, score_id: u64) -> Result<Vec<u8>> {
+    |                  ^^^^^^^^^^^^^^
+
+warning: struct `OsuReplayResponse` is never constructed
+   --> src/custom_client/mod.rs:242:12
+    |
+242 | pub struct OsuReplayResponse {
+    |            ^^^^^^^^^^^^^^^^^
+
+warning: struct `DBServerBlacklist` is never constructed
+ --> src/database/models/server_blacklist.rs:5:12
+  |
+5 | pub struct DBServerBlacklist {
+  |            ^^^^^^^^^^^^^^^^^
+
+warning: struct `SecToMinSecFormatter` is never constructed
+ --> src/util/datetime.rs:5:12
+  |
+5 | pub struct SecToMinSecFormatter {
+  |            ^^^^^^^^^^^^^^^^^^^^
+
+warning: field `permissions` is never read
+  --> src/util/interaction.rs:20:9
+   |
+19 | pub struct InteractionCommand {
+   |            ------------------ field in this struct
+20 |     pub permissions: Option<Permissions>,
+   |         ^^^^^^^^^^^
+   |
+   = note: `InteractionCommand` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: field `permissions` is never read
+  --> src/util/interaction.rs:32:9
+   |
+31 | pub struct InteractionComponent {
+   |            -------------------- field in this struct
+32 |     pub permissions: Option<Permissions>,
+   |         ^^^^^^^^^^^
+   |
+   = note: `InteractionComponent` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: field `permissions` is never read
+  --> src/util/interaction.rs:45:9
+   |
+44 | pub struct InteractionModal {
+   |            ---------------- field in this struct
+45 |     pub permissions: Option<Permissions>,
+   |         ^^^^^^^^^^^
+   |
+   = note: `InteractionModal` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: function `round` is never used
+ --> src/util/numbers.rs:4:8
+  |
+4 | pub fn round(n: f32) -> f32 {
+  |        ^^^^^
+
+warning: methods `cow_replacen`, `cow_to_ascii_uppercase`, and `cow_escape_markdown` are never used
+  --> src/util/cow.rs:59:8
+   |
+53 | pub trait CowUtils<'s> {
+   |           -------- methods in this trait
+...
+59 |     fn cow_replacen(self, from: impl Pattern<'s>, to: &str, count: usize) -> Self::Output;
+   |        ^^^^^^^^^^^^
+...
+65 |     fn cow_to_ascii_uppercase(self) -> Self::Output;
+   |        ^^^^^^^^^^^^^^^^^^^^^^
+...
+68 |     fn cow_escape_markdown(self) -> Self::Output;
+   |        ^^^^^^^^^^^^^^^^^^^
+
+warning: method `username` is never used
+  --> src/util/ext/authored.rs:29:8
+   |
+11 | pub trait Authored {
+   |           -------- method in this trait
+...
+29 |     fn username(&self) -> Result<&str> {
+   |        ^^^^^^^^
+
+warning: method `plain_message` is never used
+  --> src/util/ext/channel.rs:20:14
+   |
+17 | pub trait ChannelExt {
+   |           ---------- method in this trait
+...
+20 |     async fn plain_message(&self, ctx: &Context, content: &str) -> Result<Message>;
+   |              ^^^^^^^^^^^^^
+
+warning: trait `BeatmapExt` is never used
+ --> src/util/ext/map.rs:3:11
+  |
+3 | pub trait BeatmapExt: Send + Sync {
+  |           ^^^^^^^^^^
+
+warning: method `delete` is never used
+  --> src/util/ext/message.rs:16:14
+   |
+14 | pub trait MessageExt {
+   |           ---------- method in this trait
+15 |     async fn update(&self, ctx: &Context, builder: &MessageBuilder<'_>) -> Result<Message>;
+16 |     async fn delete(&self, ctx: &Context) -> Result<()>;
+   |              ^^^^^^
+
+warning: trait `ScoreExt` is never used
+ --> src/util/ext/score.rs:7:11
+  |
+7 | pub trait ScoreExt: Send + Sync {
+  |           ^^^^^^^^
+
+warning: `shishabot` (bin "shishabot") generated 38 warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 56.06s
+warning: the following packages contain code that will be rejected by a future version of Rust: sqlx-core v0.6.3
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`

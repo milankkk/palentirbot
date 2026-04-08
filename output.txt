@@ -1,0 +1,695 @@
+   Compiling proc-macro2 v1.0.106
+   Compiling quote v1.0.45
+   Compiling unicode-ident v1.0.24
+   Compiling libc v0.2.184
+   Compiling cfg-if v1.0.4
+   Compiling once_cell v1.21.4
+   Compiling find-msvc-tools v0.1.9
+   Compiling shlex v1.3.0
+   Compiling pin-project-lite v0.2.17
+   Compiling serde_core v1.0.228
+   Compiling bytes v1.11.1
+   Compiling serde v1.0.228
+   Compiling version_check v0.9.5
+   Compiling itoa v1.0.18
+   Compiling futures-core v0.3.32
+   Compiling untrusted v0.9.0
+   Compiling subtle v2.6.1
+   Compiling autocfg v1.5.0
+   Compiling typenum v1.19.0
+   Compiling stable_deref_trait v1.2.1
+   Compiling futures-sink v0.3.32
+   Compiling zerocopy v0.8.48
+   Compiling futures-task v0.3.32
+   Compiling litemap v0.8.2
+   Compiling writeable v0.6.3
+   Compiling utf8_iter v1.0.4
+   Compiling icu_normalizer_data v2.2.0
+   Compiling slab v0.4.12
+   Compiling scopeguard v1.2.0
+   Compiling icu_properties_data v2.2.0
+   Compiling spin v0.5.2
+   Compiling log v0.4.29
+   Compiling rustls v0.20.9
+   Compiling bitflags v2.11.0
+   Compiling untrusted v0.7.1
+   Compiling num-conv v0.2.1
+   Compiling fnv v1.0.7
+   Compiling powerfmt v0.2.0
+   Compiling lock_api v0.4.14
+   Compiling cc v1.2.59
+   Compiling futures-channel v0.3.32
+   Compiling time-core v0.1.8
+   Compiling parking_lot_core v0.8.6
+   Compiling tracing-core v0.1.36
+   Compiling hashbrown v0.16.1
+   Compiling memchr v2.8.0
+   Compiling equivalent v1.0.2
+   Compiling httparse v1.10.1
+   Compiling zeroize v1.8.2
+   Compiling instant v0.1.13
+   Compiling zmij v1.0.21
+   Compiling futures-util v0.3.32
+   Compiling allocator-api2 v0.2.21
+   Compiling pkg-config v0.3.32
+   Compiling smallvec v1.15.1
+   Compiling deranged v0.5.8
+   Compiling percent-encoding v2.3.2
+   Compiling crossbeam-utils v0.8.21
+   Compiling serde_json v1.0.149
+   Compiling try-lock v0.2.5
+   Compiling rustls v0.23.37
+   Compiling cpufeatures v0.2.17
+   Compiling want v0.3.1
+   Compiling time-macros v0.2.27
+   Compiling base64 v0.21.7
+   Compiling rustls-pki-types v1.14.0
+   Compiling generic-array v0.14.7
+   Compiling ahash v0.8.12
+   Compiling ahash v0.7.8
+   Compiling form_urlencoded v1.2.2
+   Compiling tinyvec_macros v0.1.1
+   Compiling thiserror v1.0.69
+   Compiling parking_lot_core v0.9.12
+   Compiling tower-service v0.3.3
+   Compiling rustix v1.1.4
+   Compiling minimal-lexical v0.2.1
+   Compiling tinyvec v1.11.0
+   Compiling atomic-waker v1.1.2
+   Compiling vcpkg v0.2.15
+   Compiling linux-raw-sys v0.12.1
+   Compiling num-traits v0.2.19
+   Compiling indexmap v1.9.3
+   Compiling paste v1.0.15
+   Compiling syn v1.0.109
+   Compiling unicode-properties v0.1.4
+   Compiling rustls-pemfile v1.0.4
+   Compiling hashbrown v0.12.3
+   Compiling unicode-bidi v0.3.18
+   Compiling crc-catalog v2.4.0
+   Compiling unicode_categories v0.1.1
+   Compiling crc32fast v1.5.0
+   Compiling crc v3.4.0
+   Compiling http v1.4.0
+   Compiling http v0.2.12
+   Compiling nom v7.1.3
+   Compiling hex v0.4.3
+   Compiling either v1.15.0
+   Compiling regex-syntax v0.8.10
+   Compiling unicode-normalization v0.1.25
+   Compiling clap_lex v1.1.0
+   Compiling indexmap v2.13.1
+   Compiling event-listener v2.5.3
+   Compiling anstyle v1.0.14
+   Compiling whoami v1.6.1
+   Compiling openssl-probe v0.2.1
+   Compiling adler2 v2.0.1
+   Compiling syn v2.0.117
+   Compiling crossbeam-queue v0.3.12
+   Compiling simd-adler32 v0.3.9
+   Compiling dotenvy v0.15.7
+   Compiling rustls-native-certs v0.8.3
+   Compiling webpki-roots v1.0.6
+   Compiling thiserror v2.0.18
+   Compiling futures-io v0.3.32
+   Compiling lazy_static v1.5.0
+   Compiling fastrand v2.4.0
+   Compiling bitflags v1.3.2
+   Compiling miniz_oxide v0.8.9
+   Compiling openssl-probe v0.1.6
+   Compiling unicode-segmentation v1.13.2
+   Compiling byteorder v1.5.0
+   Compiling httpdate v1.0.3
+   Compiling base64 v0.13.1
+   Compiling rustls-native-certs v0.6.3
+   Compiling sharded-slab v0.1.7
+   Compiling stringprep v0.1.5
+   Compiling tracing-log v0.2.0
+   Compiling thread_local v1.1.9
+   Compiling regex-lite v0.1.9
+   Compiling simdutf8 v0.1.5
+   Compiling condtype v1.3.0
+   Compiling eyre v0.6.12
+   Compiling base64 v0.22.1
+   Compiling iana-time-zone v0.1.65
+   Compiling sha1_smol v1.0.1
+   Compiling crossbeam-channel v0.5.15
+   Compiling ordered-float v2.10.1
+   Compiling atoi v1.0.0
+   Compiling heck v0.4.1
+   Compiling http-body v1.0.1
+   Compiling http-body v0.4.6
+   Compiling chrono v0.4.44
+   Compiling rosu-mods v0.4.1
+   Compiling indenter v0.3.4
+   Compiling rosu-map v0.2.1
+   Compiling http-body-util v0.1.3
+   Compiling endian-type v0.1.2
+   Compiling dotenv v0.15.0
+   Compiling socket2 v0.6.3
+   Compiling getrandom v0.2.17
+   Compiling mio v1.2.0
+   Compiling ring v0.17.14
+   Compiling errno v0.3.14
+   Compiling block-buffer v0.10.4
+   Compiling ring v0.16.20
+   Compiling time v0.3.47
+   Compiling crypto-common v0.1.7
+   Compiling signal-hook-registry v1.4.8
+   Compiling digest v0.10.7
+   Compiling rand_core v0.6.4
+   Compiling libz-sys v1.1.28
+   Compiling dirs-sys v0.3.7
+   Compiling terminal_size v0.4.4
+   Compiling bzip2-sys v0.1.13+1.0.8
+   Compiling socket2 v0.5.10
+   Compiling num_cpus v1.17.0
+   Compiling clap_builder v4.6.0
+   Compiling time v0.1.45
+   Compiling hmac v0.12.1
+   Compiling sha2 v0.10.9
+   Compiling dirs v4.0.0
+   Compiling sha1 v0.10.6
+   Compiling tokio v1.51.0
+   Compiling parking_lot v0.11.2
+   Compiling hkdf v0.12.4
+   Compiling regex-automata v0.4.14
+   Compiling md-5 v0.10.6
+   Compiling flate2 v1.1.9
+   Compiling seize v0.2.5
+   Compiling futures-intrusive v0.4.2
+   Compiling sqlformat v0.2.6
+   Compiling futures v0.3.32
+   Compiling bzip2 v0.4.4
+   Compiling osu-db v0.3.0
+   Compiling clap v4.6.0
+   Compiling matchers v0.2.0
+   Compiling command-macros v0.1.0 (/home/serverx/Documents/osudcbots/shishabot/command-macros)
+warning: struct `Parenthesised` is never constructed
+  --> command-macros/src/util.rs:11:12
+   |
+11 | pub struct Parenthesised<T>(pub Punctuated<T, Comma>);
+   |            ^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: trait `LitExt` is never used
+  --> command-macros/src/util.rs:22:11
+   |
+22 | pub trait LitExt {
+   |           ^^^^^^
+
+warning: struct `AsOption` is never constructed
+  --> command-macros/src/util.rs:53:12
+   |
+53 | pub struct AsOption<T>(pub Option<T>);
+   |            ^^^^^^^^
+
+   Compiling ppv-lite86 v0.2.21
+   Compiling hashbrown v0.14.5
+   Compiling synstructure v0.13.2
+warning: `command-macros` (lib) generated 3 warnings
+   Compiling rand_chacha v0.3.1
+   Compiling rand v0.8.5
+   Compiling serde_derive v1.0.228
+   Compiling tokio-macros v2.7.0
+   Compiling zerofrom-derive v0.1.7
+   Compiling yoke-derive v0.8.2
+   Compiling zerovec-derive v0.11.3
+   Compiling displaydoc v0.2.5
+   Compiling tracing-attributes v0.1.31
+   Compiling serde_repr v0.1.20
+   Compiling thiserror-impl v1.0.69
+   Compiling divan-macros v0.1.21
+   Compiling thiserror-impl v2.0.18
+   Compiling twilight-interactions-derive v0.16.1 (https://github.com/MaxOhn/twilight-interactions?branch=with-help-16#f24136c6)
+   Compiling hashlink v0.8.4
+   Compiling webpki v0.22.4
+   Compiling sct v0.7.1
+   Compiling rustls-webpki v0.103.10
+   Compiling divan v0.1.21
+   Compiling webpki-roots v0.22.6
+   Compiling zerofrom v0.1.7
+   Compiling zip v0.5.13
+   Compiling tracing v0.1.44
+   Compiling yoke v0.8.2
+   Compiling tokio-stream v0.1.18
+   Compiling zerovec v0.11.6
+   Compiling zerotrie v0.2.4
+   Compiling rosu-pp v3.1.0 (https://github.com/MaxOhn/rosu-pp?branch=next#a5c40c83)
+   Compiling tinystr v0.8.3
+   Compiling potential_utf v0.1.5
+   Compiling icu_collections v2.2.0
+   Compiling icu_locale_core v2.2.0
+   Compiling icu_provider v2.2.0
+   Compiling tokio-rustls v0.23.4
+   Compiling icu_properties v2.2.0
+   Compiling icu_normalizer v2.2.0
+   Compiling sqlx-rt v0.6.3
+   Compiling serde-value v0.7.0
+   Compiling tracing-subscriber v0.3.23
+   Compiling smallstr v0.2.0
+   Compiling nibble_vec v0.1.0
+   Compiling twilight-model v0.16.0
+   Compiling radix_trie v0.2.1
+   Compiling dashmap v5.5.3
+   Compiling parking_lot v0.12.5
+   Compiling flurry v0.4.0
+   Compiling idna_adapter v1.2.1
+   Compiling idna v1.1.0
+   Compiling url v2.5.8
+   Compiling tracing-appender v0.2.4
+   Compiling sqlx-core v0.6.3
+   Compiling tokio-util v0.7.18
+   Compiling tokio-rustls v0.26.4
+   Compiling twilight-http-ratelimiting v0.16.0
+   Compiling twilight-gateway-queue v0.16.0
+   Compiling leaky-bucket-lite v0.5.2
+   Compiling flexmap v0.1.0 (https://github.com/MaxOhn/flexmap#46f163d3)
+   Compiling rustls-platform-verifier v0.5.3
+   Compiling h2 v0.4.13
+   Compiling h2 v0.3.27
+   Compiling tokio-websockets v0.11.4
+   Compiling hyper v0.14.32
+   Compiling hyper v1.9.0
+   Compiling hyper-util v0.1.20
+   Compiling sqlx-macros v0.6.3
+   Compiling hyper-rustls v0.23.2
+   Compiling rosu-v2 v0.7.0 (https://github.com/MaxOhn/rosu-v2?rev=996ec7c1db07e8bbcfaad07d555c9d56b763d414#996ec7c1)
+   Compiling hyper-rustls v0.27.7
+   Compiling sqlx v0.6.3
+   Compiling twilight-validate v0.16.0
+   Compiling twilight-cache-inmemory v0.16.0
+   Compiling twilight-interactions v0.16.1 (https://github.com/MaxOhn/twilight-interactions?branch=with-help-16#f24136c6)
+   Compiling twilight-standby v0.16.0
+   Compiling twilight-http v0.16.0
+   Compiling twilight-gateway v0.16.0
+   Compiling shishabot v0.1.0 (/home/serverx/Documents/osudcbots/shishabot)
+error: expected identifier, found `*`
+  --> src/core/events/interaction/mod.rs:45:17
+   |
+42 |             let cmd = InteractionCommand {
+   |                       ------------------ while parsing this struct
+...
+45 |                 *data,
+   |                 ^ expected identifier
+
+error: expected identifier, found `*`
+  --> src/core/events/interaction/mod.rs:70:17
+   |
+67 |             let component = InteractionComponent {
+   |                             -------------------- while parsing this struct
+...
+70 |                 *data,
+   |                 ^ expected identifier
+
+error[E0433]: failed to resolve: use of undeclared type `Help`
+  --> src/core/commands/slash/mod.rs:45:21
+   |
+45 |                     Help => HELP_SLASH,
+   |                     ^^^^ use of undeclared type `Help`
+   |
+note: struct `crate::commands::help::interaction::Help` exists but is inaccessible
+  --> src/commands/help/interaction.rs:26:1
+   |
+26 | pub struct Help;
+   | ^^^^^^^^^^^^^^^^ not accessible
+
+error[E0425]: cannot find value `HELP_SLASH` in this scope
+  --> src/core/commands/slash/mod.rs:45:29
+   |
+26 |         $(trie.insert($slash_cmd::NAME, Command::Slash(&$chat_fun));)*
+   |                                                         --------- due to this macro variable
+...
+45 |                     Help => HELP_SLASH,
+   |                             ^^^^^^^^^^ help: a static with a similar name exists: `SETUP_SLASH`
+   |
+  ::: src/commands/danser/setup/mod.rs:20:39
+   |
+20 | #[derive(CommandModel, CreateCommand, SlashCommand)]
+   |                                       ------------ similarly named static `SETUP_SLASH` defined here
+   |
+note: static `crate::commands::help::interaction::HELP_SLASH` exists but is inaccessible
+  --> src/commands/help/interaction.rs:22:25
+   |
+22 | #[derive(CreateCommand, SlashCommand)]
+   |                         ^^^^^^^^^^^^ not accessible
+   = note: this error originates in the derive macro `SlashCommand` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0433]: failed to resolve: use of undeclared type `BufReader`
+   --> src/core/replay_queue/process.rs:181:34
+    |
+181 |                     let reader = BufReader::new(stdout);
+    |                                  ^^^^^^^^^ use of undeclared type `BufReader`
+    |
+help: consider importing one of these structs
+    |
+  1 + use std::io::BufReader;
+    |
+  1 + use tokio::io::BufReader;
+    |
+
+error[E0412]: cannot find type `BufReader` in this scope
+   --> src/core/replay_queue/process.rs:321:56
+    |
+321 | async fn read_danser_progress(_ctx: &Context, _reader: BufReader<ChildStdout>) {
+    |                                                        ^^^^^^^^^ not found in this scope
+    |
+help: consider importing one of these structs
+    |
+  1 + use std::io::BufReader;
+    |
+  1 + use tokio::io::BufReader;
+    |
+
+error: unused import: `help::*`
+ --> src/core/commands/slash/mod.rs:9:34
+  |
+9 | use crate::commands::{danser::*, help::*, owner::*, utility::*};
+  |                                  ^^^^^^^
+  |
+note: the lint level is defined here
+ --> src/main.rs:1:59
+  |
+1 | #![deny(clippy::all, nonstandard_style, rust_2018_idioms, unused)]
+  |                                                           ^^^^^^
+  = note: `#[deny(unused_imports)]` implied by `#[deny(unused)]`
+
+error[E0223]: ambiguous associated type
+  --> src/commands/danser/settings/edit.rs:50:29
+   |
+50 |                 .map(|skin| CommandOptionChoice::String {
+   |                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if there were a trait named `Example` with associated type `String` implemented for `CommandOptionChoice`, you could use the fully-qualified path
+   |
+50 -                 .map(|skin| CommandOptionChoice::String {
+50 +                 .map(|skin| <CommandOptionChoice as Example>::String {
+   |
+
+error[E0308]: mismatched types
+   --> src/commands/help/components.rs:161:46
+    |
+161 |     let description = help.unwrap_or_else(|| description.clone());
+    |                                              ^^^^^^^^^^^^^^^^^^^ expected `&str`, found `String`
+    |
+help: consider borrowing here
+    |
+161 |     let description = help.unwrap_or_else(|| &description.clone());
+    |                                              +
+
+warning: use of deprecated field `twilight_model::application::interaction::Interaction::channel_id`: channel_id is deprecated in the discord API and will no be sent in the future, users should use the channel field instead.
+  --> src/core/events/interaction/mod.rs:23:9
+   |
+23 |         channel_id,
+   |         ^^^^^^^^^^
+   |
+   = note: `#[warn(deprecated)]` on by default
+
+error[E0063]: missing field `data` in initializer of `InteractionCommand`
+  --> src/core/events/interaction/mod.rs:42:23
+   |
+42 |             let cmd = InteractionCommand {
+   |                       ^^^^^^^^^^^^^^^^^^ missing `data`
+
+error[E0063]: missing field `data` in initializer of `InteractionComponent`
+  --> src/core/events/interaction/mod.rs:67:29
+   |
+67 |             let component = InteractionComponent {
+   |                             ^^^^^^^^^^^^^^^^^^^^ missing `data`
+
+error[E0277]: the `?` operator can only be applied to values that implement `Try`
+  --> src/core/replay_queue/process.rs:50:17
+   |
+50 |             } = ctx.replay_queue.peek().await?;
+   |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the `?` operator cannot be applied to type `data::ReplayData`
+   |
+help: the trait `Try` is not implemented for `data::ReplayData`
+  --> src/core/replay_queue/data.rs:12:1
+   |
+12 | pub struct ReplayData {
+   | ^^^^^^^^^^^^^^^^^^^^^
+
+error[E0277]: the `?` operator can only be applied to values that implement `Try`
+  --> src/core/replay_queue/process.rs:60:21
+   |
+60 |                     ctx.replay_queue.reset_peek().await?;
+   |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the `?` operator cannot be applied to type `()`
+   |
+   = help: the trait `Try` is not implemented for `()`
+
+error[E0277]: the `?` operator can only be applied to values that implement `Try`
+  --> src/core/replay_queue/process.rs:75:29
+   |
+75 | ...                   ctx.replay_queue.reset_peek().await?;
+   |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the `?` operator cannot be applied to type `()`
+   |
+   = help: the trait `Try` is not implemented for `()`
+
+error[E0277]: the `?` operator can only be applied to values that implement `Try`
+  --> src/core/replay_queue/process.rs:87:25
+   |
+87 |                         ctx.replay_queue.reset_peek().await?;
+   |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the `?` operator cannot be applied to type `()`
+   |
+   = help: the trait `Try` is not implemented for `()`
+
+error[E0277]: the `?` operator can only be applied to values that implement `Try`
+  --> src/core/replay_queue/process.rs:97:21
+   |
+97 |                     ctx.replay_queue.reset_peek().await?;
+   |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the `?` operator cannot be applied to type `()`
+   |
+   = help: the trait `Try` is not implemented for `()`
+
+error[E0277]: the `?` operator can only be applied to values that implement `Try`
+   --> src/core/replay_queue/process.rs:103:13
+    |
+103 |             ctx.replay_queue.set_status(ReplayStatus::Downloading).await?;
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the `?` operator cannot be applied to type `()`
+    |
+    = help: the trait `Try` is not implemented for `()`
+
+error[E0277]: the `?` operator can only be applied to values that implement `Try`
+   --> src/core/replay_queue/process.rs:111:17
+    |
+111 |                 ctx.replay_queue.reset_peek().await?;
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the `?` operator cannot be applied to type `()`
+    |
+    = help: the trait `Try` is not implemented for `()`
+
+error[E0277]: the `?` operator can only be applied to values that implement `Try`
+   --> src/core/replay_queue/process.rs:139:21
+    |
+139 |                     ctx.replay_queue.reset_peek().await?;
+    |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the `?` operator cannot be applied to type `()`
+    |
+    = help: the trait `Try` is not implemented for `()`
+
+error[E0277]: the `?` operator can only be applied to values that implement `Try`
+   --> src/core/replay_queue/process.rs:174:13
+    |
+174 | /             ctx.replay_queue
+175 | |                 .set_status(ReplayStatus::Rendering(0))
+176 | |                 .await?;
+    | |_______________________^ the `?` operator cannot be applied to type `()`
+    |
+    = help: the trait `Try` is not implemented for `()`
+
+error[E0277]: the `?` operator can only be applied to values that implement `Try`
+   --> src/core/replay_queue/process.rs:195:33
+    |
+195 | ...                   ctx.replay_queue.reset_peek().await?;
+    |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the `?` operator cannot be applied to type `()`
+    |
+    = help: the trait `Try` is not implemented for `()`
+
+error[E0599]: no method named `read_to_string` found for struct `tokio::process::ChildStderr` in the current scope
+    --> src/core/replay_queue/process.rs:204:43
+     |
+ 204 | ...                   if stderr.read_to_string(&mut res).await.is_ok() {
+     |                                 ^^^^^^^^^^^^^^
+     |
+    ::: /home/serverx/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.51.0/src/io/util/async_read_ext.rs:1404:12
+     |
+1404 |         fn read_to_string<'a>(&'a mut self, dst: &'a mut String) -> ReadToString<'a, Self>
+     |            -------------- the method is available for `tokio::process::ChildStderr` here
+     |
+     = help: items from traits can only be used if the trait is in scope
+help: trait `AsyncReadExt` which provides `read_to_string` is implemented but not in scope; perhaps you want to import it
+     |
+   1 + use tokio::io::AsyncReadExt;
+     |
+help: there is a method `read_to_end` with a similar name
+     |
+ 204 -                                 if stderr.read_to_string(&mut res).await.is_ok() {
+ 204 +                                 if stderr.read_to_end(&mut res).await.is_ok() {
+     |
+
+error[E0282]: type annotations needed
+   --> src/core/replay_queue/process.rs:204:36
+    |
+204 | ...                   if stderr.read_to_string(&mut res).await.is_ok() {
+    |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ cannot infer type
+
+error[E0277]: the `?` operator can only be applied to values that implement `Try`
+   --> src/core/replay_queue/process.rs:220:21
+    |
+220 |                     ctx.replay_queue.reset_peek().await?;
+    |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the `?` operator cannot be applied to type `()`
+    |
+    = help: the trait `Try` is not implemented for `()`
+
+error[E0277]: the `?` operator can only be applied to values that implement `Try`
+   --> src/core/replay_queue/process.rs:235:21
+    |
+235 |                     ctx.replay_queue.reset_peek().await?;
+    |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the `?` operator cannot be applied to type `()`
+    |
+    = help: the trait `Try` is not implemented for `()`
+
+error[E0277]: the `?` operator can only be applied to values that implement `Try`
+   --> src/core/replay_queue/process.rs:249:21
+    |
+249 |                     ctx.replay_queue.reset_peek().await?;
+    |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the `?` operator cannot be applied to type `()`
+    |
+    = help: the trait `Try` is not implemented for `()`
+
+error[E0277]: the `?` operator can only be applied to values that implement `Try`
+   --> src/core/replay_queue/process.rs:266:21
+    |
+266 |                     ctx.replay_queue.reset_peek().await?;
+    |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the `?` operator cannot be applied to type `()`
+    |
+    = help: the trait `Try` is not implemented for `()`
+
+error[E0277]: the `?` operator can only be applied to values that implement `Try`
+   --> src/core/replay_queue/process.rs:275:13
+    |
+275 |             ctx.replay_queue.set_status(ReplayStatus::Uploading).await?;
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the `?` operator cannot be applied to type `()`
+    |
+    = help: the trait `Try` is not implemented for `()`
+
+error[E0277]: the `?` operator can only be applied to values that implement `Try`
+   --> src/core/replay_queue/process.rs:289:21
+    |
+289 |                     ctx.replay_queue.reset_peek().await?;
+    |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the `?` operator cannot be applied to type `()`
+    |
+    = help: the trait `Try` is not implemented for `()`
+
+error[E0277]: the `?` operator can only be applied to values that implement `Try`
+   --> src/core/replay_queue/process.rs:300:21
+    |
+300 |                     ctx.replay_queue.reset_peek().await?;
+    |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the `?` operator cannot be applied to type `()`
+    |
+    = help: the trait `Try` is not implemented for `()`
+
+error[E0277]: the `?` operator can only be applied to values that implement `Try`
+   --> src/core/replay_queue/process.rs:315:13
+    |
+315 |             ctx.replay_queue.reset_peek().await?;
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the `?` operator cannot be applied to type `()`
+    |
+    = help: the trait `Try` is not implemented for `()`
+
+error[E0599]: no method named `stars` found for struct `rosu_pp::Beatmap` in the current scope
+   --> src/core/replay_queue/process.rs:384:21
+    |
+384 |     let stars = map.stars().mods(replay.mods).calculate().stars;
+    |                     ^^^^^ method not found in `rosu_pp::Beatmap`
+    |
+    = help: items from traits can only be used if the trait is implemented and in scope
+note: `util::ext::map::BeatmapExt` defines an item `stars`, perhaps you need to implement it
+   --> src/util/ext/map.rs:3:1
+    |
+  3 | pub trait BeatmapExt: Send + Sync {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0308]: `if` and `else` have incompatible types
+  --> src/pagination/mod.rs:93:13
+   |
+88 |           let response_raw = if start_by_callback {
+   |  ____________________________-
+89 | |             command.callback(&ctx, builder, false).await?;
+90 | |
+91 | |             ctx.interaction().response(&command.token).await?
+   | |             ------------------------------------------------- expected because of this
+92 | |         } else {
+93 | |             command.update(&ctx, &builder).await?
+   | |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `Response<Message>`, found `Message`
+94 | |         };
+   | |_________- `if` and `else` have incompatible types
+   |
+   = note: expected struct `twilight_http::Response<twilight_model::channel::Message>`
+              found struct `twilight_model::channel::Message`
+
+error[E0615]: attempted to take value of method `interaction` on type `&context::Context`
+   --> src/util/ext/interaction_command.rs:118:27
+    |
+118 |         let mut req = ctx.interaction.update_response(token);
+    |                           ^^^^^^^^^^^ method, not a field
+    |
+help: use parentheses to call the method
+    |
+118 |         let mut req = ctx.interaction().update_response(token);
+    |                                      ++
+
+error[E0282]: type annotations needed
+   --> src/util/ext/interaction_command.rs:136:12
+    |
+136 |         Ok(req.await?.model().await?)
+    |            ^^^^^^^^^^ cannot infer type
+
+warning: use of deprecated field `twilight_model::application::command::Command::dm_permission`: use contexts instead
+  --> src/commands/danser/render_score.rs:18:1
+   |
+18 | #[msg_command(name = "Render score", dm_permission = false)]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this warning originates in the attribute macro `msg_command` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0063]: missing fields `contexts`, `integration_types` and `nsfw` in initializer of `twilight_model::application::command::Command`
+  --> src/commands/danser/render_score.rs:18:1
+   |
+18 | #[msg_command(name = "Render score", dm_permission = false)]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `contexts`, `integration_types` and `nsfw`
+   |
+   = note: this error originates in the attribute macro `msg_command` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0061]: this method takes 2 arguments but 1 argument was supplied
+    --> src/commands/help/mod.rs:131:18
+     |
+ 131 |                 .map_or_else(|| child.description.to_owned());
+     |                  ^^^^^^^^^^^--------------------------------- argument #2 is missing
+     |
+note: method defined here
+    --> /home/serverx/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/option.rs:1270:18
+     |
+1270 |     pub const fn map_or_else<U, D, F>(self, default: D, f: F) -> U
+     |                  ^^^^^^^^^^^
+help: provide the argument
+     |
+ 131 |                 .map_or_else(|| child.description.to_owned(), /* f */);
+     |                                                             +++++++++
+
+error[E0308]: mismatched types
+  --> src/util/ext/score.rs:71:33
+   |
+71 |             legacy_total_score: 0,
+   |                                 ^ expected `Option<u32>`, found integer
+   |
+   = note: expected enum `std::option::Option<u32>`
+              found type `{integer}`
+help: try wrapping the expression in `Some`
+   |
+71 |             legacy_total_score: Some(0),
+   |                                 +++++ +
+
+Some errors have detailed explanations: E0061, E0063, E0223, E0277, E0282, E0308, E0412, E0425, E0433...
+For more information about an error, try `rustc --explain E0061`.
+warning: `shishabot` (bin "shishabot") generated 2 warnings
+error: could not compile `shishabot` (bin "shishabot") due to 38 previous errors; 2 warnings emitted
