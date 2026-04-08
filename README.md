@@ -10,11 +10,13 @@ download and extract danser to ./data/danser
 
 (i renamed danser-cli to danser and danser to danser-gui, because i have a headless server but dont know if it matters)
 
+In default.json danser config change settings to whatever desired
+
 run "python3 upload.py" in fileserver/
 then "cargo run"
 
-pray
+pray 🙏
 
 ...
 
-PROFIT!!!!
+PROFIT!!!! 💸
