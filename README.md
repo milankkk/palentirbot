@@ -1,3 +1,5 @@
+***palentirbot***
+
 git clone
 
 follow these first: https://github.com/mezodev0/shishabot ---------> ALSO REPO OF ORIGINAL
