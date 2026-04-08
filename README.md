@@ -2,7 +2,7 @@
 
 git clone
 
-follow these first: https://github.com/mezodev0/shishabot ---------> ALSO REPO OF ORIGINAL
+follow these first: https://github.com/mezodev0/shishabot --------->  REPO OF ORIGINAL
 
 change fileserver python script to what port u want (default: 5555) and directory + upload_secret
 
