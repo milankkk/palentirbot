@@ -1,0 +1,49 @@
+use std::slice;
+
+use eyre::Result;
+use twilight_model::{
+    channel::Message,
+    id::{
+        marker::{ChannelMarker, MessageMarker},
+        Id,
+    },
+};
+
+use crate::{core::Context, util::builder::MessageBuilder};
+
+pub trait MessageExt {
+    async fn update(&self, ctx: &Context, builder: &MessageBuilder<'_>) -> Result<Message>;
+    async fn delete(&self, ctx: &Context) -> Result<()>;
+}
+
+impl MessageExt for (Id<MessageMarker>, Id<ChannelMarker>) {
+    async fn update(&self, ctx: &Context, builder: &MessageBuilder<'_>) -> Result<Message> {
+        let mut req = ctx.http.update_message(self.1, self.0);
+
+        if let Some(ref content) = builder.content {
+            req = req.content(Some(content.as_ref()));
+        }
+        if let Some(ref embed) = builder.embed {
+            req = req.embeds(Some(slice::from_ref(embed)));
+        }
+        if let Some(ref components) = builder.components {
+            req = req.components(Some(components));
+        }
+
+        Ok(req.await?.model().await?)
+    }
+
+    async fn delete(&self, ctx: &Context) -> Result<()> {
+        ctx.http.delete_message(self.1, self.0).await?;
+        Ok(())
+    }
+}
+
+impl MessageExt for Message {
+    async fn update(&self, ctx: &Context, builder: &MessageBuilder<'_>) -> Result<Message> {
+        (self.id, self.channel_id).update(ctx, builder).await
+    }
+    async fn delete(&self, ctx: &Context) -> Result<()> {
+        (self.id, self.channel_id).delete(ctx).await
+    }
+}
