@@ -128,7 +128,7 @@ impl ReplayQueue {
             let filename_opt = path
                 .file_name()
                 .and_then(OsStr::to_str)
-                .and_then(|name| name.split('.').next());
+                .and_then(|name: &str| name.split('.').next());
 
             let filename = match filename_opt {
                 Some(name) => name,
@@ -175,18 +175,16 @@ impl ReplayQueue {
             if time_points.end != 0 {
                 command.args(["-end", &time_points.end.to_string()]);
             }
-
-
-
             if let Some(pitch) = pitch {
-                command.args(["-pitch", &pitch.to_string()]);
+                let pitch_val: f64 = pitch;
+                command.args(["-pitch", &pitch_val.to_string()]);
             }
 
-            let output = command.spawn()?.wait_with_output().await?;
+            //let output = command.spawn()?.wait_with_output().await?;
 
-            warn!("danser exit code: {:?}", output.status.code());
-            warn!("danser stdout: {}", String::from_utf8_lossy(&output.stdout));
-            warn!("danser stderr: {}", String::from_utf8_lossy(&output.stderr));
+            //warn!("danser exit code: {:?}", output.status.code());
+            //warn!("danser stdout: {}", String::from_utf8_lossy(&output.stdout));
+            //warn!("danser stderr: {}", String::from_utf8_lossy(&output.stderr));
 
             info!("Started replay processing");
 
@@ -290,7 +288,7 @@ impl ReplayQueue {
             let mut file_path = config.paths.replays();
             file_path.push(format!("{filename}.mp4"));
 
-            info!("Started upload to shisha.mezo.xyz");
+            info!("Started upload to replay server");
             ctx.replay_queue.set_status(ReplayStatus::Uploading).await;
 
             let beatmap_link = format!("https://osu.ppy.sh/beatmapsets/{}", mapset_id);
@@ -321,10 +319,14 @@ impl ReplayQueue {
                 }
             };
 
-            info!("Finished upload to shisha.mezo.xyz");
+            info!("Finished upload to server");
 
-            let content = format!("<@{user}> your replay is ready! {link}");
+            //let content = format!("<@{user}> your replay is ready!\n{link}");
+            let watch_link = link.replacen("https://replays.insertdomainname.be/watch/", "https://replays.insertdomainname.be/", 1);
+            let content = format!("<@{user}> your replay is ready!\n[Replay]({link})\n[Raw(if you have issues, click here)](<{watch_link}>)");
+
             let builder = MessageBuilder::new().content(content);
+
 
             if let Err(err) = output_channel.create_message(&ctx, &builder).await {
                 let err = Report::from(err).wrap_err("failed to send video link");

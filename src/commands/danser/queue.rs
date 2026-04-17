@@ -2,19 +2,20 @@ use std::{
     fmt::{Display, Formatter, Result as FmtResult, Write},
     sync::Arc,
 };
-
 use command_macros::SlashCommand;
 use eyre::Result;
 use time::OffsetDateTime;
 use twilight_interactions::command::{CommandModel, CreateCommand};
-use twilight_model::channel::message::embed::EmbedField;
+use twilight_model::channel::message::{embed::EmbedField, Message};
+use twilight_model::id::{marker::ChannelMarker, Id};
+use std::time::Duration;
 
 use crate::{
-    core::{BotConfig, Context, ReplayStatus},
+    core::{Context, ReplayStatus},
     util::{
         builder::{EmbedBuilder, MessageBuilder},
         interaction::InteractionCommand,
-        InteractionCommandExt,
+        InteractionCommandExt, // re-export path, not util::interaction
     },
 };
 
@@ -24,8 +25,11 @@ use crate::{
 /// Displays the current replay queue
 pub struct Queue;
 
-async fn slash_queue(ctx: Arc<Context>, command: InteractionCommand) -> Result<()> {
+pub async fn build_queue_embed(ctx: &Context) -> EmbedBuilder {
     let queue_guard = ctx.replay_queue.queue.lock().await;
+    let queue_guard: &std::collections::VecDeque<crate::core::replay_queue::ReplayData> = &*queue_guard;
+
+
     let status = *ctx.replay_queue.status.lock().await;
 
     let mut embed = EmbedBuilder::new()
@@ -33,61 +37,50 @@ async fn slash_queue(ctx: Arc<Context>, command: InteractionCommand) -> Result<(
         .timestamp(OffsetDateTime::now_utc());
 
     let mut iter = queue_guard.iter();
-
     if let Some(data) = iter.next() {
         let name = "Progress".to_owned();
-
         let value = format!(
-            "<@{user}>: {name}\n\
-            • Downloading: {downloading}\n\
-            • Rendering: {rendering}\n\
-            • Encoding: {encoding}\n\
-            • Uploading: {uploading}",
+            "**<@{user}>** | {map}\n\
+            Downloading: {downloading}\n\
+            Rendering: {rendering}\n\
+            Encoding: {encoding}\n\
+            Uploading: {uploading}",
             user = data.user,
-            name = data.replay_name(),
-            downloading = if let ReplayStatus::Downloading = status {
-                ProcessStatus::Running(None)
-            } else {
-                ProcessStatus::Done
+            map = data.replay_name(),
+            // REPLACE the four status lines inside format!() with:
+            downloading = match status {
+                ReplayStatus::Waiting => ProcessStatus::Waiting,
+                ReplayStatus::Downloading => ProcessStatus::Running(None),
+                _ => ProcessStatus::Done,
             },
             rendering = match status {
-                ReplayStatus::Downloading => ProcessStatus::Waiting,
-                ReplayStatus::Rendering(progress) => ProcessStatus::Running(Some(progress)),
+                ReplayStatus::Waiting | ReplayStatus::Downloading => ProcessStatus::Waiting,
+                ReplayStatus::Rendering(p) => ProcessStatus::Running(Some(p)),
                 _ => ProcessStatus::Done,
             },
             encoding = match status {
-                ReplayStatus::Encoding(progress) => ProcessStatus::Running(Some(progress)),
+                ReplayStatus::Waiting | ReplayStatus::Downloading | ReplayStatus::Rendering(_) => ProcessStatus::Waiting,
+                ReplayStatus::Encoding(p) => ProcessStatus::Running(Some(p)),
                 ReplayStatus::Uploading => ProcessStatus::Done,
                 _ => ProcessStatus::Waiting,
             },
-            uploading = if let ReplayStatus::Uploading = status {
-                ProcessStatus::Running(None)
-            } else {
-                ProcessStatus::Waiting
+            uploading = match status {
+                ReplayStatus::Uploading => ProcessStatus::Running(None),
+                _ => ProcessStatus::Waiting,
             },
+
         );
 
-        let mut fields = vec![EmbedField {
-            inline: false,
-            name,
-            value,
-        }];
+        let mut fields = vec![EmbedField { inline: false, name, value }];
 
         if let Some(data) = iter.next() {
             let name = "Upcoming".to_owned();
             let mut value = String::with_capacity(128);
-
             let _ = writeln!(value, "`2.` <@{}>: {}", data.user, data.replay_name());
-
             for (data, idx) in iter.zip(3..) {
                 let _ = writeln!(value, "`{idx}.` <@{}>: {}", data.user, data.replay_name());
             }
-
-            fields.push(EmbedField {
-                inline: false,
-                name,
-                value,
-            });
+            fields.push(EmbedField { inline: false, name, value });
         }
 
         embed = embed.fields(fields);
@@ -95,8 +88,133 @@ async fn slash_queue(ctx: Arc<Context>, command: InteractionCommand) -> Result<(
         embed = embed.description("The queue is empty");
     }
 
+    embed
+}
+
+pub async fn send_queue_status(ctx: Arc<Context>, channel_id: Id<ChannelMarker>) -> Result<()> {
+
+    let embed = build_queue_embed(&ctx).await.build();
+
+    let msg: Message = ctx
+        .http
+        .create_message(channel_id)
+        .embeds(&[embed])
+        .await?
+        .model()
+        .await?;
+
+    let message_id = msg.id;
+
+    tokio::spawn(async move {
+        let notify = Arc::clone(&ctx.replay_queue.notify);
+
+        loop {
+            // Wake on any status change, or after 5s as a fallback
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                notify.notified(),
+            ).await.ok();
+
+            // Read current state
+            let (is_empty, status) = {
+                let is_empty = {
+                    let q = ctx.replay_queue.queue.lock().await;
+                    let q: &std::collections::VecDeque<crate::core::ReplayData> = &*q;
+                    q.is_empty()
+                };
+                let status = *ctx.replay_queue.status.lock().await;
+                (is_empty, status)
+            };
+
+            let embed = build_queue_embed(&ctx).await.build();
+            let _ = ctx
+                .http
+                .update_message(channel_id, message_id)
+                .embeds(Some(&[embed]))
+                .await;
+
+            // Stop only after pop has completed (queue empty) and status is Waiting
+            if is_empty && matches!(status, ReplayStatus::Waiting) {
+                break;
+            }
+        }
+    });
+
+
+
+
+    Ok(())
+}
+
+async fn slash_queue(ctx: Arc<Context>, command: InteractionCommand) -> Result<()> {
+    let embed = build_queue_embed(&ctx).await;
     let builder = MessageBuilder::new().embed(embed);
     command.callback(&ctx, builder, false).await?;
+
+    let is_active = {
+        let is_empty = {
+            let q = ctx.replay_queue.queue.lock().await;
+            let q: &std::collections::VecDeque<crate::core::ReplayData> = &*q;
+            q.is_empty()
+        };
+        let status = *ctx.replay_queue.status.lock().await;
+        !is_empty || !matches!(status, ReplayStatus::Waiting)
+    };
+
+    if !is_active {
+        return Ok(());
+    }
+
+    // Fix 1: interaction() is a method call, not a field
+    // Fix 2: explicit Message type annotation to help inference
+    let msg: Message = ctx
+        .interaction()
+        .response(&command.token)
+        .await?
+        .model()
+        .await?;
+
+    let channel_id = msg.channel_id;
+    let message_id = msg.id;
+
+
+    tokio::spawn(async move {
+        let notify = Arc::clone(&ctx.replay_queue.notify);
+
+        loop {
+            // Wake on any status change, or after 5s as a fallback
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                notify.notified(),
+            ).await.ok();
+
+            // Read current state
+            let (is_empty, status) = {
+                let is_empty = {
+                    let q = ctx.replay_queue.queue.lock().await;
+                    let q: &std::collections::VecDeque<crate::core::ReplayData> = &*q;
+                    q.is_empty()
+                };
+                let status = *ctx.replay_queue.status.lock().await;
+                (is_empty, status)
+            };
+
+            let embed = build_queue_embed(&ctx).await.build();
+            let _ = ctx
+                .http
+                .update_message(channel_id, message_id)
+                .embeds(Some(&[embed]))
+                .await;
+
+            // Stop only after pop has completed (queue empty) and status is Waiting
+            if is_empty && matches!(status, ReplayStatus::Waiting) {
+                break;
+            }
+        }
+    });
+
+
+
 
     Ok(())
 }
@@ -109,14 +227,13 @@ enum ProcessStatus {
 
 impl Display for ProcessStatus {
     #[inline]
+    // Fix 4: explicit lifetime on Formatter
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         match self {
-            ProcessStatus::Done => write!(f, "{}", BotConfig::get().emojis.white_check_mark),
-            ProcessStatus::Running(Some(progress)) => {
-                write!(f, "{} ({progress}%)", BotConfig::get().emojis.man_running)
-            }
-            ProcessStatus::Running(None) => write!(f, "{}", BotConfig::get().emojis.man_running),
-            ProcessStatus::Waiting => write!(f, "{}", BotConfig::get().emojis.hourglass),
+            ProcessStatus::Done => write!(f, "✅"),
+            ProcessStatus::Running(Some(progress)) => write!(f, "🏃 {progress}%"),
+            ProcessStatus::Running(None) => write!(f, "🏃"),
+            ProcessStatus::Waiting => write!(f, "⏳"),
         }
     }
 }

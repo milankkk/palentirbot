@@ -1,18 +1,19 @@
 use std::collections::VecDeque;
-
+use std::sync::Arc;
 use tokio::sync::{
     mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
-    Mutex,
+    Mutex, Notify,
 };
 
-pub use self::data::*;
+pub use self::data::{ReplayData, ReplaySlim, ReplayStatus, TimePoints};
 
 mod data;
-mod process;
+pub mod process;
 
 pub struct ReplayQueue {
     pub queue: Mutex<VecDeque<ReplayData>>,
     pub status: Mutex<ReplayStatus>,
+    pub notify: Arc<Notify>,
     tx: UnboundedSender<()>,
     rx: Mutex<UnboundedReceiver<()>>,
 }
@@ -22,8 +23,8 @@ impl ReplayQueue {
         Self::default()
     }
 
-    pub async fn push(&self, data: ReplayData) {
-        self.queue.lock().await.push_back(data);
+    pub async fn push(&self, entry: ReplayData) {
+        self.queue.lock().await.push_back(entry);
         let _ = self.tx.send(());
     }
 
@@ -32,42 +33,32 @@ impl ReplayQueue {
     }
 
     pub async fn peek(&self) -> ReplayData {
-        trace!("Locking channel receiver...");
         let mut guard = self.rx.lock().await;
-        trace!("Locked receiver, awaiting entry...");
         let _ = guard.recv().await;
-        trace!("Received entry, locking queue...");
-        let queue_guard = self.queue.lock().await;
-        trace!("Locked queue");
-
-        queue_guard.front().unwrap().to_owned()
+        self.queue.lock().await.front().unwrap().to_owned()
     }
 
     pub async fn set_status(&self, status: ReplayStatus) {
-        trace!("Updating progress status to {status:?}...");
         *self.status.lock().await = status;
-        trace!("Updated progress status");
+        self.notify.notify_waiters();
     }
 
     pub async fn reset_peek(&self) {
-        trace!("Resetting peek...");
         *self.status.lock().await = ReplayStatus::Waiting;
-        trace!("Peek reset, popping queue...");
-        let _ = self.pop().await;
-        trace!("Popped queue");
+        self.pop().await;
+        self.notify.notify_waiters();
     }
 }
 
 impl Default for ReplayQueue {
-    #[inline]
     fn default() -> Self {
         let (tx, rx) = unbounded_channel();
-
         Self {
             queue: Mutex::new(VecDeque::new()),
+            status: Mutex::new(ReplayStatus::Waiting),
+            notify: Arc::new(Notify::new()),
             tx,
             rx: Mutex::new(rx),
-            status: Mutex::new(ReplayStatus::Waiting),
         }
     }
 }

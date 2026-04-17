@@ -2,7 +2,7 @@
 name = "palentirbot"
 version = "0.1.1"
 authors = ["mezodev0", "MaxOhn <ohn.m@hotmail.de>", "milankkk"]
-edition = "2026"
+edition = "2021"
 
 [dependencies]
 base64 = { version = "0.13.0" }

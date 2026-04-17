@@ -7,6 +7,7 @@ use rosu_v2::prelude::Score;
 use time::{Date, OffsetDateTime, PrimitiveDateTime, Time};
 use twilight_interactions::command::CommandInputData;
 use twilight_model::{channel::message::embed::Embed, util::Timestamp};
+use super::queue::send_queue_status;
 
 use crate::{
     core::{replay_queue::ReplaySlim, BotConfig, Context, ReplayData, TimePoints},
@@ -136,10 +137,12 @@ async fn render_from_msg(ctx: Arc<Context>, mut command: InteractionCommand) -> 
 
     ctx.replay_queue.push(replay_data).await;
 
+
     let builder = MessageBuilder::new().embed("Replay has been pushed to the queue!");
     command.update(&ctx, &builder).await?;
-
+    send_queue_status(Arc::clone(&ctx), output_channel).await?;
     Ok(())
+
 }
 
 struct ParsedEmbed {
