@@ -73,7 +73,6 @@ pub enum ReplayStatus {
     Waiting,
     Downloading,
     Rendering(u8),
-    Encoding(u8),
     Uploading,
 }
 

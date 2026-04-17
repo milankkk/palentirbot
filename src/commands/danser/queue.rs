@@ -41,14 +41,12 @@ pub async fn build_queue_embed(ctx: &Context) -> EmbedBuilder {
     if let Some(data) = iter.next() {
         let name = "Progress".to_owned();
         let value = format!(
-            "**<@{user}>** | {map}\n\
+            "**<@{user}>**\n`{map}`\n\
             Downloading: {downloading}\n\
             Rendering: {rendering}\n\
-            Encoding: {encoding}\n\
             Uploading: {uploading}",
             user = data.user,
             map = data.replay_name(),
-            // REPLACE the four status lines inside format!() with:
             downloading = match status {
                 ReplayStatus::Waiting => ProcessStatus::Waiting,
                 ReplayStatus::Downloading => ProcessStatus::Running(None),
@@ -59,20 +57,18 @@ pub async fn build_queue_embed(ctx: &Context) -> EmbedBuilder {
                 ReplayStatus::Rendering(p) => ProcessStatus::Running(Some(p)),
                 _ => ProcessStatus::Done,
             },
-            encoding = match status {
-                ReplayStatus::Waiting | ReplayStatus::Downloading | ReplayStatus::Rendering(_) => ProcessStatus::Waiting,
-                ReplayStatus::Encoding(p) => ProcessStatus::Running(Some(p)),
-                ReplayStatus::Uploading => ProcessStatus::Done,
-                _ => ProcessStatus::Waiting,
-            },
             uploading = match status {
                 ReplayStatus::Uploading => ProcessStatus::Running(None),
                 _ => ProcessStatus::Waiting,
-            },
-
+            }
         );
 
-        let mut fields = vec![EmbedField { inline: false, name, value }];
+        let mut fields = vec![EmbedField {
+            inline: false,
+            name,
+            value,
+        }];
+
 
         if let Some(data) = iter.next() {
             let name = "Upcoming".to_owned();
@@ -134,10 +130,12 @@ pub async fn send_queue_status(ctx: Arc<Context>, channel_id: Id<ChannelMarker>)
                 .embeds(Some(&[embed]))
                 .await;
 
-            // Stop only after pop has completed (queue empty) and status is Waiting
+            // Stop only after pop has completed: queue empty and status is Waiting
             if is_empty && matches!(status, ReplayStatus::Waiting) {
+                let _ = ctx.http.delete_message(channel_id, message_id).await;
                 break;
             }
+
         }
     });
 
@@ -206,11 +204,12 @@ async fn slash_queue(ctx: Arc<Context>, command: InteractionCommand) -> Result<(
                 .update_message(channel_id, message_id)
                 .embeds(Some(&[embed]))
                 .await;
-
-            // Stop only after pop has completed (queue empty) and status is Waiting
+            // Stop only after pop has completed: queue empty and status is Waiting
             if is_empty && matches!(status, ReplayStatus::Waiting) {
+                let _ = ctx.http.delete_message(channel_id, message_id).await;
                 break;
             }
+
         }
     });
 

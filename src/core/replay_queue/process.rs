@@ -13,6 +13,7 @@ use rosu_v2::prelude::GameModsLegacy;
 use bytes::Bytes;
 use eyre::{Context as _, ContextCompat, Report, Result};
 use tokio::io::{AsyncReadExt, BufReader};
+use tokio::io::AsyncBufReadExt;
 use rosu_pp::Beatmap;
 
 use tokio::{
@@ -162,10 +163,7 @@ impl ReplayQueue {
                 .arg(filename)
                 .arg("-preciseprogress")
                 .stderr(Stdio::piped())
-                .stdout(Stdio::piped())
-                .spawn()?
-                .wait_with_output()
-                .await?;
+                .stdout(Stdio::piped());
             
 
             // conditional args
@@ -180,11 +178,6 @@ impl ReplayQueue {
                 command.args(["-pitch", &pitch_val.to_string()]);
             }
 
-            //let output = command.spawn()?.wait_with_output().await?;
-
-            //warn!("danser exit code: {:?}", output.status.code());
-            //warn!("danser stdout: {}", String::from_utf8_lossy(&output.stdout));
-            //warn!("danser stderr: {}", String::from_utf8_lossy(&output.stderr));
 
             info!("Started replay processing");
 
@@ -195,49 +188,46 @@ impl ReplayQueue {
             match command.spawn() {
                 Ok(mut child) => {
                     let stdout = child.stdout.take().expect("missing stdout on child");
-                    let reader = BufReader::new(stdout);
+                    let stderr = child.stderr.take().expect("missing stderr on child");
 
-                    tokio::select! {
-                        _ = read_danser_progress(&ctx, reader) => {}
-                        child_res = child.wait() => {
-                            trace!("Danser finished, stopped checking its logs");
+                    let stdout_reader = tokio::io::BufReader::new(stdout);
+                    let stderr_reader = tokio::io::BufReader::new(stderr);
 
-                            if let Err(err) = child_res {
-                                let err = Report::from(err).wrap_err("failed to run danser command");
-                                warn!("{err:?}");
+                    // Spawn background tasks to constantly drain both pipes so they never fill up
+                    let ctx1 = ctx.clone();
+                    tokio::spawn(async move {
+                        read_danser_progress(ctx1, stdout_reader).await;
+                    });
 
-                                let content = "Failed to run danser on the replay";
-                                let _ = input_channel.error(&ctx, content).await?;
+                    let ctx2 = ctx.clone();
+                    tokio::spawn(async move {
+                        read_danser_progress(ctx2, stderr_reader).await;
+                    });
 
-                                ctx.replay_queue.reset_peek().await;
-                                continue;
-                            }
+                    // Now we can safely wait for the process to finish
+                    let childres = child.wait().await;
+                    tracing::trace!("Danser finished");
 
-                            if let Some(mut stderr) = child.stderr {
-                                let mut res = String::new();
-
-                                trace!("Reading danser stderr...");
-
-                                if AsyncReadExt::read_to_string(&mut stderr, &mut res).await.is_ok() {
-                                    warn!("danser stderr: {res}");
-                                }
-
-                                trace!("Finished danser stderr");
-                            }
-                        },
+                    if let Err(err) = childres {
+                        let err = eyre::Report::from(err).wrap_err("failed to run danser command");
+                        tracing::warn!("{:?}", err);
+                        let content = "Failed to run danser on the replay";
+                        let _ = input_channel.error(&ctx, content).await;
+                        ctx.replay_queue.reset_peek().await;
+                        continue;
                     }
                 }
                 Err(err) => {
-                    let err = Report::from(err).wrap_err("failed to start danser command");
-                    warn!("{err:?}");
-
+                    let err = eyre::Report::from(err).wrap_err("failed to start danser command");
+                    tracing::warn!("{:?}", err);
                     let content = "Failed to run danser on the replay";
-                    let _ = input_channel.error(&ctx, content).await?;
-
+                    let _ = input_channel.error(&ctx, content).await;
                     ctx.replay_queue.reset_peek().await;
                     continue;
                 }
             }
+
+
 
             info!("Finished replay processing");
 
@@ -338,11 +328,46 @@ impl ReplayQueue {
     }
 }
 
-// [rest of functions unchanged: read_danser_progress, download_mapset, etc.]
-async fn read_danser_progress(_ctx: &Context, _reader: BufReader<ChildStdout>) {
-    // ... [the read_danser_progress function stays exactly as you had it]
-    // Implementation unchanged
+async fn read_danser_progress<R: tokio::io::AsyncRead + Unpin>(
+    ctx: std::sync::Arc<crate::core::Context>,
+    mut reader: tokio::io::BufReader<R>
+) {
+    use tokio::io::AsyncReadExt;
+
+    let mut buf = [0u8; 1024];
+    let mut text_buffer = String::new();
+
+    while let Ok(n) = reader.read(&mut buf).await {
+        if n == 0 { break; } // EOF
+
+        let chunk = String::from_utf8_lossy(&buf[..n]);
+        text_buffer.push_str(&chunk);
+
+        let mut lines: Vec<&str> = text_buffer.split(|c| c == '\r' || c == '\n').collect();
+        let incomplete = lines.pop().unwrap_or("").to_string();
+
+        for line in lines {
+            // Find "Progress: X%" exactly as it appeared in your log
+            if let Some(idx) = line.find("Progress: ") {
+                let remainder = &line[idx + 10..];
+                if let Some(pct_str) = remainder.split('%').next() {
+                    if let Ok(mut progress) = pct_str.parse::<u8>() {
+                        progress = progress.min(100);
+                        *ctx.replay_queue.status.lock().await = crate::core::ReplayStatus::Rendering(progress);
+                        ctx.replay_queue.notify.notify_waiters();
+                    }
+                }
+            }
+        }
+        text_buffer = incomplete;
+    }
 }
+
+
+
+
+
+
 
 #[derive(Debug)]
 struct MapsetDownloadError {
