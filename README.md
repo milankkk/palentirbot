@@ -15,7 +15,7 @@ download and extract danser to ./data/danser
 In default.json danser config change settings to whatever desired
 
 run "python3 upload.py" in fileserver/
-then "cargo run"
+then "cargo run --release" (--release otherwise your bot wont work outside dev server)
 
 pray 🙏
 
