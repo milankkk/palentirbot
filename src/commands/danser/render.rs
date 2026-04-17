@@ -186,8 +186,10 @@ pub async fn slash_render(ctx: Arc<Context>, mut command: InteractionCommand) ->
 
     let content = "Replay has been added to the queue!";
     let builder = MessageBuilder::new().embed(content);
+
     command.update(&ctx, &builder).await?;
     send_queue_status(Arc::clone(&ctx), output_channel).await?;
     Ok(())
+
 
 }

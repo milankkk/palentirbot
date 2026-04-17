@@ -2,6 +2,7 @@ use std::{
     fmt::{Display, Formatter, Result as FmtResult, Write},
     sync::Arc,
 };
+
 use command_macros::SlashCommand;
 use eyre::Result;
 use time::OffsetDateTime;
