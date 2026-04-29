@@ -703,8 +703,8 @@ fn get_title() -> Result<String> {
 
 fn calculate_warmup_delay_secs(file_size_bytes: u64) -> u64 {
     const UPLOAD_MBPS: f64 = 40.0;
-    const EFFICIENCY: f64 = 0.85;
-    const FRACTION: f64 = 0.75;
+    const EFFICIENCY: f64 = 0.90;
+    const FRACTION: f64 = 0.95;
     const MIN_WAIT_SECS: f64 = 5.0;
     const EXTRA_BUFFER_SECS: f64 = 3.0;
     const MAX_WAIT_SECS: f64 = 45.0;
