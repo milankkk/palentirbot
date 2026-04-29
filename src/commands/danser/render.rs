@@ -76,51 +76,27 @@ pub async fn slash_render(ctx: Arc<Context>, mut command: InteractionCommand) ->
 
     let output_channel = match command.guild_id {
         Some(guild) => {
-            // Returns the output channel if:
-            // - Settings of the server are stored
-            // - The server's input channels include the current channel
-            // - The server's output channel has been configured
-            // - The server is not blacklisted
-
             let (blacklisted, reason_opt) = ctx.psql()._is_server_blacklisted(guild).await?;
             if blacklisted {
                 let mut content = String::from("Seems like this server has been blacklisted.");
                 if let Some(reason) = reason_opt {
-                    let _ = write!(content, "\nReason: {reason}");
+                    let _ = write!(content, " {reason}");
                 }
                 command.error_callback(&ctx, content, false).await?;
                 return Ok(());
             }
 
-            let check = ctx.guild_settings(guild, |server| {
-                server
-                    .input_channels
-                    .contains(&command.channel_id)
-                    .then_some(server.output_channel)
-                    .ok_or(())
-            });
+            // Always reply in the channel the command was used in
+            command.channel_id
 
-            match check {
-                Some(Ok(Some(output_channel))) => output_channel,
-                Some(Err(_)) => {
-                    let content = "This channel is not setup as input channel.\n\
-                        Check out `/setup` for more info.";
-                    command.error_callback(&ctx, content, true).await?;
-
-                    return Ok(());
-                }
-                Some(Ok(None)) | None => {
-                    let content =
-                        "Looks like this server has not setup their output channel yet.\n\
-                        Be sure to use `/setup` first.";
-                    command.error_callback(&ctx, content, false).await?;
-
-                    return Ok(());
-                }
-            }
+            // Uncomment below to use a configured output channel instead:
+            // ctx.guild_settings(guild, |server| server.output_channel)
+            //     .flatten()
+            //     .unwrap_or(command.channel_id)
         }
         None => command.channel_id,
     };
+
 
     command.defer(&ctx, false).await?;
 
@@ -180,6 +156,7 @@ pub async fn slash_render(ctx: Arc<Context>, mut command: InteractionCommand) ->
             end: end_in_seconds,
         },
         user: command.user_id()?,
+        title: None,
     };
 
     ctx.replay_queue.push(replay_data).await;

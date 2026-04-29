@@ -17,6 +17,7 @@ pub struct ReplayData {
     pub replay: ReplaySlim,
     pub time_points: TimePoints,
     pub user: Id<UserMarker>,
+    pub title: Option<String>,
 }
 
 impl ReplayData {

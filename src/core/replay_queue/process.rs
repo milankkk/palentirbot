@@ -15,7 +15,7 @@ use eyre::{Context as _, ContextCompat, Report, Result};
 use tokio::io::{AsyncReadExt, BufReader};
 use tokio::io::AsyncBufReadExt;
 use rosu_pp::Beatmap;
-
+use crate::util::builder::EmbedBuilder;
 use tokio::time::{sleep, Duration};
 use crate::util::MessageExt;
 
@@ -53,6 +53,7 @@ impl ReplayQueue {
                 replay,
                 time_points,
                 user,
+                title,
             } = ctx.replay_queue.peek().await;
 
             let replay_hash = match replay.replay_hash.as_deref() {
@@ -279,19 +280,23 @@ impl ReplayQueue {
                 format!("{} [{}]", base_name, difficulty)
             };
 
-            let video_title = match create_title(&replay, map_path.clone(), &formatted_title).await {
-                Ok(title) => title,
-                Err(err) => {
-                    let err = err.wrap_err("failed to create title");
-                    warn!("{err:?}");
+            let TitleResult { title: video_title, pp, max_pp, max_possible_combo, stars, acc } =
+                match create_title(&replay, map_path.clone(), &title).await {
+                    Ok(result) => result,
+                    Err(err) => {
+                        let err = err.wrap_err("failed to create title");
+                        warn!("{err:?}");
+                        let content = "There was an error while trying to create the video title";
+                        let _ = input_channel.error(&ctx, content).await;
+                        ctx.replay_queue.reset_peek().await;
+                        continue;
+                    }
+                };
+            // Store the formatted title back so the queue embed can display it
+            ctx.replay_queue.queue.lock().await
+                .front_mut()
+                .map(|d| d.title = Some(video_title.clone()));
 
-                    let content = "There was an error while trying to create the video title";
-                    let _ = input_channel.error(&ctx, content).await?;
-
-                    ctx.replay_queue.reset_peek().await;
-                    continue;
-                }
-            };
 
             // 1. Parse the components out of: "[7.05⭐] WhiteCat | DECO*27 - First Storm +HDDT 98.5%"
             let without_prefix = video_title.trim_start_matches('[');
@@ -406,6 +411,60 @@ impl ReplayQueue {
 
             //let content = format!("<@{user}> your replay is ready!\n{link}");
             //let watch_link = link.replacen("https://replays.insertdomainname.be/watch/", "https://replays.insertdomainname.be/", 1);
+            // Send replay details embed before the link
+            let legacy_mods = GameModsLegacy::from_bits(replay.mods);
+            let mods_str = if legacy_mods.is_empty() {
+                String::new()
+            } else {
+                format!("+{}", legacy_mods)
+            };
+
+            let player = replay.player_name.as_deref().unwrap_or("unknown player");
+            let acc = replay.accuracy();
+
+            use twilight_model::channel::message::embed::EmbedField;
+
+            let embed = EmbedBuilder::new()
+                //.title(format!("{stars}⭐ {player} | {title} {mods_str} ({acc}%"))
+                .title(video_title)
+                .url(format!("https://osu.ppy.sh/beatmapsets/{mapset_id}"))
+                .fields(vec![
+                    EmbedField {
+                        inline: true,
+                        name: "Accuracy".to_owned(),
+                        value: format!("{acc}%"),
+                    },
+                    EmbedField {
+                        inline: true,
+                        name: "Max Combo".to_owned(),
+                        value: format!("{}/{}x", replay.max_combo, max_possible_combo),
+                    },
+
+                    EmbedField {
+                        inline: true,
+                        name: "pp".to_owned(),
+                        value: format!("{:.2}pp / {:.2}pp", pp, max_pp),
+                    },
+                    EmbedField {
+                        inline: false,
+                        name: "Hits".to_owned(),
+                        value: format!(
+                            "{} x300 | {} x100 | {} x50 | {} xMiss",
+                            replay.count_300, replay.count_100, replay.count_50, replay.count_miss
+                        ),
+                    },
+                ])
+                .build();
+
+
+            let embed_builder = MessageBuilder::new().embed(embed);
+            if let Err(err) = output_channel.create_message(&ctx, &embed_builder).await {
+                warn!("{:?}", Report::from(err).wrap_err("failed to send replay details embed"));
+            }
+
+            // existing code continues below:
+            // let content = format!("{user} your replay is ready! ...
+
             let link = link.replacen(".mp4", "", 1);
             let content = format!("<@{user}> [Replay]({link})");
 
@@ -530,27 +589,61 @@ async fn request_mapset(ctx: &Context, mapset_id: u32) -> Result<Bytes> {
     Err(Report::from(MapsetDownloadError { kitsu, chimu, nerinyan, catboy }))
 }
 
-async fn create_title(replay: &ReplaySlim, map_path: PathBuf, map_title: &str) -> Result<String> {
+struct TitleResult {
+    title: String,
+    pp: f64,
+    max_pp: f64,
+    max_possible_combo: u32,
+    stars: f64,
+    acc: f32,
+}
+
+async fn create_title(replay: &ReplaySlim, map_path: PathBuf, map_title: &str) -> Result<TitleResult> {
     let map = Beatmap::from_path(&map_path)
         .with_context(|| format!("failed to parse map at {map_path:?}"))?;
 
-    let stars = rosu_pp::Difficulty::new().mods(replay.mods as u32).calculate(&map).stars();
+    let difficulty = rosu_pp::Difficulty::new()
+        .mods(replay.mods as u32)
+        .calculate(&map);
 
+    let stars = difficulty.stars();
+    let max_possible_combo = difficulty.max_combo();
+
+    let pp = rosu_pp::Performance::new(&map)
+        .mods(replay.mods as u32)
+        .n300(replay.count_300 as u32)
+        .n100(replay.count_100 as u32)
+        .n50(replay.count_50 as u32)
+        .misses(replay.count_miss as u32)
+        .combo(replay.max_combo as u32)
+        .calculate()
+        .pp();
+
+    let max_pp = rosu_pp::Performance::new(&map)
+        .mods(replay.mods as u32)
+        .calculate()
+        .pp();
 
     let stars = (stars * 100.0).round() / 100.0;
-    let player = replay.player_name.as_deref().unwrap_or("<unknown player>");
+    let player = replay.player_name.as_deref().unwrap_or("unknown player");
     let acc = replay.accuracy();
-
     let legacy = GameModsLegacy::from_bits(replay.mods);
     let mods = if legacy.is_empty() {
         String::new()
     } else {
-        format!(" +{} ", legacy)
+        format!(" +{}", legacy)
     };
 
-
-    Ok(format!("[{stars}⭐] {player} | {map_title} {mods}{acc}%"))
+    Ok(TitleResult {
+        title: format!("[{stars}⭐] {player} | {map_title}{mods} ({acc}%)"),
+        pp,
+        max_pp,
+        max_possible_combo,
+        stars,
+        acc,
+    })
 }
+
 
 async fn get_beatmap_osu_file(mapset_id: u32, map_without_artist: &str) -> Result<String> {
     let mut items_dir = BotConfig::get().paths.songs();

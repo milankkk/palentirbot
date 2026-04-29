@@ -46,7 +46,7 @@ pub async fn build_queue_embed(ctx: &Context) -> EmbedBuilder {
             Rendering: {rendering}\n\
             Uploading: {uploading}",
             user = data.user,
-            map = data.replay_name(),
+            map = data.title.clone().unwrap_or_else(|| data.replay_name().into_owned()),
             downloading = match status {
                 ReplayStatus::Waiting => ProcessStatus::Waiting,
                 ReplayStatus::Downloading => ProcessStatus::Running(None),
@@ -73,9 +73,9 @@ pub async fn build_queue_embed(ctx: &Context) -> EmbedBuilder {
         if let Some(data) = iter.next() {
             let name = "Upcoming".to_owned();
             let mut value = String::with_capacity(128);
-            let _ = writeln!(value, "`2.` <@{}>: {}", data.user, data.replay_name());
+            let _ = writeln!(value, "`2.` <@{}>: {}", data.user, data.title.clone().unwrap_or_else(|| data.replay_name().into_owned()));
             for (data, idx) in iter.zip(3..) {
-                let _ = writeln!(value, "`{idx}.` <@{}>: {}", data.user, data.replay_name());
+                let _ = writeln!(value, "`{idx}.` <@{}>: {}", data.user, data.title.clone().unwrap_or_else(|| data.replay_name().into_owned()));
             }
             fields.push(EmbedField { inline: false, name, value });
         }

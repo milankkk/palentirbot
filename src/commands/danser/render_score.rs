@@ -133,6 +133,7 @@ async fn render_from_msg(ctx: Arc<Context>, mut command: InteractionCommand) -> 
         replay,
         user,
         time_points: TimePoints { start: 0, end: 0 },
+        title: None,
     };
 
     ctx.replay_queue.push(replay_data).await;
