@@ -202,9 +202,9 @@ impl CustomClient {
     }
 
     pub async fn download_kitsu_mapset(&self, mapset_id: u32) -> Result<Bytes> {
-        let url = format!("https://osu.direct/api/d/{mapset_id}");
+        let url = format!("https://osu.direct/d/{mapset_id}");
         let bytes = self.make_get_request(url, Site::DownloadKitsu).await?;
-        ensure!(bytes.starts_with(b"PK"), "kitsu returned invalid data");
+        ensure!(bytes.starts_with(b"PK"), "osu.direct returned invalid data");
         Ok(bytes)
     }
 

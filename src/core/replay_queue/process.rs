@@ -16,6 +16,9 @@ use tokio::io::{AsyncReadExt, BufReader};
 use tokio::io::AsyncBufReadExt;
 use rosu_pp::Beatmap;
 
+use tokio::time::{sleep, Duration};
+use crate::util::MessageExt;
+
 use tokio::{
     process::{ChildStdout, Command},
 };
@@ -261,7 +264,22 @@ impl ReplayQueue {
             let mut map_path = config.paths.songs();
             map_path.push(format!("{mapset_id}/{map_osu_file}"));
 
-            let video_title = match create_title(&replay, map_path.clone(), &title).await {
+            // --- NEW PARSING LOGIC HERE ---
+                        // Extract the song name and difficulty from the `.osu` filename
+            let (base_name, difficulty) = map_osu_file
+                .strip_suffix(".osu")
+                .and_then(|s| s.rsplit_once(" ["))
+                .map(|(left, right)| (left.to_string(), right.trim_end_matches(']').to_string()))
+                .unwrap_or_else(|| (title.clone(), String::new()));
+
+            // Create a cleaner display title (e.g. "Ava Max - So Am I (Nightcore Cut Ver) [Outcast]")
+            let formatted_title = if difficulty.is_empty() {
+                base_name
+            } else {
+                format!("{} [{}]", base_name, difficulty)
+            };
+
+            let video_title = match create_title(&replay, map_path.clone(), &formatted_title).await {
                 Ok(title) => title,
                 Err(err) => {
                     let err = err.wrap_err("failed to create title");
@@ -275,24 +293,82 @@ impl ReplayQueue {
                 }
             };
 
-            let mut file_path = config.paths.replays();
-            file_path.push(format!("{filename}.mp4"));
+            // 1. Parse the components out of: "[7.05⭐] WhiteCat | DECO*27 - First Storm +HDDT 98.5%"
+            let without_prefix = video_title.trim_start_matches('[');
+            let (stars, rest) = without_prefix.split_once("⭐] ").unwrap_or(("0.00", without_prefix));
+            let (player, rest) = rest.split_once(" | ").unwrap_or(("Unknown", rest));
 
-            info!("Started upload to replay server");
+            let rest = rest.trim_end_matches('%');
+            let (rest, acc) = rest.rsplit_once(' ').unwrap_or((rest, "100.00"));
+
+            let (map_name, mods) = if let Some((m, md)) = rest.rsplit_once(" +") {
+                (m, md)
+            } else {
+                (rest, "NM")
+            };
+
+            // 2. Helper function to safely replace dots/spaces with underscores 
+            let sanitize = |s: &str| -> String {
+                let mut res = String::new();
+                let mut last_was_underscore = false;
+                for c in s.chars() {
+                    if c.is_ascii_alphanumeric() {
+                        res.push(c);
+                        last_was_underscore = false;
+                    } else if c == '-' {
+                        res.push('-');
+                        last_was_underscore = false;
+                    } else if !last_was_underscore {
+                        res.push('_');
+                        last_was_underscore = true;
+                    }
+                }
+                res.trim_matches(|c| c == '_' || c == '-').to_string()
+            };
+
+            // 3. Combine the sanitized values and add the replay hash at the end!
+            // We take the first 8 characters of the replay hash to keep the filename from getting too long.
+            //let hash_suffix = if replay_hash.len() > 8 { &replay_hash[..8] } else { replay_hash };
+            
+            use std::time::{SystemTime, UNIX_EPOCH};
+
+            let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+
+            let safe_filename = format!(
+                "{}-{}-{}-{}-{}_{}_{}",
+                sanitize(stars),
+                sanitize(player),
+                sanitize(map_name),
+                sanitize(mods),
+                sanitize(acc),
+                if replay_hash.len() > 8 { &replay_hash[..8] } else { replay_hash },
+                timestamp // Forces a 100% unique filename every single time
+            );
+
+
+            // 4. Rename the file locally
+            let mut old_filepath = config.paths.replays().clone();
+            old_filepath.push(format!("{}.mp4", filename)); 
+
+            let mut new_filepath = config.paths.replays().clone();
+            new_filepath.push(format!("{}.mp4", safe_filename)); 
+
+            if let Err(err) = tokio::fs::rename(&old_filepath, &new_filepath).await {
+                warn!("Failed to rename MP4 file: {:?}", err);
+            }
+
+            info!("Started upload to server");
             ctx.replay_queue.set_status(ReplayStatus::Uploading).await;
-
             let beatmap_link = format!("https://osu.ppy.sh/beatmapsets/{}", mapset_id);
-            let upload_fut =
-                ctx.client()
-                    .upload_video(&video_title, user, file_path, &beatmap_link, replay_hash);
+
+            // 6. Upload the RENAMED file!
+            let upload_fut = ctx.client().upload_video(&video_title, user, &new_filepath, &beatmap_link, &replay_hash);
 
             let link = match upload_fut.await {
                 Ok(res) if res.error == 1 => {
                     let err = format!("failed to upload: `{}`", res.text);
                     warn!("{err}");
-
                     let _ = input_channel.error(&ctx, err).await?;
-
                     ctx.replay_queue.reset_peek().await;
                     continue;
                 }
@@ -300,20 +376,38 @@ impl ReplayQueue {
                 Err(err) => {
                     let err = err.wrap_err("failed to upload file");
                     warn!("{err:?}");
-
                     let content = "Failed to upload file";
                     let _ = input_channel.error(&ctx, content).await?;
-
                     ctx.replay_queue.reset_peek().await;
                     continue;
                 }
             };
 
+
+
             info!("Finished upload to server");
+            warn!("upload returned link: {}", link);
+
+
+            if let Ok(mut warmup_msg) = output_channel
+                .create_message(&ctx, &MessageBuilder::new().content(link.clone()))
+                .await
+            {
+                sleep(Duration::from_millis(1200)).await;
+                let _ = warmup_msg.delete(&ctx).await;
+            }
+
+            let file_size_bytes = std::fs::metadata(&new_filepath)?.len();
+            let wait_secs = calculate_warmup_delay_secs(file_size_bytes);
+            warn!("Wait time for dc cache: {}", wait_secs);
+            sleep(Duration::from_secs(wait_secs)).await;
+
+
 
             //let content = format!("<@{user}> your replay is ready!\n{link}");
-            let watch_link = link.replacen("https://replays.insertdomainname.be/watch/", "https://replays.insertdomainname.be/", 1);
-            let content = format!("<@{user}> your replay is ready!\n[Replay]({link})\n[Raw(if you have issues, click here)](<{watch_link}>)");
+            //let watch_link = link.replacen("https://replays.insertdomainname.be/watch/", "https://replays.insertdomainname.be/", 1);
+            let link = link.replacen(".mp4", "", 1);
+            let content = format!("<@{user}> [Replay]({link})");
 
             let builder = MessageBuilder::new().content(content);
 
@@ -512,4 +606,19 @@ fn get_title() -> Result<String> {
         .last()
         .map(str::to_owned)
         .with_context(|| format!("expected at least 5 words in danser log line `{line}`"))
+}
+
+fn calculate_warmup_delay_secs(file_size_bytes: u64) -> u64 {
+    const UPLOAD_MBPS: f64 = 40.0;
+    const EFFICIENCY: f64 = 0.85;
+    const FRACTION: f64 = 0.75;
+    const MIN_WAIT_SECS: f64 = 5.0;
+    const EXTRA_BUFFER_SECS: f64 = 3.0;
+    const MAX_WAIT_SECS: f64 = 45.0;
+
+    let bytes_per_sec = (UPLOAD_MBPS * 1_000_000.0 / 8.0) * EFFICIENCY;
+    let full_transfer_secs = file_size_bytes as f64 / bytes_per_sec;
+    let wait_secs = (full_transfer_secs * FRACTION) + EXTRA_BUFFER_SECS;
+
+    wait_secs.clamp(MIN_WAIT_SECS, MAX_WAIT_SECS).ceil() as u64
 }
