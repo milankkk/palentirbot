@@ -74,9 +74,18 @@ pub async fn slash_render(ctx: Arc<Context>, mut command: InteractionCommand) ->
         0
     };
 
+    command.defer(&ctx, false).await?;
+
     let output_channel = match command.guild_id {
         Some(guild) => {
-            let (blacklisted, reason_opt) = ctx.psql()._is_server_blacklisted(guild).await?;
+            let (blacklisted, reason_opt) = match ctx.psql()._is_server_blacklisted(guild).await {
+                Ok(result) => result,
+                Err(err) => {
+                    warn!("{err:?}");
+                    command.error_callback(&ctx, "Failed to check server status, try again later.", false).await?;
+                    return Ok(());
+                }
+            };
             if blacklisted {
                 let mut content = String::from("Seems like this server has been blacklisted.");
                 if let Some(reason) = reason_opt {
@@ -97,8 +106,6 @@ pub async fn slash_render(ctx: Arc<Context>, mut command: InteractionCommand) ->
         None => command.channel_id,
     };
 
-
-    command.defer(&ctx, false).await?;
 
     let bytes = match ctx.client().get_discord_attachment(&attachment).await {
         Ok(bytes) => bytes,
