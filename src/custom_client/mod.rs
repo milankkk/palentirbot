@@ -193,7 +193,11 @@ impl CustomClient {
         self.make_get_request(&attachment.url, Site::DiscordAttachment)
             .await
     }
-
+    
+    pub async fn get_skin_from_url(&self, url: &str) -> Result<Bytes> {
+        self.make_get_request(url, Site::DownloadCatboy).await
+    }
+    
     pub async fn download_chimu_mapset(&self, mapset_id: u32) -> Result<Bytes> {
         let url = format!("https://chimu.moe/d/{mapset_id}");
         let bytes = self.make_get_request(url, Site::DownloadChimu).await?;
@@ -266,3 +270,4 @@ pub struct OsuReplayResponse {
     pub content: String,
     pub encoding: String,
 }
+

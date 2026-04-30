@@ -5,7 +5,8 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-
+use twilight_http::request;
+use twilight_http::Client;
 use eyre::{Context, Report, Result};
 use zip::ZipArchive;
 
@@ -36,34 +37,70 @@ pub async fn add(
         }
     };
 
-    if !config.owners.contains(&user.id) {
-        command.error_callback(&ctx, NOT_OWNER, true).await?;
-        return Ok(());
-    }
+    //if !config.owners.contains(&user.id) {
+    //    command.error_callback(&ctx, NOT_OWNER, true).await?;
+    //    return Ok(());
+    //}
+    
+    let SkinAdd { skin, url } = args;
 
-    let SkinAdd { skin } = args;
+    let (bytes, filename) = match (skin, url) {
+        (Some(skin), None) => {
+            let filename = match skin.filename.rsplit_once('.') {
+                Some((filename, "osk")) => filename.to_string(),
+                _ => {
+                    let content = "The attachment must be a .osk file!";
+                    command.error_callback(&ctx, content, true).await?;
+                    return Ok(());
+                }
+            };
+            let builder = MessageBuilder::new().embed("Downloading...");
+            command.callback(&ctx, builder, false).await?;
+            let bytes = match ctx.client().get_discord_attachment(&skin).await {
+                Ok(bytes) => bytes,
+                Err(err) => {
+                    let _ = command.error(&ctx, "Failed to download attachment").await;
+                    return Err(err.wrap_err("failed to download skin attachment"));
+                }
+            };
+            (bytes, filename)
+        }
+        (None, Some(url)) => {
+            if !url.ends_with(".osk") {
+                command.error_callback(&ctx, "The URL must point to a .osk file!", true).await?;
+                return Ok(());
+            }
+            let builder = MessageBuilder::new().embed("Downloading from URL...");
+            command.callback(&ctx, builder, false).await?;
 
-    let filename = match skin.filename.rsplit_once('.') {
-        Some((filename, _extension)) => filename,
-        None => {
-            let content = "The attachment must be a .osk file!";
-            command.error_callback(&ctx, content, true).await?;
+            let bytes = match ctx.client().get_skin_from_url(&url).await {
+                Ok(b) => b,
+                Err(err) => {
+                    let _ = command.error(&ctx, "Failed to download from URL").await;
+                    return Err(Report::from(err).wrap_err("failed to download skin from url"));
+                }
+            };
 
+            let filename = url
+                .split('/')
+                .last()
+                .unwrap_or("skin")
+                .trim_end_matches(".osk")
+                .to_string();
+
+            (bytes, filename)
+        }
+        (Some(_), Some(_)) => {
+            command.error_callback(&ctx, "Provide either a file or a URL, not both!", true).await?;
+            return Ok(());
+        }
+        (None, None) => {
+            command.error_callback(&ctx, "Provide either a .osk file or a direct URL!", true).await?;
             return Ok(());
         }
     };
 
-    let builder = MessageBuilder::new().embed("Downloading...");
-    command.callback(&ctx, builder, false).await?;
 
-    let bytes = match ctx.client().get_discord_attachment(&skin).await {
-        Ok(bytes) => bytes,
-        Err(err) => {
-            let _ = command.error(&ctx, "Failed to download attachment").await;
-
-            return Err(err.wrap_err("failed to download skin attachment"));
-        }
-    };
 
     let mut builder = MessageBuilder::new().embed("Zipping...");
     command.update(&ctx, &builder).await?;
@@ -93,7 +130,7 @@ pub async fn add(
         .map(|skin| skin.to_ascii_lowercase())
         .collect();
 
-    let mut needle = OsString::from(filename);
+    let mut needle = OsString::from(filename.clone());
     needle.make_ascii_lowercase();
 
     let idx = match skin_list.binary_search(&needle) {

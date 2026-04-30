@@ -34,7 +34,9 @@ pub enum Skin {
 /// Add a skin to the skinlist
 pub struct SkinAdd {
     /// Skin that you want to add
-    skin: Attachment,
+    skin: Option<Attachment>,
+    /// Direct URL
+    url: Option<String>,
 }
 
 #[derive(CommandModel, CreateCommand)]
@@ -58,3 +60,5 @@ pub async fn slash_skin(ctx: Arc<Context>, mut command: InteractionCommand) -> R
         Skin::List(_) => list(ctx, command).await,
     }
 }
+
+
