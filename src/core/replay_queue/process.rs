@@ -156,7 +156,7 @@ impl ReplayQueue {
             command
                 .current_dir(config.paths.danser())
                 .arg("-noupdatecheck")
-               // .arg("-nodbcheck")
+                .arg("-nodbcheck")
                 .arg("-replay")
                 .arg(&path)
                 .arg("-record")
@@ -449,7 +449,7 @@ impl ReplayQueue {
                         inline: false,
                         name: "Hits".to_owned(),
                         value: format!(
-                            "{} x300 | {} x100 | {} x50 | {} xMiss",
+                            "{} 🔹 | {} ✳️ | {} ⚠️ | {} ❌",
                             replay.count_300, replay.count_100, replay.count_50, replay.count_miss
                         ),
                     },
