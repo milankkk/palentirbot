@@ -1,6 +1,6 @@
 [package]
 name = "palentirbot"
-version = "0.1.1"
+version = "420.69.67"
 authors = ["mezodev0", "MaxOhn <ohn.m@hotmail.de>", "milankkk"]
 edition = "2021"
 
@@ -25,7 +25,7 @@ rand = { version = "0.8" }
 #rosu-v2 = { git = "https://github.com/MaxOhn/rosu-v2", rev = "996ec7c1db07e8bbcfaad07d555c9d56b763d414", default-features = false }
 #rosu-v2 = { git = "https://github.com/MaxOhn/rosu-v2", rev = "e3852e27285f8cec610417ba6f93e6f29915ee3b", default-features = false }
 rosu-v2 = { git = "https://github.com/MaxOhn/rosu-v2", branch = "main", default-features = false }
-rosu-pp = { git = "https://github.com/MaxOhn/rosu-pp", branch = "next" }
+rosu-pp = { git = "https://github.com/MaxOhn/rosu-pp", branch = "main" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0" }
 smallstr = { version = "0.2", features = ["serde"] }
@@ -54,11 +54,11 @@ zip = { version = "0.5" }
 
 #twilight-gateway = { version = "0.15.0", default-features = false, features = ["rustls-webpki-roots", "twilight-http", "zlib-stock"] }
 #twilight-http = { version = "0.15.0", default-features = false, features = ["rustls-webpki-roots"] }
-# twilight-interactions = { path = "../twilight-interactions/twilight-interactions", default-features = false, features = ["derive"] }
+#twilight-interactions = { path = "../twilight-interactions/twilight-interactions", default-features = false, features = ["derive"] }
 #twilight-model = { version = "0.15.4", default-features = false }
 #twilight-standby = { version = "0.15.0", default-features = false }
 
-#REAL FIX CLAUDE
+#REAL FIX
 twilight-gateway = "0.16"
 twilight-cache-inmemory = { version = "0.16", default-features = false }
 twilight-http = { version = "0.16", default-features = false, features = ["rustls-webpki-roots", "rustls-ring"] }
