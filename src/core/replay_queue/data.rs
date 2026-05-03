@@ -74,7 +74,7 @@ pub enum ReplayStatus {
     Waiting,
     Downloading,
     Rendering(u8),
-    Uploading,
+    Uploading(u64),
 }
 
 #[derive(Clone)]

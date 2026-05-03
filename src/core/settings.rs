@@ -188,8 +188,6 @@ pub struct Audio {
     pub general_volume: f64,
     pub music_volume: f64,
     pub sample_volume: f64,
-
-    #[serde(alias = "OnlineOffset")]
     pub offset: i32,
     pub hitsound_position_multiplier: f64,
     pub ignore_beatmap_samples: bool,

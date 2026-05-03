@@ -2,7 +2,7 @@ use std::{hash::Hash, path::Path};
 
 use crate::core::BotConfig;
 use bytes::Bytes;
-use eyre::{Context as _, Result};
+use eyre::{Context as _, ContextCompat, Result};
 use http::{header::CONTENT_LENGTH, Response};
 use hyper::{
     client::{connect::dns::GaiResolver, Client as HyperClient, HttpConnector},
@@ -100,26 +100,65 @@ impl CustomClient {
     }
 
     async fn make_get_request(&self, url: impl AsRef<str>, site: Site) -> Result<Bytes> {
-        let url = url.as_ref();
-        trace!("GET request to url {url}");
-
-        let req = Request::builder()
-            .uri(url)
-            .method(Method::GET)
-            .header(USER_AGENT, MY_USER_AGENT)
-            .body(Body::empty())
-            .context("failed to build GET request")?;
-
+        let mut url = url.as_ref().to_owned();
         self.ratelimit(site).await;
+        let mut redirects = 0;
 
-        let response = self
-            .client
-            .request(req)
-            .await
-            .context("failed to receive GET response")?;
+        loop {
+            trace!("GET request to url {url}");
+            warn!("Sending GET request to: {url}");
 
-        Self::error_for_status(response, url).await
+            let req = Request::builder()
+                .uri(&url)
+                .method(Method::GET)
+                .header(USER_AGENT, MY_USER_AGENT)
+                .body(Body::empty())
+                .context("failed to build GET request")?;
+
+            let response = self
+                .client
+                .request(req)
+                .await
+                .context("failed to receive GET response")?;
+
+            let status = response.status();
+            warn!("Response status: {status} for url: {url}");
+
+            if status.is_redirection() {
+                redirects += 1;
+                ensure!(redirects < 10, "too many redirects for {url}");
+
+                let location = response
+                    .headers()
+                    .get(hyper::header::LOCATION)
+                    .context("redirect with no Location header")?
+                    .to_str()
+                    .context("Location header was not valid UTF-8")?
+                    .to_owned();
+
+                warn!("Redirect #{redirects} -> {location}");
+
+                url = if location.starts_with("http") {
+                    location
+                } else {
+                    format!("https://{}{}", url.split('/').nth(2).unwrap_or(""), location)
+                };
+
+                continue;
+            }
+
+            let bytes = Self::error_for_status(response, &url).await?;
+            warn!(
+                "Got {} bytes from {url}, starts_with PK: {}",
+                bytes.len(),
+                bytes.starts_with(b"PK")
+            );
+
+            return Ok(bytes);
+        }
     }
+
+
 
     async fn make_post_request(
         &self,
@@ -199,27 +238,27 @@ impl CustomClient {
     }
     
     pub async fn download_chimu_mapset(&self, mapset_id: u32) -> Result<Bytes> {
-        let url = format!("https://chimu.moe/d/{mapset_id}");
+        let url = format!("https://osu.direct/api/d/{mapset_id}");
         let bytes = self.make_get_request(url, Site::DownloadChimu).await?;
-        ensure!(bytes.starts_with(b"PK"), "chimu returned invalid data");
+        ensure!(bytes.starts_with(b"PK"), "catboy returned invalid data");
         Ok(bytes)
     }
 
     pub async fn download_kitsu_mapset(&self, mapset_id: u32) -> Result<Bytes> {
-        let url = format!("https://osu.direct/d/{mapset_id}");
+        let url = format!("https://osu.direct/api/d/{mapset_id}");
         let bytes = self.make_get_request(url, Site::DownloadKitsu).await?;
         ensure!(bytes.starts_with(b"PK"), "osu.direct returned invalid data");
         Ok(bytes)
     }
 
     pub async fn download_nerinyan_mapset(&self, mapset_id: u32) -> Result<Bytes> {
-        let url = format!("https://api.nerinyan.moe/d/{mapset_id}");
+        let url = format!("https://osu.direct/api/d/{mapset_id}");
         let bytes = self.make_get_request(url, Site::DownloadNerinyan).await?;
         ensure!(bytes.starts_with(b"PK"), "nerinyan returned invalid data");
         Ok(bytes)
     }
     pub async fn download_catboy_mapset(&self, mapset_id: u32) -> Result<Bytes> {
-        let url = format!("https://catboy.best/d/{mapset_id}");
+        let url = format!("https://osu.direct/api/d/{mapset_id}");
         let bytes = self.make_get_request(url, Site::DownloadCatboy).await?;
         ensure!(bytes.starts_with(b"PK"), "catboy returned invalid data");
         Ok(bytes)

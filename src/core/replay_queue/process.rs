@@ -106,7 +106,7 @@ impl ReplayQueue {
                 }
             };
 
-            info!("Started map download");
+            warn!("Started map download");
             ctx.replay_queue.set_status(ReplayStatus::Downloading).await;
 
             if let Err(err) = download_mapset(&ctx, mapset_id).await {
@@ -119,7 +119,7 @@ impl ReplayQueue {
                 continue;
             }
 
-            info!("Finished map download");
+            warn!("Finished map download");
 
             let mut settings_path = config.paths.danser().to_owned();
             settings_path.push(format!("settings/{user}.json"));
@@ -156,7 +156,7 @@ impl ReplayQueue {
             command
                 .current_dir(config.paths.danser())
                 .arg("-noupdatecheck")
-                .arg("-nodbcheck")
+                //.arg("-nodbcheck")
                 .arg("-replay")
                 .arg(&path)
                 .arg("-record")
@@ -363,7 +363,7 @@ impl ReplayQueue {
             }
 
             info!("Started upload to server");
-            ctx.replay_queue.set_status(ReplayStatus::Uploading).await;
+            ctx.replay_queue.set_status(ReplayStatus::Uploading(0)).await;
             let beatmap_link = format!("https://osu.ppy.sh/beatmapsets/{}", mapset_id);
 
             // 6. Upload the RENAMED file!
@@ -405,7 +405,16 @@ impl ReplayQueue {
             let file_size_bytes = std::fs::metadata(&new_filepath)?.len();
             let wait_secs = calculate_warmup_delay_secs(file_size_bytes);
             warn!("Wait time for dc cache: {}", wait_secs);
-            sleep(Duration::from_secs(wait_secs)).await;
+            // Set uploading status with countdown before sleeping
+            //ctx.replay_queue.set_status(ReplayStatus::Uploading(wait_secs)).await;
+            let mut remaining = wait_secs;
+            while remaining > 0 {
+                ctx.replay_queue.set_status(ReplayStatus::Uploading(remaining)).await;
+                ctx.replay_queue.notify.notify_waiters();
+                sleep(Duration::from_secs(1)).await;
+                remaining = remaining.saturating_sub(1);
+            }
+            ctx.replay_queue.notify.notify_waiters();
 
 
 

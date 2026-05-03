@@ -58,9 +58,13 @@ pub async fn build_queue_embed(ctx: &Context) -> EmbedBuilder {
                 _ => ProcessStatus::Done,
             },
             uploading = match status {
-                ReplayStatus::Uploading => ProcessStatus::Running(None),
+                ReplayStatus::Uploading(secs) if secs > 0 => {
+                    ProcessStatus::WaitingForCache(secs)  // reuse Running for display
+                },
+                ReplayStatus::Uploading(_) => ProcessStatus::Waiting,
                 _ => ProcessStatus::Waiting,
-            }
+            },
+
         );
 
         let mut fields = vec![EmbedField {
@@ -223,6 +227,7 @@ enum ProcessStatus {
     Done,
     Running(Option<u8>),
     Waiting,
+    WaitingForCache(u64),
 }
 
 impl Display for ProcessStatus {
@@ -233,7 +238,8 @@ impl Display for ProcessStatus {
             ProcessStatus::Done => write!(f, "✅"),
             ProcessStatus::Running(Some(progress)) => write!(f, "🏃 {progress}%"),
             ProcessStatus::Running(None) => write!(f, "🏃"),
-            ProcessStatus::Waiting => write!(f, "⏳"),
+            ProcessStatus::WaitingForCache(secs) => write!(f, "⏳ {}s", secs),
+            ProcessStatus::Waiting => write!(f, "🛜"),
         }
     }
 }
