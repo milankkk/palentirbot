@@ -32,7 +32,7 @@ pub async fn slash_help(ctx: Arc<Context>, command: InteractionCommand) -> Resul
         .expect("missing CurrentUser in cache");
 
     let description = format!(
-        "<@{id}> is a discord bot written by [mezo](https://osu.ppy.sh/users/13313647) \
+        "<@{id}> is a shishabot rewrite by [milan.be(claude)](https://osu.ppy.sh/u/Milan) \
         which allows you render osu! replays and upload them"
     );
 
@@ -40,7 +40,7 @@ pub async fn slash_help(ctx: Arc<Context>, command: InteractionCommand) -> Resul
         inline: false,
         name: "Do you want to view your replays?".to_owned(),
         value: format!(
-            "Head over to [shisha.mezo.xyz]({SHISHABOT_WEBSITE}) and log in using discord"
+            "find link for it, website is 💩"
         ),
     };
 
