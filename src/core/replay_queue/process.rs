@@ -613,18 +613,22 @@ async fn create_title(replay: &ReplaySlim, map_path: PathBuf, map_title: &str) -
 
     let difficulty = rosu_pp::Difficulty::new()
         .mods(replay.mods as u32)
+        .lazer(false)
         .calculate(&map);
 
     let stars = difficulty.stars();
     let max_possible_combo = difficulty.max_combo();
 
     let pp = rosu_pp::Performance::new(&map)
+        //.legacy_score
         .mods(replay.mods as u32)
         .n300(replay.count_300 as u32)
         .n100(replay.count_100 as u32)
         .n50(replay.count_50 as u32)
         .misses(replay.count_miss as u32)
         .combo(replay.max_combo as u32)
+        .lazer(false)
+        .legacy_total_score(replay.score as u32)
         .calculate()
         .pp();
 

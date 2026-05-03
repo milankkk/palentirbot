@@ -90,6 +90,7 @@ pub struct ReplaySlim {
     pub mods: u32,
     pub player_name: Option<String>,
     pub replay_hash: Option<String>,
+    pub score: u32,
 }
 
 impl ReplaySlim {
@@ -123,6 +124,7 @@ impl From<Replay> for ReplaySlim {
             mods: replay.mods.bits(),
             player_name: replay.player_name,
             replay_hash: replay.replay_hash,
+            score: replay.score,
         }
     }
 }
