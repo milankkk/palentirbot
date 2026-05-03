@@ -12,13 +12,15 @@ steps(maybe):
 
 5. download and extract danser to ./data/danser
 (i renamed danser-cli to danser and danser to danser-gui, because i have a headless server but dont know if it matters)
+after first run, danser will generate a folder settings/ where a credentials and default json file will be stored
+in those change the settings to what you need, and in credentials your client id and secret which you generate in your osu profile under oauth
 
-6. In default.json danser config change settings to whatever desired
+7. In default.json danser config change settings to whatever desired
 
-7. run "python3 upload.py" in fileserver/
-8. then "cargo run --release" (--release otherwise your bot wont work outside dev server)
+8. run "python3 upload.py" in fileserver/
+9. then "cargo run --release" (--release otherwise your bot wont work outside dev server)
 
-9. pray 🙏
+10. pray 🙏
 
 ...
 
