@@ -206,27 +206,76 @@ impl CustomClient {
         }
     }
 
-    pub async fn get_raw_replay(&self, score_id: u64) -> Result<Vec<u8>> {
+    pub async fn get_raw_replay(&self, score_id: u64) -> eyre::Result<Vec<u8>> {
         let url = format!(
-            "https://osu.ppy.sh/api/get_replay?k={api_key}&s={score_id}",
-            api_key = BotConfig::get().tokens.osu_api_key,
+            "https://osu.ppy.sh/api/get_replay?k={apikey}&s={score_id}",
+            apikey = BotConfig::get().tokens.osu_api_key,
         );
 
-        #[derive(Deserialize)]
+        let bytes = self.make_get_request(url, Site::OsuReplay).await?;
+        let text = String::from_utf8_lossy(&bytes);
+
+        warn!(
+            "Got {} bytes from osu replay api for score {}, body: {}",
+            bytes.len(),
+            score_id,
+            text
+        );
+
+        #[derive(serde::Deserialize)]
         struct RawReplay {
             content: String,
         }
 
-        let bytes = self.make_get_request(url, Site::OsuReplay).await?;
+        #[derive(serde::Deserialize)]
+        struct OsuApiError {
+            error: String,
+        }
 
-        let RawReplay { content } = serde_json::from_slice(&bytes).with_context(|| {
-            let text = String::from_utf8_lossy(&bytes);
+        if let Ok(err) = serde_json::from_slice::<OsuApiError>(&bytes) {
+            eyre::bail!("osu replay api returned error for score {score_id}: {}", err.error);
+        }
 
-            format!("failed to deserialize raw replay: {text}")
-        })?;
+        let RawReplay { content } = serde_json::from_slice::<RawReplay>(&bytes)
+            .with_context(|| format!("failed to deserialize raw replay response: {text}"))?;
 
-        base64::decode(content.into_bytes()).context("failed to decode through base64")
+        base64::decode(content).context("failed to decode replay through base64")
     }
+
+    pub async fn getrawreplay_for_user_map(
+        &self,
+        beatmap_id: u32,
+        user_id: u32,
+        mode: u8,
+    ) -> eyre::Result<Vec<u8>> {
+        let url = format!(
+            "https://osu.ppy.sh/api/get_replay?k={apikey}&b={beatmap_id}&u={user_id}&m={mode}&type=id",
+            apikey = BotConfig::get().tokens.osu_api_key,
+        );
+
+        let bytes = self.make_get_request(url, Site::OsuReplay).await?;
+        let text = String::from_utf8_lossy(&bytes);
+
+        #[derive(serde::Deserialize)]
+        struct RawReplay {
+            content: String,
+        }
+
+        #[derive(serde::Deserialize)]
+        struct OsuApiError {
+            error: String,
+        }
+
+        if let Ok(err) = serde_json::from_slice::<OsuApiError>(&bytes) {
+            eyre::bail!("osu replay api returned error: {}", err.error);
+        }
+
+        let RawReplay { content } = serde_json::from_slice::<RawReplay>(&bytes)
+            .with_context(|| format!("failed to deserialize raw replay response: {text}"))?;
+
+        base64::decode(content).context("failed to decode replay through base64")
+    }
+
 
     pub async fn get_discord_attachment(&self, attachment: &Attachment) -> Result<Bytes> {
         self.make_get_request(&attachment.url, Site::DiscordAttachment)

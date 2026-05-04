@@ -16,6 +16,7 @@ use self::{input::*, output::*, view::*};
 mod input;
 mod output;
 mod view;
+mod setprefix;
 
 #[derive(CommandModel, CreateCommand, SlashCommand)]
 #[command(name = "setup", dm_permission = false)]
@@ -28,6 +29,8 @@ pub enum Setup {
     Input(SetupInput),
     #[command(name = "output")]
     Output(SetupOutput),
+    #[command(name = "setprefix")] 
+    SetPrefix(SetupSetPrefix), 
 }
 
 #[derive(CommandModel, CreateCommand)]
@@ -36,7 +39,7 @@ pub enum Setup {
 pub struct SetupView;
 
 #[derive(CommandModel, CreateCommand)]
-#[command(name = "input", default_permissions = "server_administrator")]
+#[command(name = "input")]
 /// Configure the the channels in which replays can be rendered
 pub struct SetupInput {
     /// Add or remove a channel
@@ -54,17 +57,27 @@ pub enum InputAction {
 }
 
 #[derive(CommandModel, CreateCommand)]
-#[command(name = "output", default_permissions = "server_administrator")]
+#[command(name = "output")]
 /// Configure the the channel in which the replay will be sent
 pub struct SetupOutput {
     /// The channel you want as the output channel
     channel: Id<ChannelMarker>,
 }
 
+#[derive(CommandModel, CreateCommand)]
+#[command(name = "setprefix")]
+/// Set a custom prefix for text commands in this server
+pub struct SetupSetPrefix {
+    /// The new prefix (e.g. `!`, `?`, `>>`) — max 16 characters
+    pub prefix: String,
+}
+
+
 async fn slash_setup(ctx: Arc<Context>, mut command: InteractionCommand) -> Result<()> {
     match Setup::from_interaction(command.input_data())? {
         Setup::Input(args) => input(ctx, command, args).await,
         Setup::Output(args) => output(ctx, command, args).await,
         Setup::View(_) => view(ctx, command).await,
+        Setup::SetPrefix(args) => setprefix::set_prefix(ctx, command, args).await,
     }
 }

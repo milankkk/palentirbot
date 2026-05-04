@@ -21,6 +21,14 @@ pub struct RootSettings {
 pub struct Server {
     pub input_channels: HashSet<Id<ChannelMarker>, IntBuildHasher>,
     pub output_channel: Option<Id<ChannelMarker>>,
+    pub prefix: Option<String>,
+}
+
+impl Server {
+    /// Returns the effective prefix, defaulting to "!".
+    pub fn effective_prefix(&self) -> &str {
+        self.prefix.as_deref().unwrap_or("!")
+    }
 }
 
 mod servers {
@@ -48,6 +56,8 @@ mod servers {
         server_id: Id<GuildMarker>,
         input_channels: HashSet<Id<ChannelMarker>, IntBuildHasher>,
         output_channel: Option<Id<ChannelMarker>>,
+        #[serde(default)]
+        prefix: Option<String>,
     }
 
     struct ServersVisitor;
@@ -71,11 +81,13 @@ mod servers {
                         server_id,
                         input_channels,
                         output_channel,
+                        prefix,
                     } = raw;
 
                     let server = Server {
                         input_channels,
                         output_channel,
+                        prefix,
                     };
 
                     guard.insert(server_id, server);
@@ -102,7 +114,7 @@ mod servers {
             raw.serialize_field("server_id", &self.server_id)?;
             raw.serialize_field("input_channels", &self.server.input_channels)?;
             raw.serialize_field("output_channel", &self.server.output_channel)?;
-
+            raw.serialize_field("prefix", &self.server.prefix)?;
             raw.end()
         }
     }

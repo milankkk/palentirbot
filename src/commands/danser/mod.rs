@@ -3,9 +3,9 @@ pub use self::{
 };
 
 mod blacklist;
-mod queue;
+pub mod queue;
 mod render;
-mod render_score;
+pub mod render_score;
 mod settings;
 mod setup;
 mod skin;

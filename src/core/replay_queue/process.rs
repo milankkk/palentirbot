@@ -56,18 +56,7 @@ impl ReplayQueue {
                 title,
             } = ctx.replay_queue.peek().await;
 
-            let replay_hash = match replay.replay_hash.as_deref() {
-                Some(replay_hash) => replay_hash,
-                None => {
-                    warn!("replay without replay hash");
-
-                    let content = "Could not get the replay hash";
-                    let _ = input_channel.error(&ctx, content).await?;
-
-                    ctx.replay_queue.reset_peek().await;
-                    continue;
-                }
-            };
+            let replay_hash = replay.replay_hash.as_deref().unwrap_or("");
 
             let mapset_id = match replay.beatmap_hash.as_deref() {
                 Some(hash) => match ctx.osu().beatmap().checksum(hash).await {
@@ -367,7 +356,8 @@ impl ReplayQueue {
             let beatmap_link = format!("https://osu.ppy.sh/beatmapsets/{}", mapset_id);
 
             // 6. Upload the RENAMED file!
-            let upload_fut = ctx.client().upload_video(&video_title, user, &new_filepath, &beatmap_link, &replay_hash);
+            let upload_hash = if replay_hash.is_empty() { "nohash" } else { &replay_hash };
+            let upload_fut = ctx.client().upload_video(&video_title, user, &new_filepath, &beatmap_link, upload_hash);
 
             let link = match upload_fut.await {
                 Ok(res) if res.error == 1 => {
