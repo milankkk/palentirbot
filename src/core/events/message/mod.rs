@@ -69,7 +69,7 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
             match msg.channel_id.create_message(&ctx, &builder).await {
                 Ok(sent) => {
                     let elapsed = start.elapsed().as_millis();
-                    let update = MessageBuilder::new().content(format!("Pong! `{elapsed}ms`"));
+                    let update = MessageBuilder::new().content(format!("Pong! ({elapsed}ms)"));
                     let _ = (sent.id, sent.channel_id).update(&ctx, &update).await;
                 }
                 Err(err) => tracing::error!(?err, "prefix ping failed"),
