@@ -1,4 +1,4 @@
-# ***palentirbot***
+# ***palentirbot (no correlation)***
 
 steps(maybe):
 
@@ -17,11 +17,11 @@ in those change the settings to what you need, and in credentials your client id
 
 7. In default.json danser config change settings to whatever desired
 
-8. run "python3 upload.py" in fileserver/
+8. run "python3 upload.py" in fileserver/ , also included is a Caddyfile.example file which i user for serving
 9. then "cargo run --release" (--release otherwise your bot wont work outside dev server)
 
 10. pray 🙏
 
-...
+11. ???
 
-10. PROFIT!!!! 💸
+12. PROFIT!!!! 💸

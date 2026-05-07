@@ -451,7 +451,7 @@ impl ReplayQueue {
             let emojis = &BotConfig::get().emojis;
             let mut embed_builder = EmbedBuilder::new()
                 //.title(format!("{stars}⭐ {player} | {title} {mods_str} ({acc}%"))
-                .color(0xbc22a4) 
+                .color(0x96DFE3) 
                 .title(video_title)
                 .url(format!("https://osu.ppy.sh/beatmapsets/{mapset_id}"))
                 .fields(vec![
