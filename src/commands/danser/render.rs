@@ -164,15 +164,22 @@ pub async fn slash_render(ctx: Arc<Context>, mut command: InteractionCommand) ->
         },
         user: command.user_id()?,
         title: None,
+        player_name: Some(command.username()?.to_string()),
+        map_title: None,
+        difficulty_name: None,
     };
 
+    let was_empty = ctx.replay_queue.queue.lock().await.is_empty();
     ctx.replay_queue.push(replay_data).await;
-
     let content = "Replay has been added to the queue!";
     let builder = MessageBuilder::new().embed(content);
-
     command.update(&ctx, &builder).await?;
-    send_queue_status(Arc::clone(&ctx), output_channel).await?;
+    if was_empty {
+        let ctx_clone = Arc::clone(&ctx);
+        tokio::spawn(async move {
+            let _ = send_queue_status(ctx_clone, output_channel).await;
+        });
+    }
     Ok(())
 
 

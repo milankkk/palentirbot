@@ -50,10 +50,11 @@ pub async fn build_queue_embed(ctx: &Context) -> EmbedBuilder {
             downloading = match status {
                 ReplayStatus::Waiting => ProcessStatus::Waiting,
                 ReplayStatus::Downloading => ProcessStatus::Running(None),
+                ReplayStatus::MapFound => ProcessStatus::MapFound,
                 _ => ProcessStatus::Done,
             },
             rendering = match status {
-                ReplayStatus::Waiting | ReplayStatus::Downloading => ProcessStatus::Waiting,
+                ReplayStatus::Waiting | ReplayStatus::Downloading | ReplayStatus::MapFound => ProcessStatus::Waiting,
                 ReplayStatus::Rendering(p) => ProcessStatus::Running(Some(p)),
                 _ => ProcessStatus::Done,
             },
@@ -227,6 +228,7 @@ enum ProcessStatus {
     Done,
     Running(Option<u8>),
     Waiting,
+    MapFound,
     WaitingForCache(u64),
 }
 
@@ -240,6 +242,7 @@ impl Display for ProcessStatus {
             ProcessStatus::Running(None) => write!(f, "🏃"),
             ProcessStatus::WaitingForCache(secs) => write!(f, "⏳ {}s", secs),
             ProcessStatus::Waiting => write!(f, "🛜"),
+            ProcessStatus::MapFound => write!(f, "⬇️"),
         }
     }
 }

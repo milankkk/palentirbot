@@ -82,6 +82,10 @@ pub struct Emojis {
     pub man_running: String,
     pub white_check_mark: String,
     pub hourglass: String,
+    pub hit_300: String,
+    pub hit_100: String,
+    pub hit_50: String,
+    pub hit_miss: String,
 }
 
 impl BotConfig {
@@ -109,6 +113,10 @@ impl BotConfig {
                 man_running: env_var("MAN_RUNNING")?,
                 white_check_mark: env_var("WHITE_CHECK_MARK")?,
                 hourglass: env_var("HOURGLASS")?,
+                hit_300:  env_var("EMOJI_HIT_300")?,
+                hit_100:  env_var("EMOJI_HIT_100")?,
+                hit_50:   env_var("EMOJI_HIT_50")?,
+                hit_miss: env_var("EMOJI_HIT_MISS")?,
             },
             owners: env_var("OWNERS_USER_ID")?,
             dev_guild: env_var("DEV_GUILD_ID")?,

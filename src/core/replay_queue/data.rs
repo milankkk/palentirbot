@@ -18,6 +18,9 @@ pub struct ReplayData {
     pub time_points: TimePoints,
     pub user: Id<UserMarker>,
     pub title: Option<String>,
+    pub player_name: Option<String>,
+    pub map_title: Option<String>,
+    pub difficulty_name: Option<String>,
 }
 
 impl ReplayData {
@@ -73,6 +76,7 @@ impl TimePoints {
 pub enum ReplayStatus {
     Waiting,
     Downloading,
+    MapFound,
     Rendering(u8),
     Uploading(u64),
 }
@@ -91,6 +95,7 @@ pub struct ReplaySlim {
     pub player_name: Option<String>,
     pub replay_hash: Option<String>,
     pub score: u32,
+    pub timestamp: Option<i64>,
 }
 
 impl ReplaySlim {
@@ -125,6 +130,7 @@ impl From<Replay> for ReplaySlim {
             player_name: replay.player_name,
             replay_hash: replay.replay_hash,
             score: replay.score,
+            timestamp: Some(replay.timestamp.timestamp()),
         }
     }
 }

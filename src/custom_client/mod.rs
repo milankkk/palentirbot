@@ -301,13 +301,13 @@ impl CustomClient {
     }
 
     pub async fn download_nerinyan_mapset(&self, mapset_id: u32) -> Result<Bytes> {
-        let url = format!("https://osu.direct/api/d/{mapset_id}");
+        let url = format!("https://nerinyan.moe/d/{mapset_id}");
         let bytes = self.make_get_request(url, Site::DownloadNerinyan).await?;
         ensure!(bytes.starts_with(b"PK"), "nerinyan returned invalid data");
         Ok(bytes)
     }
     pub async fn download_catboy_mapset(&self, mapset_id: u32) -> Result<Bytes> {
-        let url = format!("https://osu.direct/api/d/{mapset_id}");
+        let url = format!("https://mirror.nekoha.moe/api4/download/{mapset_id}");
         let bytes = self.make_get_request(url, Site::DownloadCatboy).await?;
         ensure!(bytes.starts_with(b"PK"), "catboy returned invalid data");
         Ok(bytes)

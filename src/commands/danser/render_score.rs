@@ -28,8 +28,8 @@ use crate::{
 async fn render_from_msg(ctx: Arc<Context>, mut command: InteractionCommand) -> Result<()> {
     let input_data = command.input_data();
 
-    let (user_id, timestamp) = match parseembedinputdata(input_data) {
-        Some(ParsedEmbed { user_id, timestamp }) => (user_id, timestamp),
+    let (user_id, beatmap_id, timestamp) = match parseembedinputdata(input_data) {
+        Some(ParsedEmbed { user_id, beatmap_id, timestamp }) => (user_id, beatmap_id, timestamp),
         None => {
             let content = "The command can only be used on Bathbot.rs embeds!";
             command.error(&ctx, content).await?;
@@ -93,24 +93,46 @@ async fn render_from_msg(ctx: Arc<Context>, mut command: InteractionCommand) -> 
         .await
         .context("failed to get replay bytes")?;
 
-    extend_replay_bytes(&mut replay_bytes, &score_to_render);
+    let beatmap_md5 = ctx
+        .osu()
+        .beatmap()
+        .map_id(beatmap_id)
+        .await
+        .context("failed to get beatmap for checksum")?
+        .checksum
+        .unwrap_or_default();
+    extend_replay_bytes(&mut replay_bytes, &score_to_render, &beatmap_md5);
 
-    let replay_user = score_to_render.user;
+    let fetched_username = ctx
+        .osu()
+        .user(user_id)
+        .await
+        .ok()
+        .map(|u| u.username);
 
-    let osu_user = match replay_user {
-        Some(replay_user) => replay_user.username,
-        None => "<unknown user>".into(),
-    };
+    let osu_user = score_to_render
+        .user
+        .as_ref()
+        .map(|u| u.username.as_str())
+        .or(fetched_username.as_deref())
+        .unwrap_or("unknown player");
 
-    let replay_mapset = score_to_render.mapset;
 
-    let map_title = match replay_mapset {
-        Some(replay_mapset) => replay_mapset.title,
-        None => "<unknown map>".into(),
-    };
+    let map_title = score_to_render
+        .mapset
+        .as_ref()
+        .map(|m| m.title.as_str())
+        .unwrap_or("unknown map");
 
-    let mut path = BotConfig::get().paths.downloads();
-    path.push(format!("{osu_user} - {map_title}.osr"));
+    let diff_name = score_to_render
+        .map
+        .as_ref()
+        .map(|m| m.version.as_str())
+        .unwrap_or("unknown diff");
+
+    let mut path = BotConfig::get().paths.downloads().to_owned();
+    path.push(format!("{osu_user} - {map_title} [{diff_name}].osr"));
+
 
     fs::write(&path, &replay_bytes).context("failed to write into replay file")?;
 
@@ -142,14 +164,21 @@ async fn render_from_msg(ctx: Arc<Context>, mut command: InteractionCommand) -> 
         user,
         time_points: TimePoints { start: 0, end: 0 },
         title: None,
+        player_name: Some(osu_user.to_string()),
+        map_title: Some(map_title.to_string()),
+        difficulty_name: Some(diff_name.to_string()),
     };
-
+    
+    let was_empty = ctx.replay_queue.queue.lock().await.is_empty();
     ctx.replay_queue.push(replay_data).await;
-
-
     let builder = MessageBuilder::new().embed("Replay has been pushed to the queue!");
     command.update(&ctx, &builder).await?;
-    send_queue_status(Arc::clone(&ctx), output_channel).await?;
+    if was_empty {
+        let ctx_clone = Arc::clone(&ctx);
+        tokio::spawn(async move {
+            let _ = send_queue_status(ctx_clone, output_channel).await;
+        });
+    }
     Ok(())
 
 }
@@ -175,7 +204,10 @@ pub async fn render_score_from_embed(
     output_channel: Id<ChannelMarker>,
     user: Id<UserMarker>,
 ) -> eyre::Result<Option<PathBuf>> {
-    let Some(ParsedEmbed { user_id, timestamp }) = parse_embed(embed) else {
+    tracing::warn!("render_score_from_embed: entered for map/user");
+
+    let Some(ParsedEmbed { user_id, beatmap_id, timestamp }) = parse_embed(embed) else {
+        tracing::warn!("render_score_from_embed: parse_embed returned None");
         return Ok(None);
     };
 
@@ -192,9 +224,44 @@ pub async fn render_score_from_embed(
         .await
         .context("failed to get recent scores")?;
 
+    tracing::warn!(
+        user_id,
+        ts_unix,
+        count = recent_scores.len(),
+        "render_score_from_embed: fetched recent scores"
+    );
+
+    let mut score_to_render = None;
+
+    for score in &recent_scores {
+        let score_ts = score.ended_at.unix_timestamp();
+        let diff = score_ts.abs_diff(ts_unix);
+
+        tracing::warn!(
+            score_id = score.id,
+            score_ts,
+            diff,
+            replay = score.replay,
+            "recent score candidate"
+        );
+
+        if diff <= 3 && score.replay {
+            tracing::warn!(score_id = score.id, "recent score matched");
+            score_to_render = Some(score);
+            break;
+        }
+    }
+
+
     let mut score_to_render = recent_scores
         .into_iter()
-        .find(|score| score.ended_at.unix_timestamp().abs_diff(ts_unix) <= 3 && score.replay);
+        .find(|score| {
+            let diff = score.ended_at.unix_timestamp().abs_diff(ts_unix);
+            if diff <= 10 { // Temporarily widen to 10s to see if it catches
+                tracing::warn!(score_id = score.id, diff, ts_unix, score_ts = score.ended_at.unix_timestamp(), "found close match");
+            }
+            diff <= 3 && score.replay
+        });
 
     if score_to_render.is_none() {
         let top_scores = ctx
@@ -209,15 +276,26 @@ pub async fn render_score_from_embed(
             .into_iter()
             .find(|score| score.ended_at.unix_timestamp().abs_diff(ts_unix) <= 3 && score.replay);
     }
+    if score_to_render.is_none() {
+        tracing::warn!(user_id, beatmap_id, "trying best score on this beatmap");
+
+        let map_scores = ctx
+            .osu()
+            .beatmap_user_scores(beatmap_id, user_id)
+            .await
+            .context("failed to get user scores on beatmap")?;
+
+        score_to_render = map_scores.clone()
+            .into_iter()
+            .find(|score| score.ended_at.unix_timestamp().abs_diff(ts_unix) <= 10 && score.replay)
+            .or_else(|| map_scores.into_iter().find(|score| score.replay));
+    }
 
     let Some(score_to_render) = score_to_render else {
+        tracing::warn!(user_id, "render_score_from_embed: score_to_render not found (checked recent/top)");
         return Ok(None);
     };
 
-    let beatmap_id = match score_to_render.map.as_ref().map(|map| map.map_id) {
-        Some(id) => id,
-        None => return Ok(None),
-    };
 
     let mut replay_bytes = match ctx
         .client()
@@ -225,11 +303,27 @@ pub async fn render_score_from_embed(
         .await
     {
         Ok(bytes) => bytes,
-        Err(_) => return Ok(None),
+        Err(err) => {
+            tracing::warn!(
+                ?err,
+                beatmap_id,
+                user_id,
+                "failed to download replay for embed-derived render"
+            );
+            return Ok(None);
+        }
     };
 
 
-    extend_replay_bytes(&mut replay_bytes, &score_to_render);
+    let beatmap_md5 = ctx
+        .osu()
+        .beatmap()
+        .map_id(beatmap_id)
+        .await
+        .context("failed to get beatmap for checksum")?
+        .checksum
+        .unwrap_or_default();
+    extend_replay_bytes(&mut replay_bytes, &score_to_render, &beatmap_md5);
 
     let replay = match Replay::from_bytes(&replay_bytes.clone()) {
         Ok(replay) => replay,
@@ -263,6 +357,9 @@ pub async fn render_score_from_embed(
             time_points: TimePoints { start: 0, end: 0 },
             user,
             title: None,
+            player_name: None,
+            map_title: None,
+            difficulty_name: None,
         })
         .await;
 
@@ -271,12 +368,19 @@ pub async fn render_score_from_embed(
 
 struct ParsedEmbed {
     user_id: u32,
+    beatmap_id: u32,
     timestamp: Timestamp,
 }
 
 fn parse_embed(embed: &Embed) -> Option<ParsedEmbed> {
     let user_url = embed.author.as_ref().and_then(|a| a.url.as_ref())?;
     let user_id = user_url.split('/').nth(4).and_then(|id| id.parse::<u32>().ok())?;
+
+    let beatmap_url = embed.url.as_ref()?;
+    let beatmap_id = beatmap_url
+        .split('/')
+        .last()
+        .and_then(|id| id.parse::<u32>().ok())?;
 
     let timestamp = embed
         .timestamp
@@ -285,9 +389,11 @@ fn parse_embed(embed: &Embed) -> Option<ParsedEmbed> {
 
     Some(ParsedEmbed {
         user_id,
+        beatmap_id,
         timestamp,
     })
 }
+
 
 
 fn get_timestamp_from_minimized_embed(embed: &Embed) -> Option<Timestamp> {
@@ -305,18 +411,18 @@ fn get_timestamp_from_minimized_embed(embed: &Embed) -> Option<Timestamp> {
 }
 
 // https://osu.ppy.sh/wiki/en/Client/File_formats/Osr_%28file_format%29
-pub fn extend_replay_bytes(bytes: &mut Vec<u8>, score: &Score) {
+pub fn extend_replay_bytes(bytes: &mut Vec<u8>, score: &Score, map_md5: &str) {
     let initial_len = bytes.len();
     let mut bytes_written = 0;
 
     bytes_written += encode_byte(bytes, score.mode as u8);
     bytes_written += encode_int(bytes, game_version(score.ended_at.date()));
 
-    let map_md5 = score
-        .map
-        .as_ref()
-        .and_then(|map| map.checksum.as_deref())
-        .unwrap_or_default();
+    //let map_md5 = score
+    //    .map
+    //    .as_ref()
+    //    .and_then(|map| map.checksum.as_deref())
+    //    .unwrap_or_default();
 
     bytes_written += encode_string(bytes, map_md5);
 

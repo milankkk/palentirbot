@@ -69,7 +69,7 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
             match msg.channel_id.create_message(&ctx, &builder).await {
                 Ok(sent) => {
                     let elapsed = start.elapsed().as_millis();
-                    let update = MessageBuilder::new().content(format!("Pong! ({elapsed}ms)"));
+                    let update = MessageBuilder::new().content(format!("🏓 Pong! ({elapsed}ms)"));
                     let _ = (sent.id, sent.channel_id).update(&ctx, &update).await;
                 }
                 Err(err) => tracing::error!(?err, "prefix ping failed"),
@@ -158,6 +158,7 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
 
                 // Push to queue
                 use crate::core::replay_queue::{ReplayData, ReplaySlim, TimePoints};
+                let was_empty = ctx.replay_queue.queue.lock().await.is_empty();
                 ctx.replay_queue.push(ReplayData {
                     input_channel: msg.channel_id,
                     output_channel,
@@ -167,6 +168,11 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
                     time_points: TimePoints { start: start_secs, end: end_secs },
                     user: msg.author.id,
                     title: None,
+                    player_name: None,
+                    map_title: None,
+                    difficulty_name: None,
+
+
                 }).await;
 
                 use crate::util::builder::MessageBuilder;
@@ -175,7 +181,13 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
                     .create_message(&ctx, &MessageBuilder::new().embed("Replay has been added to the queue!"))
                     .await;
 
-                let _ = send_queue_status(Arc::clone(&ctx), msg.channel_id).await;
+                if was_empty {
+                    let ctx_clone = Arc::clone(&ctx);
+                    let out_channel = msg.channel_id; // Copy the ID to move into the task
+                    tokio::spawn(async move {
+                        let _ = send_queue_status(ctx_clone, out_channel).await;
+                    });
+                }
             } else if let Some(replied) = msg.referenced_message.as_deref() {
                 match render_score_from_message(
                     Arc::clone(&ctx),

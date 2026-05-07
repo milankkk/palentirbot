@@ -18,7 +18,7 @@ use rosu_pp::Beatmap;
 use crate::util::builder::EmbedBuilder;
 use tokio::time::{sleep, Duration};
 use crate::util::MessageExt;
-
+use crate::util::builder::FooterBuilder;
 use tokio::{
     process::{ChildStdout, Command},
 };
@@ -54,6 +54,9 @@ impl ReplayQueue {
                 time_points,
                 user,
                 title,
+                player_name,
+                map_title, 
+                difficulty_name,
             } = ctx.replay_queue.peek().await;
 
             let replay_hash = replay.replay_hash.as_deref().unwrap_or("");
@@ -96,19 +99,30 @@ impl ReplayQueue {
             };
 
             warn!("Started map download");
-            ctx.replay_queue.set_status(ReplayStatus::Downloading).await;
+                        let mut mapset_path = config.paths.songs();
+            mapset_path.push(mapset_id.to_string());
 
-            if let Err(err) = download_mapset(&ctx, mapset_id).await {
-                warn!("{err:?}");
+            if mapset_path.exists() {
+                warn!("Mapset {mapset_id} already exists locally, skipping download.");
+                ctx.replay_queue.set_status(ReplayStatus::MapFound).await;
+                ctx.replay_queue.notify.notify_waiters();
+                
+                // Sleep for 1 second just so the emoji is visible briefly before rendering starts
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+            } else {
+                warn!("Started map download");
+                ctx.replay_queue.set_status(ReplayStatus::Downloading).await;
+                ctx.replay_queue.notify.notify_waiters();
 
-                let content = "Failed to download map. Mirrors are likely down, try again later.";
-                let _ = input_channel.error(&ctx, content).await?;
-
-                ctx.replay_queue.reset_peek().await;
-                continue;
+                if let Err(err) = download_mapset(&ctx, mapset_id).await {
+                    warn!("{err:?}");
+                    let content = "Failed to download map. Mirrors are likely down, try again later.";
+                    let _ = input_channel.create_message(&ctx, &crate::util::builder::MessageBuilder::new().content(content)).await;
+                    ctx.replay_queue.reset_peek().await;
+                    continue;
+                }
+                warn!("Finished map download");
             }
-
-            warn!("Finished map download");
 
             let mut settings_path = config.paths.danser().to_owned();
             settings_path.push(format!("settings/{user}.json"));
@@ -160,10 +174,10 @@ impl ReplayQueue {
             
 
             // conditional args
-            if time_points.start != 0 {
+            if time_points.start > 0 {
                 command.args(["-start", &time_points.start.to_string()]);
             }
-            if time_points.end != 0 {
+            if time_points.end > 0 {
                 command.args(["-end", &time_points.end.to_string()]);
             }
             if let Some(pitch) = pitch {
@@ -269,7 +283,7 @@ impl ReplayQueue {
                 format!("{} [{}]", base_name, difficulty)
             };
 
-            let TitleResult { title: video_title, pp, max_pp, max_possible_combo, stars, acc } =
+            let TitleResult { title: video_title, pp, max_pp, nochoke_pp, max_possible_combo, stars, acc } =
                 match create_title(&replay, map_path.clone(), &title).await {
                     Ok(result) => result,
                     Err(err) => {
@@ -418,16 +432,36 @@ impl ReplayQueue {
                 format!("+{}", legacy_mods)
             };
 
-            let player = replay.player_name.as_deref().unwrap_or("unknown player");
+            let player = replay
+                .player_name
+                .as_ref()
+                .map(|user| user.clone());
+
             let acc = replay.accuracy();
 
             use twilight_model::channel::message::embed::EmbedField;
 
-            let embed = EmbedBuilder::new()
+            let score_value = {
+                use crate::util::numbers::with_comma_int;
+                with_comma_int(replay.score as u64).to_string()
+            };
+
+            let is_perfect_fc = replay.max_combo == max_possible_combo && replay.count_miss == 0;
+
+            let emojis = &BotConfig::get().emojis;
+            let mut embed_builder = EmbedBuilder::new()
                 //.title(format!("{stars}⭐ {player} | {title} {mods_str} ({acc}%"))
+                .color(0xbc22a4) 
                 .title(video_title)
                 .url(format!("https://osu.ppy.sh/beatmapsets/{mapset_id}"))
                 .fields(vec![
+                     // ── Score: first, full-width ─────────────────────────────────────
+                    EmbedField {
+                        inline: false,
+                        name:  "Score".to_owned(),
+                        value: score_value,
+                    },
+                    // ── All other info ───────────────────────────────────────────────
                     EmbedField {
                         inline: true,
                         name: "Accuracy".to_owned(),
@@ -442,18 +476,42 @@ impl ReplayQueue {
                     EmbedField {
                         inline: true,
                         name: "pp".to_owned(),
-                        value: format!("{:.2}pp / {:.2}pp", pp, max_pp),
+                        value: if is_perfect_fc {
+                            // Hides the "If FC" text ONLY on a perfect FC
+                            format!("{:.2}pp / {:.2}pp", pp, max_pp)
+                        } else {
+                            // Shows the "If FC" text if they missed, sliderbroke, or dropped slider ends
+                            format!("{:.2}pp *(No Choke: {:.2}pp)* / {:.2}pp", pp, nochoke_pp, max_pp)
+                        },
                     },
                     EmbedField {
                         inline: false,
                         name: "Hits".to_owned(),
                         value: format!(
-                            "{} 🔹 | {} ✳️ | {} ⚠️ | {} ❌",
-                            replay.count_300, replay.count_100, replay.count_50, replay.count_miss
+                            "{} {} | {} {} | {} {} | {} {}",
+                            emojis.hit_300,  replay.count_300,
+                            emojis.hit_100,  replay.count_100,
+                            emojis.hit_50,   replay.count_50,
+                            emojis.hit_miss, replay.count_miss,
                         ),
                     },
-                ])
-                .build();
+                ]);
+                let replay_datetime: Option<time::OffsetDateTime> =
+                    replay.timestamp.and_then(|ts: i64| {
+                        time::OffsetDateTime::from_unix_timestamp(ts).ok()
+                    });
+                if let Some(dt) = replay_datetime {
+                    let date_str = format!(
+                        "Played on {:04}-{:02}-{:02}",
+                        dt.year(),
+                        dt.month() as u8,
+                        dt.day()
+                    );
+                    embed_builder = embed_builder.footer(FooterBuilder::new(date_str));
+                    embed_builder = embed_builder.timestamp(dt);
+                }
+
+                let embed = embed_builder.build();
 
 
             let embed_builder = MessageBuilder::new().embed(embed);
@@ -474,7 +532,19 @@ impl ReplayQueue {
                 let err = Report::from(err).wrap_err("failed to send video link");
                 warn!("{err:?}");
             }
+            // 1. Delete the generated .mp4 from the Replays folder after upload
+            if let Err(err) = tokio::fs::remove_file(&new_filepath).await {
+                warn!("Failed to delete local MP4 file {:?}: {}", new_filepath, err);
+            } else {
+                warn!("Cleaned up local MP4 file at: {:?}.", new_filepath);
+            }
 
+            // 2. Delete the .osr from the Downloads folder
+            if let Err(err) = tokio::fs::remove_file(&path).await {
+                warn!("Failed to delete local OSR file {:?}: {}", path, err);
+            } else {
+                warn!("Cleaned up local OSR file at: {:?}.", path);
+            }
             ctx.replay_queue.reset_peek().await;
         }
     }
@@ -565,20 +635,41 @@ async fn download_mapset(ctx: &Context, mapset_id: u32) -> Result<()> {
 
 async fn request_mapset(ctx: &Context, mapset_id: u32) -> Result<Bytes> {
     let catboy = match ctx.client().download_catboy_mapset(mapset_id).await {
-        Ok(bytes) => return Ok(bytes),
-        Err(err) => err,
+        Ok(bytes) => {
+            warn!("nekoha succes");
+            return Ok(bytes);
+        },
+        Err(err) => {
+            warn!("nekoha also failed: {err}");
+            err
+        }
     };
     let kitsu = match ctx.client().download_kitsu_mapset(mapset_id).await {
-        Ok(bytes) => return Ok(bytes),
-        Err(err) => err,
+        Ok(bytes) => {
+            warn!("osu.direct succes");
+            return Ok(bytes);
+        },
+        Err(err) => {
+            warn!("osu.direct also failed: {err}");
+            err
+        }
     };
 
     let chimu = match ctx.client().download_chimu_mapset(mapset_id).await {
-        Ok(bytes) => return Ok(bytes),
-        Err(err) => err,
+        Ok(bytes) => {
+            warn!("direct2 succes");
+            return Ok(bytes);
+        },
+        Err(err) => {
+            warn!("osu.direct2 also failed: {err}");
+            err
+        }
     };  
     let nerinyan = match ctx.client().download_nerinyan_mapset(mapset_id).await {
-        Ok(bytes) => return Ok(bytes),
+        Ok(bytes) => {
+            warn!("nerinyan succes");
+            return Ok(bytes);
+        },
         Err(err) => {
             warn!("nerinyan also failed: {err}");
             err
@@ -592,7 +683,8 @@ struct TitleResult {
     title: String,
     pp: f64,
     max_pp: f64,
-    max_possible_combo: u32,
+    nochoke_pp: f64,
+    max_possible_combo: u16,
     stars: f64,
     acc: f32,
 }
@@ -626,9 +718,18 @@ async fn create_title(replay: &ReplaySlim, map_path: PathBuf, map_title: &str) -
         .mods(replay.mods as u32)
         .calculate()
         .pp();
-
+    let nochoke_pp = rosu_pp::Performance::new(&map)
+        .mods(replay.mods as u32)
+        .n100(replay.count_100 as u32)
+        .n50(replay.count_50 as u32)
+        .calculate()
+        .pp();
     let stars = (stars * 100.0).round() / 100.0;
-    let player = replay.player_name.as_deref().unwrap_or("unknown player");
+    let player_name = replay
+        .player_name
+        .as_ref()
+        .map(|user| user.clone());
+    let player = player_name.as_deref().unwrap_or("Unknown player");
     let acc = replay.accuracy();
     let legacy = GameModsLegacy::from_bits(replay.mods);
     let mods = if legacy.is_empty() {
@@ -641,7 +742,8 @@ async fn create_title(replay: &ReplaySlim, map_path: PathBuf, map_title: &str) -
         title: format!("[{stars}⭐] {player} | {map_title}{mods} ({acc}%)"),
         pp,
         max_pp,
-        max_possible_combo,
+        nochoke_pp,
+        max_possible_combo: max_possible_combo.try_into().unwrap(),
         stars,
         acc,
     })
