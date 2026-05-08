@@ -5,6 +5,9 @@
 
 [Invite link](https://discord.com/oauth2/authorize?client_id=1490728112173092875&permissions=4503599627388928&integration_type=0&scope=bot+applications.commands)
 
+Default prefix: "<" , changeable using commands,
+Supports reply to render, adding skins from raw osk links etc..
+
 ### Building steps:
 (maybe)
 
