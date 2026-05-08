@@ -62,29 +62,30 @@ impl ReplayQueue {
 
             let replay_hash = replay.replay_hash.as_deref().unwrap_or("");
 
-            let mapset_id = match replay.beatmap_hash.as_deref() {
+            let (mapset_id, map_id) = match replay.beatmap_hash.as_deref() {
                 Some(hash) => match ctx.osu().beatmap().checksum(hash).await {
-                    Ok(BeatmapExtended { mapset, .. }) => match mapset {
-                        Some(mapset) => mapset.mapset_id,
+                    Ok(map) => match map.mapset {
+                        Some(mapset) => (mapset.mapset_id, map.map_id),
                         None => {
                             warn!("map without mapset");
 
                             let content = "The mapset was not received when requesting the map from the osu!api";
-                            let _ = input_channel.error(&ctx, content).await?;
-
+                            input_channel.error(&ctx, content).await?;
                             ctx.replay_queue.reset_peek().await;
+
                             continue;
                         }
                     },
                     Err(err) => {
-                        let context = format!("failed to request map with hash `{hash}`");
+                        let context = format!("failed to request map with hash {hash}");
                         let err = Report::from(err).wrap_err(context);
+
                         warn!("{err:?}");
 
                         let content = "Failed to retrieve map. Maybe it's not submitted?";
-                        let _ = input_channel.error(&ctx, content).await?;
-
+                        input_channel.error(&ctx, content).await?;
                         ctx.replay_queue.reset_peek().await;
+
                         continue;
                     }
                 },
@@ -92,9 +93,9 @@ impl ReplayQueue {
                     warn!("missing hash in replay requested by user {user}");
 
                     let content = "Missing the beatmap hash in the replay file";
-                    let _ = input_channel.error(&ctx, content).await?;
-
+                    input_channel.error(&ctx, content).await?;
                     ctx.replay_queue.reset_peek().await;
+
                     continue;
                 }
             };
@@ -478,7 +479,7 @@ impl ReplayQueue {
                 //.title(format!("{stars}⭐ {player} | {title} {mods_str} ({acc}%"))
                 .color(0x96DFE3) 
                 .title(video_title)
-                .url(format!("https://osu.ppy.sh/beatmapsets/{mapset_id}"))
+                .url(format!("https://osu.ppy.sh/beatmaps/{map_id}"))
                 .fields(vec![
                      // ── Score:  
                     EmbedField {
