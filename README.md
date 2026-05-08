@@ -1,4 +1,5 @@
 # ***palentirbot (no correlation)***
+### vibecoded shishabot back into life using claude and modern deps
 
 steps(maybe):
 
