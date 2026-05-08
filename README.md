@@ -1,6 +1,8 @@
 # ***palentirbot (no correlation)***
 ### vibecoded shishabot back into life using claude and modern deps
 
+![](https://cdn.insertdomainname.be/example.png)
+
 steps(maybe):
 
 1. git clone
