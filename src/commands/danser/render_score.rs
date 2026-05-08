@@ -87,21 +87,20 @@ async fn render_from_msg(ctx: Arc<Context>, mut command: InteractionCommand) -> 
 
     let score_id = score_to_render.id;
 
-    let mut replay_bytes = ctx
-        .client()
-        .get_raw_replay(score_id)
-        .await
-        .context("failed to get replay bytes")?;
-
-    let beatmap_md5 = ctx
+    // replay_raw returns a complete .osr (header + LZMA) from the v2 API,
+    // no header construction needed.
+    let replay_bytes = match ctx
         .osu()
-        .beatmap()
-        .map_id(beatmap_id)
+        .replay_raw(score_id)
         .await
-        .context("failed to get beatmap for checksum")?
-        .checksum
-        .unwrap_or_default();
-    extend_replay_bytes(&mut replay_bytes, &score_to_render, &beatmap_md5);
+    {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            let content = "Failed to download replay";
+            let _ = command.error(&ctx, content).await;
+            return Err(Report::new(err).wrap_err("failed to get replay bytes"));
+        }
+    };
 
     let fetched_username = ctx
         .osu()
@@ -116,7 +115,6 @@ async fn render_from_msg(ctx: Arc<Context>, mut command: InteractionCommand) -> 
         .map(|u| u.username.as_str())
         .or(fetched_username.as_deref())
         .unwrap_or("unknown player");
-
 
     let map_title = score_to_render
         .mapset
@@ -133,10 +131,9 @@ async fn render_from_msg(ctx: Arc<Context>, mut command: InteractionCommand) -> 
     let mut path = BotConfig::get().paths.downloads().to_owned();
     path.push(format!("{osu_user} - {map_title} [{diff_name}].osr"));
 
-
     fs::write(&path, &replay_bytes).context("failed to write into replay file")?;
 
-    let replay = match Replay::from_bytes(&replay_bytes) {
+    let mut replay = match Replay::from_bytes(&replay_bytes) {
         Ok(replay) => ReplaySlim::from(replay),
         Err(err) => {
             let content = "Failed to parse replay";
@@ -145,7 +142,7 @@ async fn render_from_msg(ctx: Arc<Context>, mut command: InteractionCommand) -> 
             return Err(Report::new(err).wrap_err("failed to parse replay"));
         }
     };
-
+    replay.grade = score_to_render.grade;
     let input_channel = command.channel_id;
     let user = command.user_id()?;
 
@@ -154,7 +151,8 @@ async fn render_from_msg(ctx: Arc<Context>, mut command: InteractionCommand) -> 
         .guild_settings(guild_id, |server| server.output_channel)
         .flatten()
         .unwrap_or(input_channel);
-
+    let builder = MessageBuilder::new().embed("Replay has been pushed to the queue!");
+    let queue_msg = command.update(&ctx, &builder).await?;
     let replay_data = ReplayData {
         input_channel,
         output_channel,
@@ -167,11 +165,12 @@ async fn render_from_msg(ctx: Arc<Context>, mut command: InteractionCommand) -> 
         player_name: Some(osu_user.to_string()),
         map_title: Some(map_title.to_string()),
         difficulty_name: Some(diff_name.to_string()),
+        queue_message: Some((queue_msg.id, queue_msg.channel_id)),
     };
     
     let was_empty = ctx.replay_queue.queue.lock().await.is_empty();
     ctx.replay_queue.push(replay_data).await;
-    let builder = MessageBuilder::new().embed("Replay has been pushed to the queue!");
+
     command.update(&ctx, &builder).await?;
     if was_empty {
         let ctx_clone = Arc::clone(&ctx);
@@ -296,40 +295,30 @@ pub async fn render_score_from_embed(
         return Ok(None);
     };
 
-
-    let mut replay_bytes = match ctx
-        .client()
-        .getrawreplay_for_user_map(beatmap_id, user_id, 0)
+    // replay_raw fetches by score ID via the v2 API, returning a complete .osr
+    // file (header + LZMA data already assembled by the osu! server).
+    // No header construction needed — just parse and write directly.
+    let replay_bytes = match ctx
+        .osu()
+        .replay_raw(score_to_render.id)
         .await
     {
         Ok(bytes) => bytes,
         Err(err) => {
             tracing::warn!(
                 ?err,
-                beatmap_id,
-                user_id,
+                score_id = score_to_render.id,
                 "failed to download replay for embed-derived render"
             );
             return Ok(None);
         }
     };
 
-
-    let beatmap_md5 = ctx
-        .osu()
-        .beatmap()
-        .map_id(beatmap_id)
-        .await
-        .context("failed to get beatmap for checksum")?
-        .checksum
-        .unwrap_or_default();
-    extend_replay_bytes(&mut replay_bytes, &score_to_render, &beatmap_md5);
-
-    let replay = match Replay::from_bytes(&replay_bytes.clone()) {
-        Ok(replay) => replay,
+    let mut replay = match Replay::from_bytes(&replay_bytes) {
+        Ok(replay) => ReplaySlim::from(replay),
         Err(err) => return Err(Report::new(err).wrap_err("failed to parse replay")),
     };
-
+    replay.grade = score_to_render.grade;
     let osu_user = score_to_render
         .user
         .as_ref()
@@ -337,10 +326,16 @@ pub async fn render_score_from_embed(
         .unwrap_or("unknown user");
 
     let map_title = score_to_render
+        .mapset
+        .as_ref()
+        .map(|mapset| mapset.title.as_str())
+        .unwrap_or("unknown map");
+
+    let diff_name = score_to_render
         .map
         .as_ref()
         .map(|map| map.version.as_str())
-        .unwrap_or("unknown map");
+        .unwrap_or("unknown diff");
 
     let mut path = BotConfig::get().paths.downloads().to_owned();
     path.push(format!("{osu_user} - {map_title}.osr"));
@@ -353,13 +348,14 @@ pub async fn render_score_from_embed(
             output_channel,
             pitch: None,
             path: path.clone(),
-            replay: ReplaySlim::from(replay),
+            replay: replay,
             time_points: TimePoints { start: 0, end: 0 },
             user,
             title: None,
-            player_name: None,
-            map_title: None,
-            difficulty_name: None,
+            player_name: Some(osu_user.to_string()),
+            map_title: Some(map_title.to_string()),
+            difficulty_name: Some(diff_name.to_string()),
+            queue_message: None,
         })
         .await;
 
@@ -411,31 +407,27 @@ fn get_timestamp_from_minimized_embed(embed: &Embed) -> Option<Timestamp> {
 }
 
 // https://osu.ppy.sh/wiki/en/Client/File_formats/Osr_%28file_format%29
-pub fn extend_replay_bytes(bytes: &mut Vec<u8>, score: &Score, map_md5: &str) {
+fn extend_replay_bytes(
+    bytes: &mut Vec<u8>,
+    score: &Score,
+    beatmap_md5: &str,
+    replay_mods: u32,
+) {
     let initial_len = bytes.len();
     let mut bytes_written = 0;
 
     bytes_written += encode_byte(bytes, score.mode as u8);
     bytes_written += encode_int(bytes, game_version(score.ended_at.date()));
-
-    //let map_md5 = score
-    //    .map
-    //    .as_ref()
-    //    .and_then(|map| map.checksum.as_deref())
-    //    .unwrap_or_default();
-
-    bytes_written += encode_string(bytes, map_md5);
+    bytes_written += encode_string(bytes, beatmap_md5);
 
     let username = score
         .user
         .as_ref()
         .map(|user| user.username.as_str())
         .unwrap_or_default();
-
     bytes_written += encode_string(bytes, username);
 
-    let replay_md5 = String::new();
-    bytes_written += encode_string(bytes, &replay_md5);
+    bytes_written += encode_string(bytes, "");
 
     let stats = &score.statistics;
     bytes_written += encode_short(bytes, stats.great as u16);
@@ -446,22 +438,17 @@ pub fn extend_replay_bytes(bytes: &mut Vec<u8>, score: &Score, map_md5: &str) {
     bytes_written += encode_short(bytes, stats.miss as u16);
 
     bytes_written += encode_int(bytes, score.score);
-
     bytes_written += encode_short(bytes, score.max_combo as u16);
-
     bytes_written += encode_byte(bytes, score.is_perfect_combo as u8);
 
-    bytes_written += encode_int(bytes, score.mods.bits());
+    // critical line: use explicit override
+    bytes_written += encode_int(bytes, replay_mods);
 
-    let lifebar = String::new();
-    bytes_written += encode_string(bytes, &lifebar);
-
+    bytes_written += encode_string(bytes, "");
     bytes_written += encode_datetime(bytes, score.ended_at);
-
     bytes_written += encode_int(bytes, initial_len as u32);
 
     bytes.rotate_right(bytes_written);
-
     encode_long(bytes, score.id);
 }
 
@@ -560,5 +547,3 @@ fn parseembedinputdata(input_: CommandInputData<'_>) -> Option<ParsedEmbed> {
 
     parse_embed(embed)
 }
-
-

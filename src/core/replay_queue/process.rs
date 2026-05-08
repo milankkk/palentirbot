@@ -57,6 +57,7 @@ impl ReplayQueue {
                 player_name,
                 map_title, 
                 difficulty_name,
+                queue_message,
             } = ctx.replay_queue.peek().await;
 
             let replay_hash = replay.replay_hash.as_deref().unwrap_or("");
@@ -151,6 +152,8 @@ impl ReplayQueue {
                 }
             };
 
+            tracing::warn!(mods = replay.mods, "replay mods being sent to danser");
+
             let mut command = Command::new(&danser_path);
             warn!("danser dir: {:?}", config.paths.danser());
             warn!("danser path: {:?}", danser_path);
@@ -235,7 +238,12 @@ impl ReplayQueue {
             }
 
 
-
+            //warn!("api mods bits: {}", score_to_render.mods);
+            warn!("parsed replay mods bits: {}", replay.mods);
+            warn!(
+                "parsed replay mods: {:?}",
+                GameModsLegacy::from_bits(replay.mods)
+            );
             info!("Finished replay processing");
 
             let title = match get_title() {
@@ -419,6 +427,7 @@ impl ReplayQueue {
                 remaining = remaining.saturating_sub(1);
             }
             ctx.replay_queue.notify.notify_waiters();
+            
 
 
 
@@ -440,28 +449,49 @@ impl ReplayQueue {
             let acc = replay.accuracy();
 
             use twilight_model::channel::message::embed::EmbedField;
+            use rosu_v2::prelude::Grade;
+            use rosu_v2::prelude::GameMode;
+            let emojis = &BotConfig::get().emojis;
 
             let score_value = {
                 use crate::util::numbers::with_comma_int;
                 with_comma_int(replay.score as u64).to_string()
             };
 
+            let grade = replay.grade;
+            tracing::warn!("grade reported: {:?}", grade);
+            let rank_value = match grade {
+                Grade::XH => format!("{}", emojis.grade_xh),
+                Grade::X  => format!("{}", emojis.grade_x),
+                Grade::SH => format!("{}", emojis.grade_sh),
+                Grade::S  => format!("{}", emojis.grade_s),
+                Grade::A  => format!("{}", emojis.grade_a),
+                Grade::B  => format!("{}", emojis.grade_b),
+                Grade::C  => format!("{}", emojis.grade_c),
+                Grade::D  => format!("{}", emojis.grade_d),
+                _   => format!("{}", emojis.grade_fail),
+            };
+
             let is_perfect_fc = replay.max_combo == max_possible_combo && replay.count_miss == 0;
 
-            let emojis = &BotConfig::get().emojis;
             let mut embed_builder = EmbedBuilder::new()
                 //.title(format!("{stars}⭐ {player} | {title} {mods_str} ({acc}%"))
                 .color(0x96DFE3) 
                 .title(video_title)
                 .url(format!("https://osu.ppy.sh/beatmapsets/{mapset_id}"))
                 .fields(vec![
-                     // ── Score: first, full-width ─────────────────────────────────────
+                     // ── Score:  
                     EmbedField {
-                        inline: false,
+                        inline: true,
+                        name: "Rank".to_owned(),
+                        value: rank_value,
+                    },  
+                    EmbedField {
+                        inline: true,
                         name:  "Score".to_owned(),
                         value: score_value,
                     },
-                    // ── All other info ───────────────────────────────────────────────
+                    // ── All other info 
                     EmbedField {
                         inline: true,
                         name: "Accuracy".to_owned(),
@@ -526,6 +556,9 @@ impl ReplayQueue {
             let content = format!("<@{user}> [Replay]({link})");
 
             let builder = MessageBuilder::new().content(content);
+            if let Some((msg_id, channel_id)) = queue_message {
+                let _ = ctx.http.delete_message(channel_id, msg_id).await;
+            }
 
 
             if let Err(err) = output_channel.create_message(&ctx, &builder).await {
@@ -710,18 +743,23 @@ async fn create_title(replay: &ReplaySlim, map_path: PathBuf, map_title: &str) -
         .misses(replay.count_miss as u32)
         .combo(replay.max_combo as u32)
         .lazer(false)
-        .legacy_total_score(replay.score as u32)
+        //.legacy_total_score(replay.score as u32)
         .calculate()
         .pp();
 
     let max_pp = rosu_pp::Performance::new(&map)
         .mods(replay.mods as u32)
+        .lazer(false)
         .calculate()
         .pp();
     let nochoke_pp = rosu_pp::Performance::new(&map)
         .mods(replay.mods as u32)
+        .n300((replay.count_300 + replay.count_miss) as u32)
         .n100(replay.count_100 as u32)
         .n50(replay.count_50 as u32)
+        .misses(0) // Force 0 misses
+        .combo(max_possible_combo)
+        .lazer(false)
         .calculate()
         .pp();
     let stars = (stars * 100.0).round() / 100.0;
@@ -807,9 +845,9 @@ fn get_title() -> Result<String> {
 }
 
 fn calculate_warmup_delay_secs(file_size_bytes: u64) -> u64 {
-    const UPLOAD_MBPS: f64 = 40.0;
-    const EFFICIENCY: f64 = 0.90;
-    const FRACTION: f64 = 0.95;
+    const UPLOAD_MBPS: f64 = 25.0;
+    const EFFICIENCY: f64 = 1.20;
+    const FRACTION: f64 = 0.90;
     const MIN_WAIT_SECS: f64 = 5.0;
     const EXTRA_BUFFER_SECS: f64 = 3.0;
     const MAX_WAIT_SECS: f64 = 45.0;

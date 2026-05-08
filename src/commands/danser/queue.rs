@@ -240,7 +240,7 @@ impl Display for ProcessStatus {
             ProcessStatus::Done => write!(f, "✅"),
             ProcessStatus::Running(Some(progress)) => write!(f, "🏃 {progress}%"),
             ProcessStatus::Running(None) => write!(f, "🏃"),
-            ProcessStatus::WaitingForCache(secs) => write!(f, "⏳ {}s", secs),
+            ProcessStatus::WaitingForCache(secs) => write!(f, "Waiting for discord cache:⏳ {}s left", secs),
             ProcessStatus::Waiting => write!(f, "🛜"),
             ProcessStatus::MapFound => write!(f, "⬇️"),
         }

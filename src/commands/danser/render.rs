@@ -167,6 +167,7 @@ pub async fn slash_render(ctx: Arc<Context>, mut command: InteractionCommand) ->
         player_name: Some(command.username()?.to_string()),
         map_title: None,
         difficulty_name: None,
+        queue_message: None,
     };
 
     let was_empty = ctx.replay_queue.queue.lock().await.is_empty();

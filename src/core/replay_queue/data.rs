@@ -2,10 +2,10 @@ use std::{borrow::Cow, path::PathBuf};
 
 use osu_db::Replay;
 use twilight_model::id::{
-    marker::{ChannelMarker, UserMarker},
+    marker::{ChannelMarker, UserMarker, MessageMarker},
     Id,
 };
-
+use rosu_v2::prelude::Grade;
 use crate::util::CowUtils;
 
 #[derive(Clone)]
@@ -21,6 +21,7 @@ pub struct ReplayData {
     pub player_name: Option<String>,
     pub map_title: Option<String>,
     pub difficulty_name: Option<String>,
+    pub queue_message: Option<(Id<MessageMarker>, Id<ChannelMarker>)>,
 }
 
 impl ReplayData {
@@ -96,6 +97,7 @@ pub struct ReplaySlim {
     pub replay_hash: Option<String>,
     pub score: u32,
     pub timestamp: Option<i64>,
+    pub grade: Grade,
 }
 
 impl ReplaySlim {
@@ -131,6 +133,7 @@ impl From<Replay> for ReplaySlim {
             replay_hash: replay.replay_hash,
             score: replay.score,
             timestamp: Some(replay.timestamp.timestamp()),
+            grade: Grade::F,
         }
     }
 }

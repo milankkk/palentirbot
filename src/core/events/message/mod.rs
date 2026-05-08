@@ -171,7 +171,7 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
                     player_name: None,
                     map_title: None,
                     difficulty_name: None,
-
+                    queue_message: None,
 
                 }).await;
 
