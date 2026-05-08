@@ -3,7 +3,10 @@
 
 ![](https://cdn.insertdomainname.be/example.png)
 
-steps(maybe):
+[Invite link](https://discord.com/oauth2/authorize?client_id=1490728112173092875&permissions=4503599627388928&integration_type=0&scope=bot+applications.commands)
+
+### Building steps:
+(maybe)
 
 1. git clone
 
