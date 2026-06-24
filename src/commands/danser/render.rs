@@ -152,6 +152,7 @@ pub async fn slash_render(ctx: Arc<Context>, mut command: InteractionCommand) ->
         return Err(err).with_context(|| format!("failed writing to file `{replay_file:?}`"));
     };
 
+
     let replay_data = ReplayData {
         input_channel: command.channel_id,
         output_channel,

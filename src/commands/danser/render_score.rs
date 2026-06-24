@@ -16,7 +16,7 @@ use twilight_model::{
     util::Timestamp,
 };
 use super::queue::send_queue_status;
-
+use crate::util::ChannelExt;
 use crate::{
     core::{replay_queue::ReplaySlim, BotConfig, Context, ReplayData, TimePoints},
     util::{
@@ -38,7 +38,7 @@ async fn render_from_msg(ctx: Arc<Context>, mut command: InteractionCommand) -> 
     };
 
 
-    let ts_unix = OffsetDateTime::from_unix_timestamp(timestamp.as_secs())
+    let ts_unix = OffsetDateTime::from_unix_timestamp(timestamp.unwrap().as_secs())
         .unwrap()
         .unix_timestamp();
 
@@ -89,18 +89,22 @@ async fn render_from_msg(ctx: Arc<Context>, mut command: InteractionCommand) -> 
 
     // replay_raw returns a complete .osr (header + LZMA) from the v2 API,
     // no header construction needed.
-    let replay_bytes = match ctx
-        .osu()
-        .replay_raw(score_id)
-        .await
-    {
+    let lzma_bytes: Vec<u8> = match ctx.client().get_raw_replay(score_to_render.id).await {
         Ok(bytes) => bytes,
         Err(err) => {
-            let content = "Failed to download replay";
-            let _ = command.error(&ctx, content).await;
-            return Err(Report::new(err).wrap_err("failed to get replay bytes"));
+            let _ = command.error(&ctx, "Failed to download replay").await;
+            return Err(err.wrap_err("failed to get replay bytes"));
         }
     };
+
+    let map_md5 = score_to_render.map.as_ref()
+        .and_then(|m| m.checksum.as_deref())
+        .unwrap_or_default();
+    let mods_bits = score_to_render.mods.bits();
+
+    let mut replay_bytes = Vec::new();
+    extend_replay_bytes(&mut replay_bytes, &score_to_render, map_md5, mods_bits);
+    replay_bytes.extend_from_slice(&lzma_bytes);
 
     let fetched_username = ctx
         .osu()
@@ -205,78 +209,57 @@ pub async fn render_score_from_embed(
 ) -> eyre::Result<Option<PathBuf>> {
     tracing::warn!("render_score_from_embed: entered for map/user");
 
-    let Some(ParsedEmbed { user_id, beatmap_id, timestamp }) = parse_embed(embed) else {
+    let Some(ParsedEmbed { user_id, beatmap_id, timestamp }) = 
+    parse_embed(embed) else {
         tracing::warn!("render_score_from_embed: parse_embed returned None");
         return Ok(None);
     };
 
-    let ts_unix = OffsetDateTime::from_unix_timestamp(timestamp.as_secs().into())
-        .unwrap()
-        .unix_timestamp();
 
-    let recent_scores = ctx
-        .osu()
-        .user_scores(user_id)
-        .recent()
-        .include_fails(false)
-        .limit(100)
-        .await
-        .context("failed to get recent scores")?;
+    let score_to_render: Score = if let Some(timestamp) = timestamp {
+        let ts_unix = timestamp.as_secs();
 
-    tracing::warn!(
-        user_id,
-        ts_unix,
-        count = recent_scores.len(),
-        "render_score_from_embed: fetched recent scores"
-    );
-
-    let mut score_to_render = None;
-
-    for score in &recent_scores {
-        let score_ts = score.ended_at.unix_timestamp();
-        let diff = score_ts.abs_diff(ts_unix);
-
-        tracing::warn!(
-            score_id = score.id,
-            score_ts,
-            diff,
-            replay = score.replay,
-            "recent score candidate"
-        );
-
-        if diff <= 3 && score.replay {
-            tracing::warn!(score_id = score.id, "recent score matched");
-            score_to_render = Some(score);
-            break;
-        }
-    }
-
-
-    let mut score_to_render = recent_scores
-        .into_iter()
-        .find(|score| {
-            let diff = score.ended_at.unix_timestamp().abs_diff(ts_unix);
-            if diff <= 10 { // Temporarily widen to 10s to see if it catches
-                tracing::warn!(score_id = score.id, diff, ts_unix, score_ts = score.ended_at.unix_timestamp(), "found close match");
-            }
-            diff <= 3 && score.replay
-        });
-
-    if score_to_render.is_none() {
-        let top_scores = ctx
+        // Check recents
+        let recent_scores = ctx
             .osu()
             .user_scores(user_id)
-            .best()
+            .recent()
+            .include_fails(false)
             .limit(100)
             .await
-            .context("failed to get top scores")?;
+            .context("failed to get recent scores")?;
 
-        score_to_render = top_scores
+        let score = recent_scores
             .into_iter()
-            .find(|score| score.ended_at.unix_timestamp().abs_diff(ts_unix) <= 3 && score.replay);
-    }
-    if score_to_render.is_none() {
-        tracing::warn!(user_id, beatmap_id, "trying best score on this beatmap");
+            .find(|s| (s.ended_at.unix_timestamp() - ts_unix).abs() <= 3 && s.replay);
+
+        if let Some(score) = score {
+            score
+        } else {
+            // Check tops
+            let top_scores = ctx
+                .osu()
+                .user_scores(user_id)
+                .best()
+                .limit(100)
+                .await
+                .context("failed to get top scores")?;
+
+            match top_scores
+                .into_iter()
+                .find(|s| (s.ended_at.unix_timestamp() - ts_unix).abs() <= 3 && s.replay)
+            {
+                Some(score) => score,
+                None => {
+                    let content = "Couldn't find the replay for this score";
+                    input_channel.error(&ctx, content).await?;
+                    return Ok(None);
+                }
+            }
+        }
+    } else {
+        // No timestamp (<current embed) — pick best replayable score on this map
+        tracing::warn!(user_id, beatmap_id, "no timestamp, fetching beatmap user scores");
 
         let map_scores = ctx
             .osu()
@@ -284,20 +267,15 @@ pub async fn render_score_from_embed(
             .await
             .context("failed to get user scores on beatmap")?;
 
-        score_to_render = map_scores.clone()
-            .into_iter()
-            .find(|score| score.ended_at.unix_timestamp().abs_diff(ts_unix) <= 10 && score.replay)
-            .or_else(|| map_scores.into_iter().find(|score| score.replay));
-    }
-
-    let Some(score_to_render) = score_to_render else {
-        tracing::warn!(user_id, "render_score_from_embed: score_to_render not found (checked recent/top)");
-        return Ok(None);
+        match map_scores.into_iter().find(|s| s.replay) {
+            Some(score) => score,
+            None => {
+                input_channel.error(&ctx, "No replayable score found on this map").await?;
+                return Ok(None);
+            }
+        }
     };
 
-    // replay_raw fetches by score ID via the v2 API, returning a complete .osr
-    // file (header + LZMA data already assembled by the osu! server).
-    // No header construction needed — just parse and write directly.
     let replay_bytes = match ctx
         .osu()
         .replay_raw(score_to_render.id)
@@ -365,32 +343,80 @@ pub async fn render_score_from_embed(
 struct ParsedEmbed {
     user_id: u32,
     beatmap_id: u32,
-    timestamp: Timestamp,
+    timestamp: Option<Timestamp>,
 }
+
+// fn parse_embed(embed: &Embed) -> Option<ParsedEmbed> {
+//     let user_url = embed.author.as_ref().and_then(|a| a.url.as_ref())?;
+//     let user_id = user_url.split('/').nth(4).and_then(|id| id.parse::<u32>().ok())?;
+
+//     let beatmap_url = embed.url.as_ref()?;
+//     let beatmap_id = beatmap_url
+//         .split('/')
+//         .last()
+//         .and_then(|id| id.parse::<u32>().ok())?;
+
+//     let timestamp = embed
+//         .timestamp
+//         .clone()
+//         .or_else(|| get_timestamp_from_minimized_embed(embed))?;
+
+//     Some(ParsedEmbed {
+//         user_id,
+//         beatmap_id,
+//         timestamp,
+//     })
+// }
 
 fn parse_embed(embed: &Embed) -> Option<ParsedEmbed> {
     let user_url = embed.author.as_ref().and_then(|a| a.url.as_ref())?;
-    let user_id = user_url.split('/').nth(4).and_then(|id| id.parse::<u32>().ok())?;
+    let user_id = user_url
+        .split('/')
+        .nth(4)
+        .and_then(|id| id.parse::<u32>().ok())?;
 
     let beatmap_url = embed.url.as_ref()?;
-    let beatmap_id = beatmap_url
-        .split('/')
-        .last()
-        .and_then(|id| id.parse::<u32>().ok())?;
+    let beatmap_id = if beatmap_url.contains("/b/") {
+        // Short format: https://osu.ppy.sh/b/442905
+        beatmap_url.split("/b/").nth(1)
+            .and_then(|id| id.parse::<u32>().ok())?
+    } else if beatmap_url.contains("/beatmaps/") {
+        // https://osu.ppy.sh/beatmaps/442905
+        beatmap_url.split('/').last()
+            .and_then(|id| id.parse::<u32>().ok())?
+    } else if beatmap_url.contains("/beatmapsets/") {
+        if let Some(fragment) = beatmap_url.split('#').nth(1) {
+            // https://osu.ppy.sh/beatmapsets/123#osu/442905
+            fragment.split('/').last()
+                .and_then(|id| id.parse::<u32>().ok())?
+        } else {
+            tracing::warn!(
+                author_url = ?embed.author.as_ref().and_then(|a| a.url.as_ref()),
+                embed_url = ?embed.url,
+                embed_timestamp = ?embed.timestamp,
+                fields = ?embed.fields,
+                "parse_embed failed, dumping embed structure"
+            );
+            return None;
+        }
+    } else {
+        tracing::warn!(
+            author_url = ?embed.author.as_ref().and_then(|a| a.url.as_ref()),
+            embed_url = ?embed.url,
+            embed_timestamp = ?embed.timestamp,
+            fields = ?embed.fields,
+            "parse_embed failed, dumping embed structure"
+        );
+        return None;
+    };
 
     let timestamp = embed
         .timestamp
         .clone()
-        .or_else(|| get_timestamp_from_minimized_embed(embed))?;
+        .or_else(|| get_timestamp_from_minimized_embed(embed));
 
-    Some(ParsedEmbed {
-        user_id,
-        beatmap_id,
-        timestamp,
-    })
+    Some(ParsedEmbed { user_id, beatmap_id, timestamp })
 }
-
-
 
 fn get_timestamp_from_minimized_embed(embed: &Embed) -> Option<Timestamp> {
     let field = embed.fields.first()?;

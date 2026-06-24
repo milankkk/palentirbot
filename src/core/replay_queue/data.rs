@@ -119,6 +119,15 @@ impl ReplaySlim {
 impl From<Replay> for ReplaySlim {
     #[inline]
     fn from(replay: Replay) -> Self {
+        let mods = replay.mods.bits();
+        let grade = calculate_grade_osu_std(
+            replay.count_300,
+            replay.count_100,
+            replay.count_50,
+            replay.count_miss,
+            mods,
+            replay.version,  // game version from .osr header
+        );
         Self {
             beatmap_hash: replay.beatmap_hash,
             count_300: replay.count_300,
@@ -133,7 +142,82 @@ impl From<Replay> for ReplaySlim {
             replay_hash: replay.replay_hash,
             score: replay.score,
             timestamp: Some(replay.timestamp.timestamp()),
-            grade: Grade::F,
+            grade,
         }
     }
+}
+
+/// Detect whether this replay was set on osu! lazer.
+/// Lazer writes versions >= 30_000_000. Stable uses date-based versions
+/// like 20240101. ScoreV2 mod on stable (bit 29) uses accuracy grading
+/// but for osu!std the grade thresholds are identical, so no special
+/// case is needed there.
+pub fn is_lazer_replay(game_version: u32) -> bool {
+    game_version >= 30_000_000
+}
+
+/// osu!standard grade calculation for both stable and lazer.
+/// Per the osu! wiki, the grade thresholds for osu!standard are
+/// identical between stable and lazer — both use hit-count ratios.
+/// Silver (XH/SH) requires Hidden (8), Flashlight (1024), or FadeIn (1048576).
+pub fn calculate_grade_osu_std(
+    count_300: u16,
+    count_100: u16,
+    count_50: u16,
+    count_miss: u16,
+    mods: u32,
+    game_version: u32,
+) -> Grade {
+    let n300  = count_300 as u32;
+    let n100  = count_100 as u32;
+    let n50   = count_50  as u32;
+    let nmiss = count_miss as u32;
+    let total = n300 + n100 + n50 + nmiss;
+
+    if total == 0 {
+        return Grade::F;
+    }
+
+    // A failing score (life bar drained) should remain F regardless of
+    // hit counts. We can't detect that from hit counts alone, but the
+    // caller (embed path) overwrites this with the API grade anyway.
+    // For local .osr files a passing score is assumed if total > 0.
+
+    let silver = (mods & 8) != 0        // Hidden
+              || (mods & 1024) != 0     // Flashlight
+              || (mods & 1048576) != 0; // FadeIn
+
+    // Note: lazer uses the same hit-count-based thresholds for osu!standard.
+    // The _is_lazer_ flag is available for future mode-specific divergence.
+    let _is_lazer = is_lazer_replay(game_version);
+
+    let ratio_300  = n300 as f32 / total as f32;
+    let ratio_50   = n50  as f32 / total as f32;
+
+    // SS: 100% accuracy — no 100s, no 50s, no misses
+    if n100 == 0 && n50 == 0 && nmiss == 0 {
+        return if silver { Grade::XH } else { Grade::X };
+    }
+
+    // S: >90% 300s, ≤1% 50s, 0 misses
+    if nmiss == 0 && ratio_300 > 0.90 && ratio_50 <= 0.01 {
+        return if silver { Grade::SH } else { Grade::S };
+    }
+
+    // A: >80% 300s + 0 misses  OR  >90% 300s
+    if (nmiss == 0 && ratio_300 > 0.80) || ratio_300 > 0.90 {
+        return Grade::A;
+    }
+
+    // B: >70% 300s + 0 misses  OR  >80% 300s
+    if (nmiss == 0 && ratio_300 > 0.70) || ratio_300 > 0.80 {
+        return Grade::B;
+    }
+
+    // C: >60% 300s
+    if ratio_300 > 0.60 {
+        return Grade::C;
+    }
+
+    Grade::D
 }

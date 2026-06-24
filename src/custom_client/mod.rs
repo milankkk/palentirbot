@@ -28,6 +28,7 @@ static MY_USER_AGENT: &str = env!("CARGO_PKG_NAME");
 #[repr(u8)]
 enum Site {
     DiscordAttachment,
+    DownloadOfficial,
     DownloadChimu,
     DownloadKitsu,
     DownloadNerinyan,
@@ -40,7 +41,7 @@ type Client = HyperClient<HttpsConnector<HttpConnector<GaiResolver>>, Body>;
 
 pub struct CustomClient {
     client: Client,
-    ratelimiters: [LeakyBucket; 7],
+    ratelimiters: [LeakyBucket; 8],
     upload: UploadData,
 }
 
@@ -80,6 +81,7 @@ impl CustomClient {
 
         let ratelimiters = [
             ratelimiter(2), // DiscordAttachment
+            ratelimiter(1), // DownloadOsu
             ratelimiter(1), // DownloadChimu
             ratelimiter(1), // DownloadKitsu
             ratelimiter(1), // DownloadNerinyan
@@ -276,7 +278,36 @@ impl CustomClient {
         base64::decode(content).context("failed to decode replay through base64")
     }
 
+    pub async fn download_official_mapset(&self, mapset_id: u32, osu_token: &str) -> Result<Bytes> {
+        let url = format!("https://osu.ppy.sh/beatmapsets/{}/download", mapset_id);
+        self.ratelimit(Site::DownloadCatboy).await;
 
+        let req = hyper::Request::builder()
+            .uri(&url)
+            .method(hyper::Method::GET)
+            .header(hyper::header::USER_AGENT, MY_USER_AGENT)
+            .header(hyper::header::AUTHORIZATION, format!("Bearer {}", osu_token))
+            .body(Body::empty())
+            .context("failed to build official download request")?;
+
+        let response = self.client
+            .request(req)
+            .await
+            .context("failed to receive official download response")?;
+
+        let status = response.status();
+        if status.is_client_error() || status.is_server_error() {
+            bail!("failed with status code {} when requesting {}", status, url);
+        }
+
+        let bytes = hyper::body::to_bytes(response.into_body())
+            .await
+            .context("failed to extract official download response bytes")?;
+
+        ensure!(bytes.starts_with(b"PK"), "official download returned invalid data");
+
+        Ok(bytes)
+    }
     pub async fn get_discord_attachment(&self, attachment: &Attachment) -> Result<Bytes> {
         self.make_get_request(&attachment.url, Site::DiscordAttachment)
             .await

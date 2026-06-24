@@ -474,7 +474,11 @@ impl ReplayQueue {
             };
 
             let is_perfect_fc = replay.max_combo == max_possible_combo && replay.count_miss == 0;
-
+            let replay_datetime: Option<time::OffsetDateTime> =
+                replay.timestamp.and_then(|ts: i64| {
+                    time::OffsetDateTime::from_unix_timestamp(ts).ok()
+                });
+            let dt = replay_datetime;
             let mut embed_builder = EmbedBuilder::new()
                 //.title(format!("{stars}⭐ {player} | {title} {mods_str} ({acc}%"))
                 .color(0x96DFE3) 
@@ -526,21 +530,13 @@ impl ReplayQueue {
                             emojis.hit_miss, replay.count_miss,
                         ),
                     },
+                    EmbedField {
+                        inline: false,
+                        name: "\u{200B}".to_owned(),
+                        value: format!("Played on <t:{}:F>", dt.expect("DATE").unix_timestamp()),
+                    },
                 ]);
-                let replay_datetime: Option<time::OffsetDateTime> =
-                    replay.timestamp.and_then(|ts: i64| {
-                        time::OffsetDateTime::from_unix_timestamp(ts).ok()
-                    });
-                if let Some(dt) = replay_datetime {
-                    let date_str = format!(
-                        "Played on {:04}-{:02}-{:02}",
-                        dt.year(),
-                        dt.month() as u8,
-                        dt.day()
-                    );
-                    embed_builder = embed_builder.footer(FooterBuilder::new(date_str));
-                    embed_builder = embed_builder.timestamp(dt);
-                }
+                
 
                 let embed = embed_builder.build();
 
@@ -668,13 +664,13 @@ async fn download_mapset(ctx: &Context, mapset_id: u32) -> Result<()> {
 }
 
 async fn request_mapset(ctx: &Context, mapset_id: u32) -> Result<Bytes> {
-    let catboy = match ctx.client().download_catboy_mapset(mapset_id).await {
+    let official = match ctx.client().download_official_mapset(mapset_id, &BotConfig::get().tokens.osu_api_key).await {
         Ok(bytes) => {
-            warn!("nekoha succes");
+            warn!("official succes");
             return Ok(bytes);
         },
         Err(err) => {
-            warn!("nekoha also failed: {err}");
+            warn!("official also failed: {err}");
             err
         }
     };
@@ -688,6 +684,27 @@ async fn request_mapset(ctx: &Context, mapset_id: u32) -> Result<Bytes> {
             err
         }
     };
+    let nerinyan = match ctx.client().download_nerinyan_mapset(mapset_id).await {
+        Ok(bytes) => {
+            warn!("nerinyan succes");
+            return Ok(bytes);
+        },
+        Err(err) => {
+            warn!("nerinyan also failed: {err}");
+            err
+        }
+    };
+    let catboy = match ctx.client().download_catboy_mapset(mapset_id).await {
+        Ok(bytes) => {
+            warn!("nekoha succes");
+            return Ok(bytes);
+        },
+        Err(err) => {
+            warn!("nekoha also failed: {err}");
+            err
+        }
+    };
+    
 
     let chimu = match ctx.client().download_chimu_mapset(mapset_id).await {
         Ok(bytes) => {
@@ -699,16 +716,7 @@ async fn request_mapset(ctx: &Context, mapset_id: u32) -> Result<Bytes> {
             err
         }
     };  
-    let nerinyan = match ctx.client().download_nerinyan_mapset(mapset_id).await {
-        Ok(bytes) => {
-            warn!("nerinyan succes");
-            return Ok(bytes);
-        },
-        Err(err) => {
-            warn!("nerinyan also failed: {err}");
-            err
-        }
-    };
+
 
     Err(Report::from(MapsetDownloadError { kitsu, chimu, nerinyan, catboy }))
 }
@@ -846,11 +854,11 @@ fn get_title() -> Result<String> {
 }
 
 fn calculate_warmup_delay_secs(file_size_bytes: u64) -> u64 {
-    const UPLOAD_MBPS: f64 = 25.0;
-    const EFFICIENCY: f64 = 1.20;
+    const UPLOAD_MBPS: f64 = 70.0;
+    const EFFICIENCY: f64 = 0.9;
     const FRACTION: f64 = 0.90;
-    const MIN_WAIT_SECS: f64 = 5.0;
-    const EXTRA_BUFFER_SECS: f64 = 3.0;
+    const MIN_WAIT_SECS: f64 = 1.0;
+    const EXTRA_BUFFER_SECS: f64 = 5.0;
     const MAX_WAIT_SECS: f64 = 45.0;
 
     let bytes_per_sec = (UPLOAD_MBPS * 1_000_000.0 / 8.0) * EFFICIENCY;
