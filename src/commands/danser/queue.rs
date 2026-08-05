@@ -5,11 +5,11 @@ use std::{
 
 use command_macros::SlashCommand;
 use eyre::Result;
+use std::time::Duration;
 use time::OffsetDateTime;
 use twilight_interactions::command::{CommandModel, CreateCommand};
 use twilight_model::channel::message::{embed::EmbedField, Message};
 use twilight_model::id::{marker::ChannelMarker, Id};
-use std::time::Duration;
 
 use crate::{
     core::{Context, ReplayStatus},
@@ -28,8 +28,8 @@ pub struct Queue;
 
 pub async fn build_queue_embed(ctx: &Context) -> EmbedBuilder {
     let queue_guard = ctx.replay_queue.queue.lock().await;
-    let queue_guard: &std::collections::VecDeque<crate::core::replay_queue::ReplayData> = &*queue_guard;
-
+    let queue_guard: &std::collections::VecDeque<crate::core::replay_queue::ReplayData> =
+        &*queue_guard;
 
     let status = *ctx.replay_queue.status.lock().await;
 
@@ -46,7 +46,10 @@ pub async fn build_queue_embed(ctx: &Context) -> EmbedBuilder {
             Rendering: {rendering}\n\
             Uploading: {uploading}",
             user = data.user,
-            map = data.title.clone().unwrap_or_else(|| data.replay_name().into_owned()),
+            map = data
+                .title
+                .clone()
+                .unwrap_or_else(|| data.replay_name().into_owned()),
             downloading = match status {
                 ReplayStatus::Waiting => ProcessStatus::Waiting,
                 ReplayStatus::Downloading => ProcessStatus::Running(None),
@@ -54,18 +57,18 @@ pub async fn build_queue_embed(ctx: &Context) -> EmbedBuilder {
                 _ => ProcessStatus::Done,
             },
             rendering = match status {
-                ReplayStatus::Waiting | ReplayStatus::Downloading | ReplayStatus::MapFound => ProcessStatus::Waiting,
+                ReplayStatus::Waiting | ReplayStatus::Downloading | ReplayStatus::MapFound =>
+                    ProcessStatus::Waiting,
                 ReplayStatus::Rendering(p) => ProcessStatus::Running(Some(p)),
                 _ => ProcessStatus::Done,
             },
             uploading = match status {
                 ReplayStatus::Uploading(secs) if secs > 0 => {
-                    ProcessStatus::WaitingForCache(secs)  // reuse Running for display
-                },
+                    ProcessStatus::WaitingForCache(secs) // reuse Running for display
+                }
                 ReplayStatus::Uploading(_) => ProcessStatus::Waiting,
                 _ => ProcessStatus::Waiting,
             },
-
         );
 
         let mut fields = vec![EmbedField {
@@ -74,15 +77,32 @@ pub async fn build_queue_embed(ctx: &Context) -> EmbedBuilder {
             value,
         }];
 
-
         if let Some(data) = iter.next() {
             let name = "Upcoming".to_owned();
             let mut value = String::with_capacity(128);
-            let _ = writeln!(value, "`2.` <@{}>: {}", data.user, data.title.clone().unwrap_or_else(|| data.replay_name().into_owned()));
+            let _ = writeln!(
+                value,
+                "`2.` <@{}>: {}",
+                data.user,
+                data.title
+                    .clone()
+                    .unwrap_or_else(|| data.replay_name().into_owned())
+            );
             for (data, idx) in iter.zip(3..) {
-                let _ = writeln!(value, "`{idx}.` <@{}>: {}", data.user, data.title.clone().unwrap_or_else(|| data.replay_name().into_owned()));
+                let _ = writeln!(
+                    value,
+                    "`{idx}.` <@{}>: {}",
+                    data.user,
+                    data.title
+                        .clone()
+                        .unwrap_or_else(|| data.replay_name().into_owned())
+                );
             }
-            fields.push(EmbedField { inline: false, name, value });
+            fields.push(EmbedField {
+                inline: false,
+                name,
+                value,
+            });
         }
 
         embed = embed.fields(fields);
@@ -94,7 +114,6 @@ pub async fn build_queue_embed(ctx: &Context) -> EmbedBuilder {
 }
 
 pub async fn send_queue_status(ctx: Arc<Context>, channel_id: Id<ChannelMarker>) -> Result<()> {
-
     let embed = build_queue_embed(&ctx).await.build();
 
     let msg: Message = ctx
@@ -112,10 +131,9 @@ pub async fn send_queue_status(ctx: Arc<Context>, channel_id: Id<ChannelMarker>)
 
         loop {
             // Wake on any status change, or after 5s as a fallback
-            tokio::time::timeout(
-                Duration::from_secs(5),
-                notify.notified(),
-            ).await.ok();
+            tokio::time::timeout(Duration::from_secs(5), notify.notified())
+                .await
+                .ok();
 
             // Read current state
             let (is_empty, status) = {
@@ -140,12 +158,8 @@ pub async fn send_queue_status(ctx: Arc<Context>, channel_id: Id<ChannelMarker>)
                 let _ = ctx.http.delete_message(channel_id, message_id).await;
                 break;
             }
-
         }
     });
-
-
-
 
     Ok(())
 }
@@ -181,16 +195,14 @@ async fn slash_queue(ctx: Arc<Context>, command: InteractionCommand) -> Result<(
     let channel_id = msg.channel_id;
     let message_id = msg.id;
 
-
     tokio::spawn(async move {
         let notify = Arc::clone(&ctx.replay_queue.notify);
 
         loop {
             // Wake on any status change, or after 5s as a fallback
-            tokio::time::timeout(
-                Duration::from_secs(5),
-                notify.notified(),
-            ).await.ok();
+            tokio::time::timeout(Duration::from_secs(5), notify.notified())
+                .await
+                .ok();
 
             // Read current state
             let (is_empty, status) = {
@@ -214,12 +226,8 @@ async fn slash_queue(ctx: Arc<Context>, command: InteractionCommand) -> Result<(
                 let _ = ctx.http.delete_message(channel_id, message_id).await;
                 break;
             }
-
         }
     });
-
-
-
 
     Ok(())
 }
@@ -240,7 +248,9 @@ impl Display for ProcessStatus {
             ProcessStatus::Done => write!(f, "✅"),
             ProcessStatus::Running(Some(progress)) => write!(f, "🏃 {progress}%"),
             ProcessStatus::Running(None) => write!(f, "🏃"),
-            ProcessStatus::WaitingForCache(secs) => write!(f, "Waiting for discord cache:⏳ {}s left", secs),
+            ProcessStatus::WaitingForCache(secs) => {
+                write!(f, "Waiting for discord cache:⏳ {}s left", secs)
+            }
             ProcessStatus::Waiting => write!(f, "🛜"),
             ProcessStatus::MapFound => write!(f, "⬇️"),
         }

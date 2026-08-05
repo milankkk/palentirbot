@@ -1,9 +1,6 @@
 use std::sync::Arc;
 
-use crate::commands::danser::{
-    queue::send_queue_status,
-    render_score::render_score_from_message,
-};
+use crate::commands::danser::{queue::send_queue_status, render_score::render_score_from_message};
 
 use crate::util::builder::MessageBuilder;
 
@@ -42,7 +39,9 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
         .guild_id
         .and_then(|gid| {
             ctx.guild_settings(gid, |s| {
-                s.prefix.clone().unwrap_or_else(|| DEFAULT_PREFIX.to_owned())
+                s.prefix
+                    .clone()
+                    .unwrap_or_else(|| DEFAULT_PREFIX.to_owned())
             })
         })
         .unwrap_or_else(|| DEFAULT_PREFIX.to_owned());
@@ -62,8 +61,8 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
     match cmd_name.as_str() {
         // ── ping ──────────────────────────────────────────────────────────────
         "ping" => {
-            use crate::util::MessageExt as _;
             use crate::util::builder::MessageBuilder;
+            use crate::util::MessageExt as _;
             let start = std::time::Instant::now();
             let builder = MessageBuilder::new().content("Pong!");
             match msg.channel_id.create_message(&ctx, &builder).await {
@@ -80,7 +79,9 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
         "render" => {
             if let Some(attachment) = msg.attachments.first() {
                 if !matches!(attachment.filename.split('.').last(), Some("osr")) {
-                    let _ = msg.error(&ctx, "The attachment must be a `.osr` file!").await;
+                    let _ = msg
+                        .error(&ctx, "The attachment must be a `.osr` file!")
+                        .await;
                     return;
                 }
 
@@ -88,7 +89,10 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
                 if let Some(guild_id) = msg.guild_id {
                     if let Ok((true, reason)) = ctx.psql()._is_server_blacklisted(guild_id).await {
                         let mut c = String::from("This server has been blacklisted.");
-                        if let Some(r) = reason { c.push(' '); c.push_str(&r); }
+                        if let Some(r) = reason {
+                            c.push(' ');
+                            c.push_str(&r);
+                        }
                         let _ = msg.error(&ctx, c).await;
                         return;
                     }
@@ -133,14 +137,19 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
                     Ok(r) => r,
                     Err(err) => {
                         tracing::error!(?err, "failed to parse .osr");
-                        let _ = msg.error(&ctx,
-                            "Failed to parse the `.osr` file. Is it a valid replay?").await;
+                        let _ = msg
+                            .error(
+                                &ctx,
+                                "Failed to parse the `.osr` file. Is it a valid replay?",
+                            )
+                            .await;
                         return;
                     }
                 };
                 if replay.mode != Mode::Standard {
-                    let _ = msg.error(&ctx,
-                        "danser only accepts osu!standard plays, sorry").await;
+                    let _ = msg
+                        .error(&ctx, "danser only accepts osu!standard plays, sorry")
+                        .await;
                     return;
                 }
 
@@ -150,35 +159,50 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
                 replay_file.push(&attachment.filename);
                 use tokio::io::AsyncWriteExt as _;
                 match tokio::fs::File::create(&replay_file).await {
-                    Ok(mut f) => { if let Err(e) = f.write_all(&bytes).await {
-                        tracing::error!(?e); let _ = msg.error(&ctx, "Failed to save replay.").await; return;
-                    }},
-                    Err(e) => { tracing::error!(?e); let _ = msg.error(&ctx, "Failed to save replay.").await; return; }
+                    Ok(mut f) => {
+                        if let Err(e) = f.write_all(&bytes).await {
+                            tracing::error!(?e);
+                            let _ = msg.error(&ctx, "Failed to save replay.").await;
+                            return;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(?e);
+                        let _ = msg.error(&ctx, "Failed to save replay.").await;
+                        return;
+                    }
                 }
 
                 // Push to queue
                 use crate::core::replay_queue::{ReplayData, ReplaySlim, TimePoints};
                 let was_empty = ctx.replay_queue.queue.lock().await.is_empty();
-                ctx.replay_queue.push(ReplayData {
-                    input_channel: msg.channel_id,
-                    output_channel,
-                    pitch,
-                    path: replay_file,
-                    replay: ReplaySlim::from(replay),
-                    time_points: TimePoints { start: start_secs, end: end_secs },
-                    user: msg.author.id,
-                    title: None,
-                    player_name: None,
-                    map_title: None,
-                    difficulty_name: None,
-                    queue_message: None,
-
-                }).await;
+                ctx.replay_queue
+                    .push(ReplayData {
+                        input_channel: msg.channel_id,
+                        output_channel,
+                        pitch,
+                        path: replay_file,
+                        replay: ReplaySlim::from(replay),
+                        time_points: TimePoints {
+                            start: start_secs,
+                            end: end_secs,
+                        },
+                        user: msg.author.id,
+                        title: None,
+                        player_name: None,
+                        map_title: None,
+                        difficulty_name: None,
+                        queue_message: None,
+                    })
+                    .await;
 
                 use crate::util::builder::MessageBuilder;
                 let _ = msg
                     .channel_id
-                    .create_message(&ctx, &MessageBuilder::new().embed("Replay has been added to the queue!"))
+                    .create_message(
+                        &ctx,
+                        &MessageBuilder::new().embed("Replay has been added to the queue!"),
+                    )
                     .await;
 
                 if was_empty {
@@ -237,13 +261,14 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
         // ── queue ─────────────────────────────────────────────────────────────
         "queue" => {
             use crate::util::builder::MessageBuilder;
-            let embed = crate::commands::danser::build_queue_embed(&ctx).await.build();
+            let embed = crate::commands::danser::build_queue_embed(&ctx)
+                .await
+                .build();
             let _ = msg
                 .channel_id
                 .create_message(&ctx, &MessageBuilder::new().embed(embed))
                 .await;
         }
-
 
         // ── help ──────────────────────────────────────────────────────────────
         "help" => {
@@ -270,26 +295,36 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
                  Slash commands are also available — type `/` to browse them.\n\
                  Server admins can change the prefix with `/setup setprefix`."
             );
-            let embed = EmbedBuilder::new().title("Help").description(description).build();
-            let _ = msg.channel_id
+            let embed = EmbedBuilder::new()
+                .title("Help")
+                .description(description)
+                .build();
+            let _ = msg
+                .channel_id
                 .create_message(&ctx, &MessageBuilder::new().embed(embed))
                 .await;
         }
 
         // ── invite ────────────────────────────────────────────────────────────
         "invite" => {
-            use crate::util::{builder::{EmbedBuilder, MessageBuilder}, constants::INVITE_LINK};
+            use crate::util::{
+                builder::{EmbedBuilder, MessageBuilder},
+                constants::INVITE_LINK,
+            };
             let embed = EmbedBuilder::new()
-                .description(INVITE_LINK).title("Invite me to your server!").build();
-            let _ = msg.channel_id
+                .description(INVITE_LINK)
+                .title("Invite me to your server!")
+                .build();
+            let _ = msg
+                .channel_id
                 .create_message(&ctx, &MessageBuilder::new().embed(embed))
                 .await;
         }
 
         // ── skinlist ──────────────────────────────────────────────────────────
         "skinlist" | "skins" => {
-            use std::ffi::OsString;
             use crate::util::builder::{EmbedBuilder, MessageBuilder};
+            use std::ffi::OsString;
 
             let skins_result: Result<Vec<OsString>, _> = {
                 let mut skin_list = ctx.skin_list();
@@ -322,7 +357,6 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
                 }
             }
         }
-
 
         // ── unknown: silently ignore ──────────────────────────────────────────
         _ => {}

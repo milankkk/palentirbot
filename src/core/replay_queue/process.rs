@@ -1,3 +1,15 @@
+use crate::util::builder::EmbedBuilder;
+use crate::util::builder::FooterBuilder;
+use crate::util::MessageExt;
+use crate::{
+    core::{BotConfig, Context, ReplayStatus},
+    util::{builder::MessageBuilder, levenshtein_similarity, ChannelExt},
+};
+use bytes::Bytes;
+use eyre::{Context as _, ContextCompat, Report, Result};
+use rosu_pp::Beatmap;
+use rosu_v2::prelude::BeatmapExtended;
+use rosu_v2::prelude::GameModsLegacy;
 use std::{
     error::Error as StdError,
     ffi::OsStr,
@@ -8,26 +20,11 @@ use std::{
     process::Stdio,
     sync::Arc,
 };
-use rosu_v2::prelude::BeatmapExtended;
-use rosu_v2::prelude::GameModsLegacy;
-use bytes::Bytes;
-use eyre::{Context as _, ContextCompat, Report, Result};
-use tokio::io::{AsyncReadExt, BufReader};
 use tokio::io::AsyncBufReadExt;
-use rosu_pp::Beatmap;
-use crate::util::builder::EmbedBuilder;
+use tokio::io::{AsyncReadExt, BufReader};
+use tokio::process::{ChildStdout, Command};
 use tokio::time::{sleep, Duration};
-use crate::util::MessageExt;
-use crate::util::builder::FooterBuilder;
-use tokio::{
-    process::{ChildStdout, Command},
-};
 use zip::ZipArchive;
-use crate::{
-    core::{BotConfig, Context, ReplayStatus},
-    util::{builder::MessageBuilder, levenshtein_similarity, ChannelExt},
-};
-
 
 use super::{ReplayData, ReplayQueue, ReplaySlim};
 
@@ -55,7 +52,7 @@ impl ReplayQueue {
                 user,
                 title,
                 player_name,
-                map_title, 
+                map_title,
                 difficulty_name,
                 queue_message,
             } = ctx.replay_queue.peek().await;
@@ -101,14 +98,14 @@ impl ReplayQueue {
             };
 
             warn!("Started map download");
-                        let mut mapset_path = config.paths.songs();
+            let mut mapset_path = config.paths.songs();
             mapset_path.push(mapset_id.to_string());
 
             if mapset_path.exists() {
                 warn!("Mapset {mapset_id} already exists locally, skipping download.");
                 ctx.replay_queue.set_status(ReplayStatus::MapFound).await;
                 ctx.replay_queue.notify.notify_waiters();
-                
+
                 // Sleep for 1 second just so the emoji is visible briefly before rendering starts
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
             } else {
@@ -118,8 +115,14 @@ impl ReplayQueue {
 
                 if let Err(err) = download_mapset(&ctx, mapset_id).await {
                     warn!("{err:?}");
-                    let content = "Failed to download map. Mirrors are likely down, try again later.";
-                    let _ = input_channel.create_message(&ctx, &crate::util::builder::MessageBuilder::new().content(content)).await;
+                    let content =
+                        "Failed to download map. Mirrors are likely down, try again later.";
+                    let _ = input_channel
+                        .create_message(
+                            &ctx,
+                            &crate::util::builder::MessageBuilder::new().content(content),
+                        )
+                        .await;
                     ctx.replay_queue.reset_peek().await;
                     continue;
                 }
@@ -158,8 +161,8 @@ impl ReplayQueue {
             let mut command = Command::new(&danser_path);
             warn!("danser dir: {:?}", config.paths.danser());
             warn!("danser path: {:?}", danser_path);
-            let path = std::fs::canonicalize(&path)
-                .context("failed to canonicalize replay path")?;
+            let path =
+                std::fs::canonicalize(&path).context("failed to canonicalize replay path")?;
             command
                 .current_dir(config.paths.danser())
                 .arg("-noupdatecheck")
@@ -175,7 +178,6 @@ impl ReplayQueue {
                 .arg("-preciseprogress")
                 .stderr(Stdio::piped())
                 .stdout(Stdio::piped());
-            
 
             // conditional args
             if time_points.start > 0 {
@@ -188,7 +190,6 @@ impl ReplayQueue {
                 let pitch_val: f64 = pitch;
                 command.args(["-pitch", &pitch_val.to_string()]);
             }
-
 
             info!("Started replay processing");
 
@@ -238,7 +239,6 @@ impl ReplayQueue {
                 }
             }
 
-
             //warn!("api mods bits: {}", score_to_render.mods);
             warn!("parsed replay mods bits: {}", replay.mods);
             warn!(
@@ -278,7 +278,7 @@ impl ReplayQueue {
             map_path.push(format!("{mapset_id}/{map_osu_file}"));
 
             // --- NEW PARSING LOGIC HERE ---
-                        // Extract the song name and difficulty from the `.osu` filename
+            // Extract the song name and difficulty from the `.osu` filename
             let (base_name, difficulty) = map_osu_file
                 .strip_suffix(".osu")
                 .and_then(|s| s.rsplit_once(" ["))
@@ -292,27 +292,38 @@ impl ReplayQueue {
                 format!("{} [{}]", base_name, difficulty)
             };
 
-            let TitleResult { title: video_title, pp, max_pp, nochoke_pp, max_possible_combo, stars, acc } =
-                match create_title(&replay, map_path.clone(), &title).await {
-                    Ok(result) => result,
-                    Err(err) => {
-                        let err = err.wrap_err("failed to create title");
-                        warn!("{err:?}");
-                        let content = "There was an error while trying to create the video title";
-                        let _ = input_channel.error(&ctx, content).await;
-                        ctx.replay_queue.reset_peek().await;
-                        continue;
-                    }
-                };
+            let TitleResult {
+                title: video_title,
+                pp,
+                max_pp,
+                nochoke_pp,
+                max_possible_combo,
+                stars,
+                acc,
+            } = match create_title(&replay, map_path.clone(), &title).await {
+                Ok(result) => result,
+                Err(err) => {
+                    let err = err.wrap_err("failed to create title");
+                    warn!("{err:?}");
+                    let content = "There was an error while trying to create the video title";
+                    let _ = input_channel.error(&ctx, content).await;
+                    ctx.replay_queue.reset_peek().await;
+                    continue;
+                }
+            };
             // Store the formatted title back so the queue embed can display it
-            ctx.replay_queue.queue.lock().await
+            ctx.replay_queue
+                .queue
+                .lock()
+                .await
                 .front_mut()
                 .map(|d| d.title = Some(video_title.clone()));
 
-
             // 1. Parse the components out of: "[7.05⭐] WhiteCat | DECO*27 - First Storm +HDDT 98.5%"
             let without_prefix = video_title.trim_start_matches('[');
-            let (stars, rest) = without_prefix.split_once("⭐] ").unwrap_or(("0.00", without_prefix));
+            let (stars, rest) = without_prefix
+                .split_once("⭐] ")
+                .unwrap_or(("0.00", without_prefix));
             let (player, rest) = rest.split_once(" | ").unwrap_or(("Unknown", rest));
 
             let rest = rest.trim_end_matches('%');
@@ -324,7 +335,7 @@ impl ReplayQueue {
                 (rest, "NM")
             };
 
-            // 2. Helper function to safely replace dots/spaces with underscores 
+            // 2. Helper function to safely replace dots/spaces with underscores
             let sanitize = |s: &str| -> String {
                 let mut res = String::new();
                 let mut last_was_underscore = false;
@@ -346,10 +357,13 @@ impl ReplayQueue {
             // 3. Combine the sanitized values and add the replay hash at the end!
             // We take the first 8 characters of the replay hash to keep the filename from getting too long.
             //let hash_suffix = if replay_hash.len() > 8 { &replay_hash[..8] } else { replay_hash };
-            
+
             use std::time::{SystemTime, UNIX_EPOCH};
 
-            let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+            let timestamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
 
             let safe_filename = format!(
                 "{}-{}-{}-{}-{}_{}_{}",
@@ -358,29 +372,44 @@ impl ReplayQueue {
                 sanitize(map_name),
                 sanitize(mods),
                 sanitize(acc),
-                if replay_hash.len() > 8 { &replay_hash[..8] } else { replay_hash },
+                if replay_hash.len() > 8 {
+                    &replay_hash[..8]
+                } else {
+                    replay_hash
+                },
                 timestamp // Forces a 100% unique filename every single time
             );
 
-
             // 4. Rename the file locally
             let mut old_filepath = config.paths.replays().clone();
-            old_filepath.push(format!("{}.mp4", filename)); 
+            old_filepath.push(format!("{}.mp4", filename));
 
             let mut new_filepath = config.paths.replays().clone();
-            new_filepath.push(format!("{}.mp4", safe_filename)); 
+            new_filepath.push(format!("{}.mp4", safe_filename));
 
             if let Err(err) = tokio::fs::rename(&old_filepath, &new_filepath).await {
                 warn!("Failed to rename MP4 file: {:?}", err);
             }
 
             info!("Started upload to server");
-            ctx.replay_queue.set_status(ReplayStatus::Uploading(0)).await;
+            ctx.replay_queue
+                .set_status(ReplayStatus::Uploading(0))
+                .await;
             let beatmap_link = format!("https://osu.ppy.sh/beatmapsets/{}", mapset_id);
 
             // 6. Upload the RENAMED file!
-            let upload_hash = if replay_hash.is_empty() { "nohash" } else { &replay_hash };
-            let upload_fut = ctx.client().upload_video(&video_title, user, &new_filepath, &beatmap_link, upload_hash);
+            let upload_hash = if replay_hash.is_empty() {
+                "nohash"
+            } else {
+                &replay_hash
+            };
+            let upload_fut = ctx.client().upload_video(
+                &video_title,
+                user,
+                &new_filepath,
+                &beatmap_link,
+                upload_hash,
+            );
 
             let link = match upload_fut.await {
                 Ok(res) if res.error == 1 => {
@@ -401,11 +430,8 @@ impl ReplayQueue {
                 }
             };
 
-
-
             info!("Finished upload to server");
             warn!("upload returned link: {}", link);
-
 
             if let Ok(mut warmup_msg) = output_channel
                 .create_message(&ctx, &MessageBuilder::new().content(link.clone()))
@@ -422,15 +448,14 @@ impl ReplayQueue {
             //ctx.replay_queue.set_status(ReplayStatus::Uploading(wait_secs)).await;
             let mut remaining = wait_secs;
             while remaining > 0 {
-                ctx.replay_queue.set_status(ReplayStatus::Uploading(remaining)).await;
+                ctx.replay_queue
+                    .set_status(ReplayStatus::Uploading(remaining))
+                    .await;
                 ctx.replay_queue.notify.notify_waiters();
                 sleep(Duration::from_secs(1)).await;
                 remaining = remaining.saturating_sub(1);
             }
             ctx.replay_queue.notify.notify_waiters();
-            
-
-
 
             //let content = format!("<@{user}> your replay is ready!\n{link}");
             //let watch_link = link.replacen("https://replays.insertdomainname.be/watch/", "https://replays.insertdomainname.be/", 1);
@@ -442,16 +467,13 @@ impl ReplayQueue {
                 format!("+{}", legacy_mods)
             };
 
-            let player = replay
-                .player_name
-                .as_ref()
-                .map(|user| user.clone());
+            let player = replay.player_name.as_ref().map(|user| user.clone());
 
             let acc = replay.accuracy();
 
-            use twilight_model::channel::message::embed::EmbedField;
-            use rosu_v2::prelude::Grade;
             use rosu_v2::prelude::GameMode;
+            use rosu_v2::prelude::Grade;
+            use twilight_model::channel::message::embed::EmbedField;
             let emojis = &BotConfig::get().emojis;
 
             let score_value = {
@@ -463,40 +485,39 @@ impl ReplayQueue {
             tracing::warn!("grade reported: {:?}", grade);
             let rank_value = match grade {
                 Grade::XH => format!("{}", emojis.grade_xh),
-                Grade::X  => format!("{}", emojis.grade_x),
+                Grade::X => format!("{}", emojis.grade_x),
                 Grade::SH => format!("{}", emojis.grade_sh),
-                Grade::S  => format!("{}", emojis.grade_s),
-                Grade::A  => format!("{}", emojis.grade_a),
-                Grade::B  => format!("{}", emojis.grade_b),
-                Grade::C  => format!("{}", emojis.grade_c),
-                Grade::D  => format!("{}", emojis.grade_d),
-                _   => format!("{}", emojis.grade_fail),
+                Grade::S => format!("{}", emojis.grade_s),
+                Grade::A => format!("{}", emojis.grade_a),
+                Grade::B => format!("{}", emojis.grade_b),
+                Grade::C => format!("{}", emojis.grade_c),
+                Grade::D => format!("{}", emojis.grade_d),
+                _ => format!("{}", emojis.grade_fail),
             };
 
             let is_perfect_fc = replay.max_combo == max_possible_combo && replay.count_miss == 0;
-            let replay_datetime: Option<time::OffsetDateTime> =
-                replay.timestamp.and_then(|ts: i64| {
-                    time::OffsetDateTime::from_unix_timestamp(ts).ok()
-                });
+            let replay_datetime: Option<time::OffsetDateTime> = replay
+                .timestamp
+                .and_then(|ts: i64| time::OffsetDateTime::from_unix_timestamp(ts).ok());
             let dt = replay_datetime;
             let mut embed_builder = EmbedBuilder::new()
                 //.title(format!("{stars}⭐ {player} | {title} {mods_str} ({acc}%"))
-                .color(0x96DFE3) 
+                .color(0x96DFE3)
                 .title(video_title)
                 .url(format!("https://osu.ppy.sh/beatmaps/{map_id}"))
                 .fields(vec![
-                     // ── Score:  
+                    // ── Score:
                     EmbedField {
                         inline: true,
                         name: "Rank".to_owned(),
                         value: rank_value,
-                    },  
+                    },
                     EmbedField {
                         inline: true,
-                        name:  "Score".to_owned(),
+                        name: "Score".to_owned(),
                         value: score_value,
                     },
-                    // ── All other info 
+                    // ── All other info
                     EmbedField {
                         inline: true,
                         name: "Accuracy".to_owned(),
@@ -507,7 +528,6 @@ impl ReplayQueue {
                         name: "Max Combo".to_owned(),
                         value: format!("{}/{}x", replay.max_combo, max_possible_combo),
                     },
-
                     EmbedField {
                         inline: true,
                         name: "pp".to_owned(),
@@ -516,7 +536,10 @@ impl ReplayQueue {
                             format!("{:.2}pp / {:.2}pp", pp, max_pp)
                         } else {
                             // Shows the "If FC" text if they missed, sliderbroke, or dropped slider ends
-                            format!("{:.2}pp *(No Choke: {:.2}pp)* / {:.2}pp", pp, nochoke_pp, max_pp)
+                            format!(
+                                "{:.2}pp *(No Choke: {:.2}pp)* / {:.2}pp",
+                                pp, nochoke_pp, max_pp
+                            )
                         },
                     },
                     EmbedField {
@@ -524,10 +547,14 @@ impl ReplayQueue {
                         name: "Hits".to_owned(),
                         value: format!(
                             "{} {} | {} {} | {} {} | {} {}",
-                            emojis.hit_300,  replay.count_300,
-                            emojis.hit_100,  replay.count_100,
-                            emojis.hit_50,   replay.count_50,
-                            emojis.hit_miss, replay.count_miss,
+                            emojis.hit_300,
+                            replay.count_300,
+                            emojis.hit_100,
+                            replay.count_100,
+                            emojis.hit_50,
+                            replay.count_50,
+                            emojis.hit_miss,
+                            replay.count_miss,
                         ),
                     },
                     EmbedField {
@@ -536,14 +563,15 @@ impl ReplayQueue {
                         value: format!("Played on <t:{}:F>", dt.expect("DATE").unix_timestamp()),
                     },
                 ]);
-                
 
-                let embed = embed_builder.build();
-
+            let embed = embed_builder.build();
 
             let embed_builder = MessageBuilder::new().embed(embed);
             if let Err(err) = output_channel.create_message(&ctx, &embed_builder).await {
-                warn!("{:?}", Report::from(err).wrap_err("failed to send replay details embed"));
+                warn!(
+                    "{:?}",
+                    Report::from(err).wrap_err("failed to send replay details embed")
+                );
             }
 
             // existing code continues below:
@@ -557,14 +585,16 @@ impl ReplayQueue {
                 let _ = ctx.http.delete_message(channel_id, msg_id).await;
             }
 
-
             if let Err(err) = output_channel.create_message(&ctx, &builder).await {
                 let err = Report::from(err).wrap_err("failed to send video link");
                 warn!("{err:?}");
             }
             // 1. Delete the generated .mp4 from the Replays folder after upload
             if let Err(err) = tokio::fs::remove_file(&new_filepath).await {
-                warn!("Failed to delete local MP4 file {:?}: {}", new_filepath, err);
+                warn!(
+                    "Failed to delete local MP4 file {:?}: {}",
+                    new_filepath, err
+                );
             } else {
                 warn!("Cleaned up local MP4 file at: {:?}.", new_filepath);
             }
@@ -582,7 +612,7 @@ impl ReplayQueue {
 
 async fn read_danser_progress<R: tokio::io::AsyncRead + Unpin>(
     ctx: std::sync::Arc<crate::core::Context>,
-    mut reader: tokio::io::BufReader<R>
+    mut reader: tokio::io::BufReader<R>,
 ) {
     use tokio::io::AsyncReadExt;
 
@@ -590,7 +620,9 @@ async fn read_danser_progress<R: tokio::io::AsyncRead + Unpin>(
     let mut text_buffer = String::new();
 
     while let Ok(n) = reader.read(&mut buf).await {
-        if n == 0 { break; } // EOF
+        if n == 0 {
+            break;
+        } // EOF
 
         let chunk = String::from_utf8_lossy(&buf[..n]);
         text_buffer.push_str(&chunk);
@@ -605,7 +637,8 @@ async fn read_danser_progress<R: tokio::io::AsyncRead + Unpin>(
                 if let Some(pct_str) = remainder.split('%').next() {
                     if let Ok(mut progress) = pct_str.parse::<u8>() {
                         progress = progress.min(100);
-                        *ctx.replay_queue.status.lock().await = crate::core::ReplayStatus::Rendering(progress);
+                        *ctx.replay_queue.status.lock().await =
+                            crate::core::ReplayStatus::Rendering(progress);
                         ctx.replay_queue.notify.notify_waiters();
                     }
                 }
@@ -614,12 +647,6 @@ async fn read_danser_progress<R: tokio::io::AsyncRead + Unpin>(
         text_buffer = incomplete;
     }
 }
-
-
-
-
-
-
 
 #[derive(Debug)]
 struct MapsetDownloadError {
@@ -664,11 +691,15 @@ async fn download_mapset(ctx: &Context, mapset_id: u32) -> Result<()> {
 }
 
 async fn request_mapset(ctx: &Context, mapset_id: u32) -> Result<Bytes> {
-    let official = match ctx.client().download_official_mapset(mapset_id, &BotConfig::get().tokens.osu_api_key).await {
+    let official = match ctx
+        .client()
+        .download_official_mapset(mapset_id, &BotConfig::get().tokens.osu_api_key)
+        .await
+    {
         Ok(bytes) => {
             warn!("official succes");
             return Ok(bytes);
-        },
+        }
         Err(err) => {
             warn!("official also failed: {err}");
             err
@@ -678,7 +709,7 @@ async fn request_mapset(ctx: &Context, mapset_id: u32) -> Result<Bytes> {
         Ok(bytes) => {
             warn!("osu.direct succes");
             return Ok(bytes);
-        },
+        }
         Err(err) => {
             warn!("osu.direct also failed: {err}");
             err
@@ -688,7 +719,7 @@ async fn request_mapset(ctx: &Context, mapset_id: u32) -> Result<Bytes> {
         Ok(bytes) => {
             warn!("nerinyan succes");
             return Ok(bytes);
-        },
+        }
         Err(err) => {
             warn!("nerinyan also failed: {err}");
             err
@@ -698,27 +729,30 @@ async fn request_mapset(ctx: &Context, mapset_id: u32) -> Result<Bytes> {
         Ok(bytes) => {
             warn!("nekoha succes");
             return Ok(bytes);
-        },
+        }
         Err(err) => {
             warn!("nekoha also failed: {err}");
             err
         }
     };
-    
 
     let chimu = match ctx.client().download_chimu_mapset(mapset_id).await {
         Ok(bytes) => {
             warn!("direct2 succes");
             return Ok(bytes);
-        },
+        }
         Err(err) => {
             warn!("osu.direct2 also failed: {err}");
             err
         }
-    };  
+    };
 
-
-    Err(Report::from(MapsetDownloadError { kitsu, chimu, nerinyan, catboy }))
+    Err(Report::from(MapsetDownloadError {
+        kitsu,
+        chimu,
+        nerinyan,
+        catboy,
+    }))
 }
 
 struct TitleResult {
@@ -731,7 +765,11 @@ struct TitleResult {
     acc: f32,
 }
 
-async fn create_title(replay: &ReplaySlim, map_path: PathBuf, map_title: &str) -> Result<TitleResult> {
+async fn create_title(
+    replay: &ReplaySlim,
+    map_path: PathBuf,
+    map_title: &str,
+) -> Result<TitleResult> {
     let map = Beatmap::from_path(&map_path)
         .with_context(|| format!("failed to parse map at {map_path:?}"))?;
 
@@ -772,10 +810,7 @@ async fn create_title(replay: &ReplaySlim, map_path: PathBuf, map_title: &str) -
         .calculate()
         .pp();
     let stars = (stars * 100.0).round() / 100.0;
-    let player_name = replay
-        .player_name
-        .as_ref()
-        .map(|user| user.clone());
+    let player_name = replay.player_name.as_ref().map(|user| user.clone());
     let player = player_name.as_deref().unwrap_or("Unknown player");
     let acc = replay.accuracy();
     let legacy = GameModsLegacy::from_bits(replay.mods);
@@ -795,7 +830,6 @@ async fn create_title(replay: &ReplaySlim, map_path: PathBuf, map_title: &str) -
         acc,
     })
 }
-
 
 async fn get_beatmap_osu_file(mapset_id: u32, map_without_artist: &str) -> Result<String> {
     let mut items_dir = BotConfig::get().paths.songs();

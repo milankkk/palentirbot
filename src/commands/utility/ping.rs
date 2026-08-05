@@ -31,8 +31,6 @@ async fn slash_ping(ctx: Arc<Context>, command: InteractionCommand) -> Result<()
     let response = ctx
         .interaction()
         .response(&command.token)
-        
-
         .await?
         .model()
         .await?;

@@ -143,7 +143,11 @@ impl CustomClient {
                 url = if location.starts_with("http") {
                     location
                 } else {
-                    format!("https://{}{}", url.split('/').nth(2).unwrap_or(""), location)
+                    format!(
+                        "https://{}{}",
+                        url.split('/').nth(2).unwrap_or(""),
+                        location
+                    )
                 };
 
                 continue;
@@ -159,8 +163,6 @@ impl CustomClient {
             return Ok(bytes);
         }
     }
-
-
 
     async fn make_post_request(
         &self,
@@ -235,7 +237,10 @@ impl CustomClient {
         }
 
         if let Ok(err) = serde_json::from_slice::<OsuApiError>(&bytes) {
-            eyre::bail!("osu replay api returned error for score {score_id}: {}", err.error);
+            eyre::bail!(
+                "osu replay api returned error for score {score_id}: {}",
+                err.error
+            );
         }
 
         let RawReplay { content } = serde_json::from_slice::<RawReplay>(&bytes)
@@ -286,11 +291,15 @@ impl CustomClient {
             .uri(&url)
             .method(hyper::Method::GET)
             .header(hyper::header::USER_AGENT, MY_USER_AGENT)
-            .header(hyper::header::AUTHORIZATION, format!("Bearer {}", osu_token))
+            .header(
+                hyper::header::AUTHORIZATION,
+                format!("Bearer {}", osu_token),
+            )
             .body(Body::empty())
             .context("failed to build official download request")?;
 
-        let response = self.client
+        let response = self
+            .client
             .request(req)
             .await
             .context("failed to receive official download response")?;
@@ -304,7 +313,10 @@ impl CustomClient {
             .await
             .context("failed to extract official download response bytes")?;
 
-        ensure!(bytes.starts_with(b"PK"), "official download returned invalid data");
+        ensure!(
+            bytes.starts_with(b"PK"),
+            "official download returned invalid data"
+        );
 
         Ok(bytes)
     }
@@ -312,11 +324,11 @@ impl CustomClient {
         self.make_get_request(&attachment.url, Site::DiscordAttachment)
             .await
     }
-    
+
     pub async fn get_skin_from_url(&self, url: &str) -> Result<Bytes> {
         self.make_get_request(url, Site::DownloadCatboy).await
     }
-    
+
     pub async fn download_chimu_mapset(&self, mapset_id: u32) -> Result<Bytes> {
         let url = format!("https://osu.direct/api/d/{mapset_id}");
         let bytes = self.make_get_request(url, Site::DownloadChimu).await?;
@@ -343,10 +355,6 @@ impl CustomClient {
         ensure!(bytes.starts_with(b"PK"), "catboy returned invalid data");
         Ok(bytes)
     }
-
-    
-
-
 
     pub async fn upload_video(
         &self,
@@ -389,4 +397,3 @@ pub struct OsuReplayResponse {
     pub content: String,
     pub encoding: String,
 }
-

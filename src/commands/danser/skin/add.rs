@@ -1,3 +1,4 @@
+use eyre::{Context, Report, Result};
 use std::{
     ffi::OsString,
     fs,
@@ -7,7 +8,6 @@ use std::{
 };
 use twilight_http::request;
 use twilight_http::Client;
-use eyre::{Context, Report, Result};
 use zip::ZipArchive;
 
 use crate::{
@@ -41,7 +41,7 @@ pub async fn add(
     //    command.error_callback(&ctx, NOT_OWNER, true).await?;
     //    return Ok(());
     //}
-    
+
     let SkinAdd { skin, url } = args;
 
     let (bytes, filename) = match (skin, url) {
@@ -67,7 +67,9 @@ pub async fn add(
         }
         (None, Some(url)) => {
             if !url.ends_with(".osk") {
-                command.error_callback(&ctx, "The URL must point to a .osk file!", true).await?;
+                command
+                    .error_callback(&ctx, "The URL must point to a .osk file!", true)
+                    .await?;
                 return Ok(());
             }
             let builder = MessageBuilder::new().embed("Downloading from URL...");
@@ -91,16 +93,18 @@ pub async fn add(
             (bytes, filename)
         }
         (Some(_), Some(_)) => {
-            command.error_callback(&ctx, "Provide either a file or a URL, not both!", true).await?;
+            command
+                .error_callback(&ctx, "Provide either a file or a URL, not both!", true)
+                .await?;
             return Ok(());
         }
         (None, None) => {
-            command.error_callback(&ctx, "Provide either a .osk file or a direct URL!", true).await?;
+            command
+                .error_callback(&ctx, "Provide either a .osk file or a direct URL!", true)
+                .await?;
             return Ok(());
         }
     };
-
-
 
     let mut builder = MessageBuilder::new().embed("Zipping...");
     command.update(&ctx, &builder).await?;

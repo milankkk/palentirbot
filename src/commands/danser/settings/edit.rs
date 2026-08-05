@@ -50,7 +50,9 @@ pub async fn edit(
                 .map(|skin| CommandOptionChoice {
                     name: skin.clone(),
                     name_localizations: None,
-                    value: twilight_model::application::command::CommandOptionChoiceValue::String(skin),
+                    value: twilight_model::application::command::CommandOptionChoiceValue::String(
+                        skin,
+                    ),
                 })
                 .collect();
 

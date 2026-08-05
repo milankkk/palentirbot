@@ -13,3 +13,4 @@ Cargo.lock
 /logs
 /data/*
 out*.txt
+prompt.txt

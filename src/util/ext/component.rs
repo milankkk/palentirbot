@@ -10,10 +10,7 @@ use crate::util::builder::ModalBuilder;
 
 use crate::{
     core::Context,
-    util::{
-        builder::MessageBuilder,
-        interaction::InteractionComponent,
-    },
+    util::{builder::MessageBuilder, interaction::InteractionComponent},
 };
 
 use super::MessageExt;
@@ -25,10 +22,7 @@ pub trait ComponentExt {
         builder: MessageBuilder<'a>,
     ) -> impl std::future::Future<Output = Result<()>> + 'a;
 
-    fn defer<'a>(
-        &'a self,
-        ctx: &'a Context,
-    ) -> impl std::future::Future<Output = Result<()>> + 'a;
+    fn defer<'a>(&'a self, ctx: &'a Context) -> impl std::future::Future<Output = Result<()>> + 'a;
 
     fn update<'a>(
         &'a self,
@@ -77,7 +71,11 @@ impl ComponentExt for InteractionComponent {
         Ok(())
     }
 
-    async fn update<'a>(&'a self, ctx: &'a Context, builder: &'a MessageBuilder<'a>) -> Result<Message> {
+    async fn update<'a>(
+        &'a self,
+        ctx: &'a Context,
+        builder: &'a MessageBuilder<'a>,
+    ) -> Result<Message> {
         self.message.update(ctx, builder).await
     }
 

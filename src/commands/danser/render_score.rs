@@ -1,6 +1,14 @@
-use std::{fs, sync::Arc};
 use std::path::PathBuf;
+use std::{fs, sync::Arc};
 
+use super::queue::send_queue_status;
+use crate::util::ChannelExt;
+use crate::{
+    core::{replay_queue::ReplaySlim, BotConfig, Context, ReplayData, TimePoints},
+    util::{
+        builder::MessageBuilder, interaction::InteractionCommand, Authored, InteractionCommandExt,
+    },
+};
 use command_macros::msg_command;
 use eyre::{Context as _, ContextCompat, Report};
 use osu_db::Replay;
@@ -15,28 +23,23 @@ use twilight_model::{
     },
     util::Timestamp,
 };
-use super::queue::send_queue_status;
-use crate::util::ChannelExt;
-use crate::{
-    core::{replay_queue::ReplaySlim, BotConfig, Context, ReplayData, TimePoints},
-    util::{
-        builder::MessageBuilder, interaction::InteractionCommand, Authored, InteractionCommandExt,
-    },
-};
 
 #[msg_command(name = "Render score")]
 async fn render_from_msg(ctx: Arc<Context>, mut command: InteractionCommand) -> Result<()> {
     let input_data = command.input_data();
 
     let (user_id, beatmap_id, timestamp) = match parseembedinputdata(input_data) {
-        Some(ParsedEmbed { user_id, beatmap_id, timestamp }) => (user_id, beatmap_id, timestamp),
+        Some(ParsedEmbed {
+            user_id,
+            beatmap_id,
+            timestamp,
+        }) => (user_id, beatmap_id, timestamp),
         None => {
             let content = "The command can only be used on Bathbot.rs embeds!";
             command.error(&ctx, content).await?;
             return Ok(());
         }
     };
-
 
     let ts_unix = OffsetDateTime::from_unix_timestamp(timestamp.unwrap().as_secs())
         .unwrap()
@@ -52,9 +55,9 @@ async fn render_from_msg(ctx: Arc<Context>, mut command: InteractionCommand) -> 
         .await
         .context("failed to get recent scores")?;
 
-    let score_to_render = recent_scores.into_iter().find(|score| {
-        (score.ended_at.unix_timestamp() - ts_unix).abs() <= 3 && score.replay
-    });
+    let score_to_render = recent_scores
+        .into_iter()
+        .find(|score| (score.ended_at.unix_timestamp() - ts_unix).abs() <= 3 && score.replay);
 
     // check tops
     let score_to_render = match score_to_render {
@@ -69,8 +72,7 @@ async fn render_from_msg(ctx: Arc<Context>, mut command: InteractionCommand) -> 
                 .context("failed to get top scores")?;
 
             let score_opt = top_scores.into_iter().find(|score| {
-                (score.ended_at.unix_timestamp() - ts_unix).abs() <= 3
-                    && score.replay
+                (score.ended_at.unix_timestamp() - ts_unix).abs() <= 3 && score.replay
             });
 
             match score_opt {
@@ -97,7 +99,9 @@ async fn render_from_msg(ctx: Arc<Context>, mut command: InteractionCommand) -> 
         }
     };
 
-    let map_md5 = score_to_render.map.as_ref()
+    let map_md5 = score_to_render
+        .map
+        .as_ref()
         .and_then(|m| m.checksum.as_deref())
         .unwrap_or_default();
     let mods_bits = score_to_render.mods.bits();
@@ -106,12 +110,7 @@ async fn render_from_msg(ctx: Arc<Context>, mut command: InteractionCommand) -> 
     extend_replay_bytes(&mut replay_bytes, &score_to_render, map_md5, mods_bits);
     replay_bytes.extend_from_slice(&lzma_bytes);
 
-    let fetched_username = ctx
-        .osu()
-        .user(user_id)
-        .await
-        .ok()
-        .map(|u| u.username);
+    let fetched_username = ctx.osu().user(user_id).await.ok().map(|u| u.username);
 
     let osu_user = score_to_render
         .user
@@ -171,7 +170,7 @@ async fn render_from_msg(ctx: Arc<Context>, mut command: InteractionCommand) -> 
         difficulty_name: Some(diff_name.to_string()),
         queue_message: Some((queue_msg.id, queue_msg.channel_id)),
     };
-    
+
     let was_empty = ctx.replay_queue.queue.lock().await.is_empty();
     ctx.replay_queue.push(replay_data).await;
 
@@ -183,7 +182,6 @@ async fn render_from_msg(ctx: Arc<Context>, mut command: InteractionCommand) -> 
         });
     }
     Ok(())
-
 }
 
 pub async fn render_score_from_message(
@@ -209,12 +207,15 @@ pub async fn render_score_from_embed(
 ) -> eyre::Result<Option<PathBuf>> {
     tracing::warn!("render_score_from_embed: entered for map/user");
 
-    let Some(ParsedEmbed { user_id, beatmap_id, timestamp }) = 
-    parse_embed(embed) else {
+    let Some(ParsedEmbed {
+        user_id,
+        beatmap_id,
+        timestamp,
+    }) = parse_embed(embed)
+    else {
         tracing::warn!("render_score_from_embed: parse_embed returned None");
         return Ok(None);
     };
-
 
     let score_to_render: Score = if let Some(timestamp) = timestamp {
         let ts_unix = timestamp.as_secs();
@@ -259,7 +260,11 @@ pub async fn render_score_from_embed(
         }
     } else {
         // No timestamp (<current embed) — pick best replayable score on this map
-        tracing::warn!(user_id, beatmap_id, "no timestamp, fetching beatmap user scores");
+        tracing::warn!(
+            user_id,
+            beatmap_id,
+            "no timestamp, fetching beatmap user scores"
+        );
 
         let map_scores = ctx
             .osu()
@@ -270,17 +275,15 @@ pub async fn render_score_from_embed(
         match map_scores.into_iter().find(|s| s.replay) {
             Some(score) => score,
             None => {
-                input_channel.error(&ctx, "No replayable score found on this map").await?;
+                input_channel
+                    .error(&ctx, "No replayable score found on this map")
+                    .await?;
                 return Ok(None);
             }
         }
     };
 
-    let replay_bytes = match ctx
-        .osu()
-        .replay_raw(score_to_render.id)
-        .await
-    {
+    let replay_bytes = match ctx.osu().replay_raw(score_to_render.id).await {
         Ok(bytes) => bytes,
         Err(err) => {
             tracing::warn!(
@@ -378,16 +381,22 @@ fn parse_embed(embed: &Embed) -> Option<ParsedEmbed> {
     let beatmap_url = embed.url.as_ref()?;
     let beatmap_id = if beatmap_url.contains("/b/") {
         // Short format: https://osu.ppy.sh/b/442905
-        beatmap_url.split("/b/").nth(1)
+        beatmap_url
+            .split("/b/")
+            .nth(1)
             .and_then(|id| id.parse::<u32>().ok())?
     } else if beatmap_url.contains("/beatmaps/") {
         // https://osu.ppy.sh/beatmaps/442905
-        beatmap_url.split('/').last()
+        beatmap_url
+            .split('/')
+            .last()
             .and_then(|id| id.parse::<u32>().ok())?
     } else if beatmap_url.contains("/beatmapsets/") {
         if let Some(fragment) = beatmap_url.split('#').nth(1) {
             // https://osu.ppy.sh/beatmapsets/123#osu/442905
-            fragment.split('/').last()
+            fragment
+                .split('/')
+                .last()
                 .and_then(|id| id.parse::<u32>().ok())?
         } else {
             tracing::warn!(
@@ -415,7 +424,11 @@ fn parse_embed(embed: &Embed) -> Option<ParsedEmbed> {
         .clone()
         .or_else(|| get_timestamp_from_minimized_embed(embed));
 
-    Some(ParsedEmbed { user_id, beatmap_id, timestamp })
+    Some(ParsedEmbed {
+        user_id,
+        beatmap_id,
+        timestamp,
+    })
 }
 
 fn get_timestamp_from_minimized_embed(embed: &Embed) -> Option<Timestamp> {
@@ -433,12 +446,7 @@ fn get_timestamp_from_minimized_embed(embed: &Embed) -> Option<Timestamp> {
 }
 
 // https://osu.ppy.sh/wiki/en/Client/File_formats/Osr_%28file_format%29
-fn extend_replay_bytes(
-    bytes: &mut Vec<u8>,
-    score: &Score,
-    beatmap_md5: &str,
-    replay_mods: u32,
-) {
+fn extend_replay_bytes(bytes: &mut Vec<u8>, score: &Score, beatmap_md5: &str, replay_mods: u32) {
     let initial_len = bytes.len();
     let mut bytes_written = 0;
 

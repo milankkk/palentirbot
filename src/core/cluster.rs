@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use eyre::{Context as _, Result};
-use twilight_gateway::{Config, Intents, MessageSender, Shard, create_recommended};
+use twilight_gateway::{create_recommended, Config, Intents, MessageSender, Shard};
 use twilight_http::Client;
 use twilight_model::gateway::{
     payload::outgoing::update_presence::UpdatePresencePayload,

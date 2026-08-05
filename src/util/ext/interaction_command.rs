@@ -12,11 +12,7 @@ use crate::util::builder::EmbedBuilder;
 
 use crate::{
     core::Context,
-    util::{
-        builder::MessageBuilder,
-        constants::RED,
-        interaction::InteractionCommand,
-    },
+    util::{builder::MessageBuilder, constants::RED, interaction::InteractionCommand},
 };
 
 pub trait InteractionCommandExt {
@@ -113,7 +109,11 @@ impl InteractionCommandExt for InteractionCommand {
         Ok(())
     }
 
-    async fn update<'a>(&'a self, ctx: &'a Context, builder: &'a MessageBuilder<'a>) -> Result<Message> {
+    async fn update<'a>(
+        &'a self,
+        ctx: &'a Context,
+        builder: &'a MessageBuilder<'a>,
+    ) -> Result<Message> {
         let token = self.token.as_str();
         let client = ctx.interaction();
         let mut req = client.update_response(token);
@@ -137,10 +137,15 @@ impl InteractionCommandExt for InteractionCommand {
         Ok(req.await?.model().await? as twilight_model::channel::Message)
     }
 
-    async fn error<'a>(&'a self, ctx: &'a Context, content: impl Into<String> + 'a) -> Result<Message> {
+    async fn error<'a>(
+        &'a self,
+        ctx: &'a Context,
+        content: impl Into<String> + 'a,
+    ) -> Result<Message> {
         let embed = EmbedBuilder::new().description(content).color(RED).build();
 
-        Ok(ctx.interaction()
+        Ok(ctx
+            .interaction()
             .update_response(&self.token)
             .embeds(Some(&[embed]))
             .await?

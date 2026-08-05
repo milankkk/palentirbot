@@ -86,20 +86,26 @@ async fn process_shard(ctx: Arc<Context>, mut shard: Shard) {
             None => break,
         };
 
-
         ctx.cache.update(&event);
         ctx.standby.process(&event);
         let ctx = Arc::clone(&ctx);
 
         tokio::spawn(async move {
-            if let Err(err) = handle_event(ctx, event, shard_id).await.context("error while handling event") {
+            if let Err(err) = handle_event(ctx, event, shard_id)
+                .await
+                .context("error while handling event")
+            {
                 error!("{err:?}");
             }
         });
     }
 }
 
-async fn handle_event(ctx: Arc<Context>, event: twilight_gateway::Event, shard_id: u32) -> Result<()> {
+async fn handle_event(
+    ctx: Arc<Context>,
+    event: twilight_gateway::Event,
+    shard_id: u32,
+) -> Result<()> {
     use twilight_gateway::Event;
 
     match event {

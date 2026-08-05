@@ -1,12 +1,12 @@
 use std::{borrow::Cow, path::PathBuf};
 
+use crate::util::CowUtils;
 use osu_db::Replay;
+use rosu_v2::prelude::Grade;
 use twilight_model::id::{
-    marker::{ChannelMarker, UserMarker, MessageMarker},
+    marker::{ChannelMarker, MessageMarker, UserMarker},
     Id,
 };
-use rosu_v2::prelude::Grade;
-use crate::util::CowUtils;
 
 #[derive(Clone)]
 pub struct ReplayData {
@@ -126,7 +126,7 @@ impl From<Replay> for ReplaySlim {
             replay.count_50,
             replay.count_miss,
             mods,
-            replay.version,  // game version from .osr header
+            replay.version, // game version from .osr header
         );
         Self {
             beatmap_hash: replay.beatmap_hash,
@@ -168,9 +168,9 @@ pub fn calculate_grade_osu_std(
     mods: u32,
     game_version: u32,
 ) -> Grade {
-    let n300  = count_300 as u32;
-    let n100  = count_100 as u32;
-    let n50   = count_50  as u32;
+    let n300 = count_300 as u32;
+    let n100 = count_100 as u32;
+    let n50 = count_50 as u32;
     let nmiss = count_miss as u32;
     let total = n300 + n100 + n50 + nmiss;
 
@@ -191,8 +191,8 @@ pub fn calculate_grade_osu_std(
     // The _is_lazer_ flag is available for future mode-specific divergence.
     let _is_lazer = is_lazer_replay(game_version);
 
-    let ratio_300  = n300 as f32 / total as f32;
-    let ratio_50   = n50  as f32 / total as f32;
+    let ratio_300 = n300 as f32 / total as f32;
+    let ratio_50 = n50 as f32 / total as f32;
 
     // SS: 100% accuracy — no 100s, no 50s, no misses
     if n100 == 0 && n50 == 0 && nmiss == 0 {

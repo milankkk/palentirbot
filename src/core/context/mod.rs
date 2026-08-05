@@ -1,8 +1,8 @@
-use std::sync::{Arc, Mutex, MutexGuard};
-
+use crate::core::ai::AiClient;
 use eyre::{Result, WrapErr};
 use flexmap::tokio::TokioMutexMap;
 use rosu_v2::Osu;
+use std::sync::{Arc, Mutex, MutexGuard};
 use tokio::{fs, io::AsyncWriteExt};
 use twilight_gateway::{MessageSender, Shard};
 use twilight_http::{client::InteractionClient, Client};
@@ -39,6 +39,7 @@ pub struct Context {
     skin_list: Arc<Mutex<SkinList>>,
     application_id: Id<ApplicationMarker>,
     clients: Clients,
+    ai: AiClient,
 }
 
 impl Context {
@@ -60,6 +61,10 @@ impl Context {
 
     pub fn skin_list(&self) -> MutexGuard<'_, SkinList> {
         self.skin_list.lock().unwrap()
+    }
+
+    pub fn ai(&self) -> &AiClient {
+        &self.ai
     }
 
     pub async fn new() -> Result<(Self, Vec<Shard>)> {
@@ -110,8 +115,7 @@ impl Context {
         let stats = Arc::new(BotStats::new());
 
         let clients = Clients::new(osu, custom, psql);
-        let (shards, shard_senders) =
-            build_shards(discord_token, Arc::clone(&http)).await?;
+        let (shards, shard_senders) = build_shards(discord_token, Arc::clone(&http)).await?;
 
         let paginations = TokioMutexMap::with_shard_amount_and_hasher(16, IntBuildHasher);
 
@@ -127,6 +131,7 @@ impl Context {
             stats,
             replay_queue: ReplayQueue::new(),
             skin_list: Arc::new(Mutex::default()),
+            ai: AiClient::new(),
         };
 
         Ok((ctx, shards))

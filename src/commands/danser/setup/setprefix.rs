@@ -3,15 +3,12 @@ use std::sync::Arc;
 use eyre::Result;
 use twilight_model::guild::Permissions;
 
+use super::SetupSetPrefix;
+use crate::util::InteractionCommandExt;
 use crate::{
     core::Context,
-    util::{
-        builder::MessageBuilder,
-        interaction::InteractionCommand,
-    },
+    util::{builder::MessageBuilder, interaction::InteractionCommand},
 };
-use crate::util::InteractionCommandExt;
-use super::SetupSetPrefix;
 
 pub async fn set_prefix(
     ctx: Arc<Context>,
@@ -40,11 +37,15 @@ pub async fn set_prefix(
     let new_prefix = args.prefix.trim().to_owned();
 
     if new_prefix.is_empty() {
-        command.error_callback(&ctx, "Prefix cannot be empty.", true).await?;
+        command
+            .error_callback(&ctx, "Prefix cannot be empty.", true)
+            .await?;
         return Ok(());
     }
     if new_prefix.len() > 16 {
-        command.error_callback(&ctx, "Prefix must be 16 characters or fewer.", true).await?;
+        command
+            .error_callback(&ctx, "Prefix must be 16 characters or fewer.", true)
+            .await?;
         return Ok(());
     }
 
@@ -56,6 +57,8 @@ pub async fn set_prefix(
         "✅ Prefix updated to `{new_prefix}`.\n\
          Use `{new_prefix}ping`, `{new_prefix}render`, `{new_prefix}queue`, etc."
     );
-    command.callback(&ctx, MessageBuilder::new().embed(content), false).await?;
+    command
+        .callback(&ctx, MessageBuilder::new().embed(content), false)
+        .await?;
     Ok(())
 }

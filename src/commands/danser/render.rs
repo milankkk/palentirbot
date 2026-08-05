@@ -1,3 +1,4 @@
+use super::queue::send_queue_status;
 use command_macros::SlashCommand;
 use eyre::{Context as _, Result};
 use osu_db::{Mode, Replay};
@@ -6,8 +7,6 @@ use std::sync::Arc;
 use tokio::{fs::File, io::AsyncWriteExt};
 use twilight_interactions::command::{CommandModel, CreateCommand};
 use twilight_model::channel::Attachment;
-use super::queue::send_queue_status;
-
 
 use crate::{
     core::{BotConfig, Context, ReplayData, TimePoints},
@@ -82,7 +81,13 @@ pub async fn slash_render(ctx: Arc<Context>, mut command: InteractionCommand) ->
                 Ok(result) => result,
                 Err(err) => {
                     warn!("{err:?}");
-                    command.error_callback(&ctx, "Failed to check server status, try again later.", false).await?;
+                    command
+                        .error_callback(
+                            &ctx,
+                            "Failed to check server status, try again later.",
+                            false,
+                        )
+                        .await?;
                     return Ok(());
                 }
             };
@@ -105,7 +110,6 @@ pub async fn slash_render(ctx: Arc<Context>, mut command: InteractionCommand) ->
         }
         None => command.channel_id,
     };
-
 
     let bytes = match ctx.client().get_discord_attachment(&attachment).await {
         Ok(bytes) => bytes,
@@ -152,7 +156,6 @@ pub async fn slash_render(ctx: Arc<Context>, mut command: InteractionCommand) ->
         return Err(err).with_context(|| format!("failed writing to file `{replay_file:?}`"));
     };
 
-
     let replay_data = ReplayData {
         input_channel: command.channel_id,
         output_channel,
@@ -183,6 +186,4 @@ pub async fn slash_render(ctx: Arc<Context>, mut command: InteractionCommand) ->
         });
     }
     Ok(())
-
-
 }

@@ -3,7 +3,6 @@ use std::{fmt::Write, mem};
 use eyre::{ContextCompat, Result};
 use twilight_interactions::command::{ApplicationCommandData, CommandOptionExtended};
 
-
 use crate::{
     core::{
         commands::slash::{Command, Commands, SlashCommand},
@@ -34,7 +33,10 @@ impl From<&'static SlashCommand> for Parts {
 
         Self {
             name: command.name,
-            help: command.help.map(|s| s.to_string()).unwrap_or(command.description),
+            help: command
+                .help
+                .map(|s| s.to_string())
+                .unwrap_or(command.description),
             options: command.options,
         }
     }
@@ -45,20 +47,22 @@ impl From<CommandOptionExtended> for Parts {
         use twilight_model::application::command::CommandOptionType;
 
         let options = match option.kind {
-            CommandOptionType::SubCommand
-            | CommandOptionType::SubCommandGroup => option.options.unwrap_or_default(),
+            CommandOptionType::SubCommand | CommandOptionType::SubCommandGroup => {
+                option.options.unwrap_or_default()
+            }
             _ => Vec::new(),
         };
 
-
         Self {
             name: option.name.clone(),
-            help: option.help.map(|s| s.to_string()).unwrap_or_else(|| option.description.clone()),
+            help: option
+                .help
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| option.description.clone()),
             options,
         }
     }
 }
-
 
 impl From<EitherCommand> for Parts {
     fn from(either: EitherCommand) -> Self {
@@ -103,8 +107,7 @@ impl CommandIter {
 
         let options = match &mut self.next {
             Some(option) => match option.kind {
-                CommandOptionType::SubCommand
-                | CommandOptionType::SubCommandGroup => {
+                CommandOptionType::SubCommand | CommandOptionType::SubCommandGroup => {
                     mem::take(&mut option.options).unwrap_or_default()
                 }
                 _ => return true,
@@ -112,8 +115,7 @@ impl CommandIter {
             None => match &mut self.curr {
                 EitherCommand::Base(command) => (command.create)().options,
                 EitherCommand::Option(option) => match option.kind {
-                    CommandOptionType::SubCommand
-                    | CommandOptionType::SubCommandGroup => {
+                    CommandOptionType::SubCommand | CommandOptionType::SubCommandGroup => {
                         mem::take(&mut option.options).unwrap_or_default()
                     }
                     _ => return true,
@@ -133,7 +135,6 @@ impl CommandIter {
         false
     }
 }
-
 
 pub async fn handle_help_basecommand(ctx: &Context, component: InteractionComponent) -> Result<()> {
     let name = component
@@ -158,8 +159,9 @@ pub async fn handle_help_basecommand(ctx: &Context, component: InteractionCompon
         ..
     } = (cmd.create)();
 
-    let description = help.map(|s| s.to_string()).unwrap_or_else(|| description.clone());
-
+    let description = help
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| description.clone());
 
     let mut embed = EmbedBuilder::new()
         .title(name)

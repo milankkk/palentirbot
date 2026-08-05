@@ -107,7 +107,6 @@ impl Cache {
                     if overwrite.id.cast() == user {
                         user_allowed |= overwrite.allow;
                         user_denied |= overwrite.deny;
-
                     }
                 }
                 PermissionOverwriteType::Role => {

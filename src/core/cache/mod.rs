@@ -16,7 +16,6 @@ use twilight_model::{
     user::{CurrentUser, User},
 };
 
-
 mod permissions;
 
 pub struct Cache {
@@ -69,10 +68,7 @@ impl Cache {
     where
         F: FnOnce(&CurrentUser) -> T,
     {
-        let user = self
-            .inner
-            .current_user()
-            .context("missing current user")?;
+        let user = self.inner.current_user().context("missing current user")?;
 
         Ok(f(&user))
     }

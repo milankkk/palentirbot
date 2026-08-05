@@ -53,6 +53,7 @@ impl Commands {
                     Skin => SKIN_SLASH,
                     Settings => SETTINGS_SLASH,
                     Setup => SETUP_SLASH,
+                    Ask => ASK_SLASH,
                 },
                 msg {
                 }

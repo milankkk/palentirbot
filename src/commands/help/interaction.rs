@@ -39,9 +39,7 @@ pub async fn slash_help(ctx: Arc<Context>, command: InteractionCommand) -> Resul
     let view_replays = EmbedField {
         inline: false,
         name: "Do you want to view your replays?".to_owned(),
-        value: format!(
-            "find link for it, website is 💩"
-        ),
+        value: format!("find link for it, website is 💩"),
     };
 
     let join_server = EmbedField {

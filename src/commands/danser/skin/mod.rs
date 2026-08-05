@@ -60,5 +60,3 @@ pub async fn slash_skin(ctx: Arc<Context>, mut command: InteractionCommand) -> R
         Skin::List(_) => list(ctx, command).await,
     }
 }
-
-

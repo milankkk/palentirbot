@@ -1,8 +1,8 @@
 use crate::util::numbers::round;
 
 use rosu_pp::any::ScoreState;
+use rosu_v2::prelude::{GameModIntermode, GameModsIntermode};
 use rosu_v2::prelude::{GameMode, Grade, MatchScore, Score};
-use rosu_v2::prelude::{GameModsIntermode, GameModIntermode};
 use std::fmt::Write;
 
 pub trait ScoreExt: Send + Sync {
@@ -62,17 +62,17 @@ pub trait ScoreExt: Send + Sync {
     fn state(&self) -> ScoreState {
         ScoreState {
             max_combo: self.max_combo() as u32,
-            n_geki:    self.count_geki() as u32,
-            n_katu:    self.count_katu() as u32,
-            n300:      self.count_300() as u32,   // try great() with underscore
-            n100:      self.count_100() as u32,
-            n50:       self.count_50() as u32,
-            misses:    self.count_miss() as u32,
+            n_geki: self.count_geki() as u32,
+            n_katu: self.count_katu() as u32,
+            n300: self.count_300() as u32, // try great() with underscore
+            n100: self.count_100() as u32,
+            n50: self.count_50() as u32,
+            misses: self.count_miss() as u32,
             // new required fields in rosu-pp v3:
             legacy_total_score: Some(0),
             osu_large_tick_hits: 0,
             osu_small_tick_hits: 0,
-            slider_end_hits: 0,     // the "1 other field"
+            slider_end_hits: 0, // the "1 other field"
         }
     }
 
@@ -102,7 +102,9 @@ pub trait ScoreExt: Send + Sync {
         let mods = self.mods();
 
         if self.count_300() == passed_objects {
-            return if mods.contains(GameModIntermode::Hidden) || mods.contains(GameModIntermode::Flashlight) {
+            return if mods.contains(GameModIntermode::Hidden)
+                || mods.contains(GameModIntermode::Flashlight)
+            {
                 Grade::XH
             } else {
                 Grade::X
@@ -113,7 +115,9 @@ pub trait ScoreExt: Send + Sync {
         let ratio50 = self.count_50() as f32 / passed_objects as f32;
 
         if ratio300 > 0.9 && ratio50 < 0.01 && self.count_miss() == 0 {
-            if mods.contains(GameModIntermode::Hidden) || mods.contains(GameModIntermode::Flashlight) {
+            if mods.contains(GameModIntermode::Hidden)
+                || mods.contains(GameModIntermode::Flashlight)
+            {
                 Grade::SH
             } else {
                 Grade::S
@@ -134,7 +138,9 @@ pub trait ScoreExt: Send + Sync {
         let mods = self.mods();
 
         if self.count_geki() == passed_objects {
-            return if mods.contains(GameModIntermode::Hidden) || mods.contains(GameModIntermode::Flashlight) {
+            return if mods.contains(GameModIntermode::Hidden)
+                || mods.contains(GameModIntermode::Flashlight)
+            {
                 Grade::XH
             } else {
                 Grade::X
@@ -144,7 +150,9 @@ pub trait ScoreExt: Send + Sync {
         let acc = acc.unwrap_or_else(|| self.acc(GameMode::Mania));
 
         if acc > 95.0 {
-            if mods.contains(GameModIntermode::Hidden) || mods.contains(GameModIntermode::Flashlight) {
+            if mods.contains(GameModIntermode::Hidden)
+                || mods.contains(GameModIntermode::Flashlight)
+            {
                 Grade::SH
             } else {
                 Grade::S
@@ -166,7 +174,9 @@ pub trait ScoreExt: Send + Sync {
         let great = self.count_300();
 
         if great == passed_objects {
-            return if mods.contains(GameModIntermode::Hidden) || mods.contains(GameModIntermode::Flashlight) {
+            return if mods.contains(GameModIntermode::Hidden)
+                || mods.contains(GameModIntermode::Flashlight)
+            {
                 Grade::XH
             } else {
                 Grade::X
@@ -177,7 +187,9 @@ pub trait ScoreExt: Send + Sync {
         let count_miss = self.count_miss();
 
         if ratio300 > 0.9 && count_miss == 0 {
-            if mods.contains(GameModIntermode::Hidden) || mods.contains(GameModIntermode::Flashlight) {
+            if mods.contains(GameModIntermode::Hidden)
+                || mods.contains(GameModIntermode::Flashlight)
+            {
                 Grade::SH
             } else {
                 Grade::S
@@ -198,13 +210,17 @@ pub trait ScoreExt: Send + Sync {
         let acc = acc.unwrap_or_else(|| self.acc(GameMode::Catch));
 
         if (100.0 - acc).abs() <= std::f32::EPSILON {
-            if mods.contains(GameModIntermode::Hidden) || mods.contains(GameModIntermode::Flashlight) {
+            if mods.contains(GameModIntermode::Hidden)
+                || mods.contains(GameModIntermode::Flashlight)
+            {
                 Grade::XH
             } else {
                 Grade::X
             }
         } else if acc > 98.0 {
-            if mods.contains(GameModIntermode::Hidden) || mods.contains(GameModIntermode::Flashlight) {
+            if mods.contains(GameModIntermode::Hidden)
+                || mods.contains(GameModIntermode::Flashlight)
+            {
                 Grade::SH
             } else {
                 Grade::S

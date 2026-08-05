@@ -18,10 +18,7 @@ pub trait ModalExt {
         builder: MessageBuilder<'a>,
     ) -> impl std::future::Future<Output = Result<()>> + 'a;
 
-    fn defer<'a>(
-        &'a self,
-        ctx: &'a Context,
-    ) -> impl std::future::Future<Output = Result<()>> + 'a;
+    fn defer<'a>(&'a self, ctx: &'a Context) -> impl std::future::Future<Output = Result<()>> + 'a;
 
     fn update<'a>(
         &'a self,
@@ -63,7 +60,11 @@ impl ModalExt for InteractionModal {
         Ok(())
     }
 
-    async fn update<'a>(&'a self, ctx: &'a Context, builder: &'a MessageBuilder<'a>) -> Result<Message> {
+    async fn update<'a>(
+        &'a self,
+        ctx: &'a Context,
+        builder: &'a MessageBuilder<'a>,
+    ) -> Result<Message> {
         self.message
             .as_ref()
             .expect("no message in modal")

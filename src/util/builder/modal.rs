@@ -3,7 +3,6 @@ use twilight_model::{
     http::interaction::InteractionResponseData,
 };
 
-
 pub struct ModalBuilder {
     custom_id: Option<String>,
     input: TextInput,

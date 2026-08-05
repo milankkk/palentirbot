@@ -42,11 +42,23 @@ impl ChannelExt for Id<ChannelMarker> {
 
     async fn error(&self, ctx: &Context, content: impl Into<String>) -> Result<Message> {
         let embed = EmbedBuilder::new().color(RED).description(content).build();
-        Ok(ctx.http.create_message(*self).embeds(&[embed]).await?.model().await?)
+        Ok(ctx
+            .http
+            .create_message(*self)
+            .embeds(&[embed])
+            .await?
+            .model()
+            .await?)
     }
 
     async fn plain_message(&self, ctx: &Context, content: &str) -> Result<Message> {
-        Ok(ctx.http.create_message(*self).content(content).await?.model().await?)
+        Ok(ctx
+            .http
+            .create_message(*self)
+            .content(content)
+            .await?
+            .model()
+            .await?)
     }
 }
 

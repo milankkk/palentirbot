@@ -1,12 +1,10 @@
+use crate::core::{commands::slash::Commands, BotConfig};
 use twilight_interactions::command::CommandOptionExtended;
 use twilight_model::channel::message::component::{
     ActionRow, Component, SelectMenu, SelectMenuOption,
 };
 use twilight_model::channel::message::embed::EmbedField;
 use twilight_model::id::{marker::UserMarker, Id};
-use crate::core::{commands::slash::Commands, BotConfig};
-
-
 
 pub use self::{
     components::{handle_help_basecommand, handle_help_subcommand},
@@ -47,8 +45,6 @@ fn generate_menus(user: Id<UserMarker>, options: &[CommandOptionExtended]) -> Ve
         kind: twilight_model::channel::message::component::SelectMenuType::Text,
     };
 
-
-
     let row = ActionRow {
         components: vec![Component::SelectMenu(select_menu)],
     };
@@ -71,8 +67,9 @@ fn parse_subcommand_menu(options: &[CommandOptionExtended]) -> Option<Component>
         .filter_map(|option| {
             use twilight_model::application::command::CommandOptionType;
             match option.kind {
-                CommandOptionType::SubCommand
-                | CommandOptionType::SubCommandGroup => Some((&option.name, &option.description)),
+                CommandOptionType::SubCommand | CommandOptionType::SubCommandGroup => {
+                    Some((&option.name, &option.description))
+                }
                 _ => None,
             }
         })
@@ -115,8 +112,7 @@ fn option_fields(children: &[CommandOptionExtended]) -> Vec<EmbedField> {
         .iter()
         .filter_map(|child| {
             match child.kind {
-                CommandOptionType::SubCommand
-                | CommandOptionType::SubCommandGroup => return None,
+                CommandOptionType::SubCommand | CommandOptionType::SubCommandGroup => return None,
                 _ => {}
             }
 
@@ -125,13 +121,11 @@ fn option_fields(children: &[CommandOptionExtended]) -> Vec<EmbedField> {
                 name.push_str(" (required)");
             }
 
-
             let value: String = child
                 .help
                 .as_ref()
                 .map(|h| h.to_string())
                 .unwrap_or_else(|| child.description.clone());
-
 
             Some(EmbedField {
                 inline: value.len() <= 37,
@@ -141,4 +135,3 @@ fn option_fields(children: &[CommandOptionExtended]) -> Vec<EmbedField> {
         })
         .collect()
 }
-

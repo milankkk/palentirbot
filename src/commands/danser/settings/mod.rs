@@ -11,7 +11,11 @@ use twilight_interactions::command::{
     AutocompleteValue, CommandModel, CommandOption, CreateCommand, CreateOption, ResolvedUser,
 };
 use twilight_model::channel::message::embed::{Embed, EmbedField};
-use twilight_model::{id::{Id, marker::UserMarker}, channel::Attachment, user::User};
+use twilight_model::{
+    channel::Attachment,
+    id::{marker::UserMarker, Id},
+    user::User,
+};
 
 use crate::{
     core::{settings::DanserSettings, Context},

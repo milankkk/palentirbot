@@ -132,7 +132,6 @@ mod servers {
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct DanserSettings {
@@ -151,7 +150,6 @@ pub struct DanserSettings {
 }
 
 #[derive(Default, Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct General {
@@ -164,7 +162,6 @@ pub struct General {
 }
 
 #[derive(Default, Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct Graphics {
@@ -185,7 +182,6 @@ pub struct Graphics {
 }
 
 #[derive(Default, Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct Experimental {
@@ -193,7 +189,6 @@ pub struct Experimental {
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct Audio {
@@ -212,7 +207,6 @@ pub struct Audio {
 }
 
 #[derive(Default, Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct LinuxUnix {
@@ -223,7 +217,6 @@ pub struct LinuxUnix {
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct Input {
@@ -238,7 +231,6 @@ pub struct Input {
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct Gameplay {
@@ -270,7 +262,6 @@ pub struct Gameplay {
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct HitErrorMeter {
@@ -292,7 +283,6 @@ pub struct HitErrorMeter {
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct AimErrorMeter {
@@ -315,7 +305,6 @@ pub struct AimErrorMeter {
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct Score {
@@ -333,7 +322,6 @@ pub struct Score {
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct HpBar {
@@ -347,7 +335,6 @@ pub struct HpBar {
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct ComboCounter {
@@ -363,7 +350,6 @@ pub struct ComboCounter {
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct PpCounter {
@@ -385,7 +371,6 @@ pub struct PpCounter {
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct Hsv {
@@ -395,7 +380,6 @@ pub struct Hsv {
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct HitCounter {
@@ -428,7 +412,6 @@ pub struct HitCounter {
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct StrainGraph {
@@ -447,7 +430,6 @@ pub struct StrainGraph {
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct StrainGraphOutline {
@@ -458,7 +440,6 @@ pub struct StrainGraphOutline {
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct KeyOverlay {
@@ -472,7 +453,6 @@ pub struct KeyOverlay {
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct ScoreBoard {
@@ -491,7 +471,6 @@ pub struct ScoreBoard {
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct Mods {
@@ -508,7 +487,6 @@ pub struct Mods {
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct Boundaries {
@@ -522,7 +500,6 @@ pub struct Boundaries {
 }
 
 #[derive(Default, Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct Underlay {
@@ -531,7 +508,6 @@ pub struct Underlay {
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct Skin {
@@ -543,7 +519,6 @@ pub struct Skin {
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct SkinCursor {
@@ -556,7 +531,6 @@ pub struct SkinCursor {
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct Cursor {
@@ -591,7 +565,6 @@ pub struct Cursor {
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct CursorColors {
@@ -605,7 +578,6 @@ pub struct CursorColors {
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct Objects {
@@ -620,7 +592,6 @@ pub struct Objects {
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct Sliders {
@@ -635,7 +606,6 @@ pub struct Sliders {
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct SliderDistortions {
@@ -647,7 +617,6 @@ pub struct SliderDistortions {
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct Snaking {
@@ -660,7 +629,6 @@ pub struct Snaking {
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct Colors {
@@ -675,7 +643,6 @@ pub struct Colors {
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct ObjectSliders {
@@ -687,7 +654,6 @@ pub struct ObjectSliders {
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct Border {
@@ -698,7 +664,6 @@ pub struct Border {
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct Body {
@@ -711,7 +676,6 @@ pub struct Body {
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct ObjectColor {
@@ -725,7 +689,6 @@ pub struct ObjectColor {
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct Playfield {
@@ -747,7 +710,6 @@ pub struct Playfield {
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct SeizureWarning {
@@ -756,7 +718,6 @@ pub struct SeizureWarning {
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct Background {
@@ -770,7 +731,6 @@ pub struct Background {
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct Dim {
@@ -780,7 +740,6 @@ pub struct Dim {
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct Parallax {
@@ -790,7 +749,6 @@ pub struct Parallax {
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct Blur {
@@ -799,7 +757,6 @@ pub struct Blur {
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct BlurValues {
@@ -809,7 +766,6 @@ pub struct BlurValues {
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct Triangles {
@@ -823,7 +779,6 @@ pub struct Triangles {
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct Logo {
@@ -833,7 +788,6 @@ pub struct Logo {
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct Bloom {
@@ -846,7 +800,6 @@ pub struct Bloom {
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct CursorDance {
@@ -861,7 +814,6 @@ pub struct CursorDance {
 }
 
 #[derive(Default, Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct Mover {
@@ -871,7 +823,6 @@ pub struct Mover {
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct Spinner {
@@ -882,7 +833,6 @@ pub struct Spinner {
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct MoverSettings {
@@ -897,7 +847,6 @@ pub struct MoverSettings {
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct Bezier {
@@ -906,7 +855,6 @@ pub struct Bezier {
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct Flower {
@@ -919,7 +867,6 @@ pub struct Flower {
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct HalfCircle {
@@ -928,7 +875,6 @@ pub struct HalfCircle {
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct Spline {
@@ -939,7 +885,6 @@ pub struct Spline {
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct Momentum {
@@ -956,7 +901,6 @@ pub struct Momentum {
 }
 
 #[derive(Default, Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct ExGon {
@@ -964,7 +908,6 @@ pub struct ExGon {
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct Linear {
@@ -974,7 +917,6 @@ pub struct Linear {
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct Pippi {
@@ -984,7 +926,6 @@ pub struct Pippi {
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct Knockout {
@@ -1006,7 +947,6 @@ pub struct Knockout {
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct Recording {
@@ -1053,7 +993,6 @@ pub struct Recording {
 }
 
 #[derive(Default, Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct Libx264 {
@@ -1067,7 +1006,6 @@ pub struct Libx264 {
 }
 
 #[derive(Default, Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct Libx265 {
@@ -1080,7 +1018,6 @@ pub struct Libx265 {
 }
 
 #[derive(Default, Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct H264Nvenc {
@@ -1094,7 +1031,6 @@ pub struct H264Nvenc {
 }
 
 #[derive(Default, Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct HevcNvenc {
@@ -1107,7 +1043,6 @@ pub struct HevcNvenc {
 }
 
 #[derive(Default, Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct H264Qsv {
@@ -1120,7 +1055,6 @@ pub struct H264Qsv {
 }
 
 #[derive(Default, Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct HevcQsv {
@@ -1132,7 +1066,6 @@ pub struct HevcQsv {
 }
 
 #[derive(Default, Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct Custom {
@@ -1140,7 +1073,6 @@ pub struct Custom {
 }
 
 #[derive(Default, Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct Aac {
@@ -1149,7 +1081,6 @@ pub struct Aac {
 }
 
 #[derive(Default, Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct Libmp3lame {
@@ -1159,7 +1090,6 @@ pub struct Libmp3lame {
 }
 
 #[derive(Default, Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct Libopus {
@@ -1169,7 +1099,6 @@ pub struct Libopus {
 }
 
 #[derive(Default, Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct Flac {
@@ -1178,7 +1107,6 @@ pub struct Flac {
 }
 
 #[derive(Default, Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct CustomAudio {
@@ -1186,7 +1114,6 @@ pub struct CustomAudio {
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-
 #[serde(rename_all = "PascalCase", default)]
 
 pub struct MotionBlur {

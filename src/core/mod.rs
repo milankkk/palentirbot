@@ -1,8 +1,5 @@
 pub use self::{
-    cache::Cache,
-    config::BotConfig,
-    context::Context,
-    events::event_loop,
+    cache::Cache, config::BotConfig, context::Context, events::event_loop,
     replay_queue::ReplayQueue,
 };
 
@@ -16,5 +13,6 @@ pub mod commands;
 pub mod logging;
 pub mod replay_queue;
 pub use self::replay_queue::{ReplayData, ReplaySlim, ReplayStatus, TimePoints};
+pub mod ai;
 pub mod settings;
 pub mod stats;

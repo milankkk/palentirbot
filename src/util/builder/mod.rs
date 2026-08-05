@@ -1,6 +1,5 @@
 pub use self::{
-    embed::EmbedBuilder, footer::FooterBuilder, message::MessageBuilder,
-    modal::ModalBuilder,
+    embed::EmbedBuilder, footer::FooterBuilder, message::MessageBuilder, modal::ModalBuilder,
 };
 
 mod author;

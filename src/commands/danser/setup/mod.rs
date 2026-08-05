@@ -15,8 +15,8 @@ use self::{input::*, output::*, view::*};
 
 mod input;
 mod output;
-mod view;
 mod setprefix;
+mod view;
 
 #[derive(CommandModel, CreateCommand, SlashCommand)]
 #[command(name = "setup", dm_permission = false)]
@@ -29,8 +29,8 @@ pub enum Setup {
     Input(SetupInput),
     #[command(name = "output")]
     Output(SetupOutput),
-    #[command(name = "setprefix")] 
-    SetPrefix(SetupSetPrefix), 
+    #[command(name = "setprefix")]
+    SetPrefix(SetupSetPrefix),
 }
 
 #[derive(CommandModel, CreateCommand)]
@@ -71,7 +71,6 @@ pub struct SetupSetPrefix {
     /// The new prefix (e.g. `!`, `?`, `>>`) — max 16 characters
     pub prefix: String,
 }
-
 
 async fn slash_setup(ctx: Arc<Context>, mut command: InteractionCommand) -> Result<()> {
     match Setup::from_interaction(command.input_data())? {

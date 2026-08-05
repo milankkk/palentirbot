@@ -6,20 +6,16 @@ use tokio::{
     time::sleep,
 };
 use twilight_model::{
-    channel::{
-        message::{
-            embed::Embed,
-            component::{ActionRow, Button, ButtonStyle, Component},
-            EmojiReactionType,
-        },
+    channel::message::{
+        component::{ActionRow, Button, ButtonStyle, Component},
+        embed::Embed,
+        EmojiReactionType,
     },
     id::{
         marker::{ChannelMarker, MessageMarker, UserMarker},
         Id,
     },
 };
-
-
 
 use crate::{
     core::Context,
@@ -87,7 +83,11 @@ impl Pagination {
 
         let response = if start_by_callback {
             command.callback(&ctx, builder, false).await?;
-            ctx.interaction().response(&command.token).await?.model().await?
+            ctx.interaction()
+                .response(&command.token)
+                .await?
+                .model()
+                .await?
         } else {
             command.update(&ctx, &builder).await?
         };
@@ -98,7 +98,6 @@ impl Pagination {
 
         let channel = response.channel_id;
         let msg = response.id;
-
 
         let (tx, rx) = watch::channel(());
         Self::spawn_timeout(Arc::clone(&ctx), rx, msg, channel);

@@ -1,7 +1,6 @@
 pub use self::{
-    authored::Authored, channel::ChannelExt,
-    component::ComponentExt, interaction_command::InteractionCommandExt,
-    message::MessageExt, modal::*,
+    authored::Authored, channel::ChannelExt, component::ComponentExt,
+    interaction_command::InteractionCommandExt, message::MessageExt, modal::*,
 };
 
 mod authored;
