@@ -12,7 +12,7 @@ mod events;
 pub mod commands;
 pub mod logging;
 pub mod replay_queue;
-pub use self::replay_queue::{ReplayData, ReplaySlim, ReplayStatus, TimePoints};
+pub use self::replay_queue::{ReplayData, ReplayStatus, TimePoints};
 pub mod ai;
 pub mod settings;
 pub mod stats;

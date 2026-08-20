@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::{
-    mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
+    mpsc::{channel, Receiver, Sender},
     Mutex, Notify,
 };
 
@@ -14,8 +14,8 @@ pub struct ReplayQueue {
     pub queue: Mutex<VecDeque<ReplayData>>,
     pub status: Mutex<ReplayStatus>,
     pub notify: Arc<Notify>,
-    tx: UnboundedSender<()>,
-    rx: Mutex<UnboundedReceiver<()>>,
+    tx: Sender<()>,
+    rx: Mutex<Receiver<()>>,
 }
 
 impl ReplayQueue {
@@ -25,7 +25,7 @@ impl ReplayQueue {
 
     pub async fn push(&self, entry: ReplayData) {
         self.queue.lock().await.push_back(entry);
-        let _ = self.tx.send(());
+        let _ = self.tx.try_send(());
     }
 
     pub async fn pop(&self) -> ReplayData {
@@ -52,7 +52,7 @@ impl ReplayQueue {
 
 impl Default for ReplayQueue {
     fn default() -> Self {
-        let (tx, rx) = unbounded_channel();
+        let (tx, rx) = channel(100);
         Self {
             queue: Mutex::new(VecDeque::new()),
             status: Mutex::new(ReplayStatus::Waiting),

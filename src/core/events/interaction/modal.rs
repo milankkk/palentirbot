@@ -8,8 +8,8 @@ use crate::{
     util::{interaction::InteractionModal, Authored},
 };
 
-pub async fn handle_modal(ctx: Arc<Context>, mut modal: InteractionModal) {
-    let name = mem::take(&mut modal.data.custom_id);
+pub async fn handle_modal(ctx: Arc<Context>, modal: InteractionModal) {
+    let name = modal.data.custom_id.clone();
 
     {
         let username = modal
@@ -23,10 +23,12 @@ pub async fn handle_modal(ctx: Arc<Context>, mut modal: InteractionModal) {
 
     let res = match name.as_str() {
         "pagination_page" => handle_pagination_modal(ctx, modal).await,
+        _ if name.starts_with("oset_modal_") => crate::commands::owner::settings::handle_owner_settings_modal(ctx, modal).await,
         _ => return error!("unknown modal `{name}`: {modal:#?}"),
     };
 
     if let Err(err) = res.with_context(|| format!("failed to process modal `{name}`")) {
+        println!("MODAL ERROR: {:?}", err);
         error!("{err:?}");
     }
 }

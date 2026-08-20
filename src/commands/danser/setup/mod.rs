@@ -6,7 +6,6 @@ use twilight_interactions::command::{CommandModel, CommandOption, CreateCommand,
 use twilight_model::id::{marker::ChannelMarker, Id};
 
 use crate::{
-    commands::server_administrator,
     util::{interaction::InteractionCommand, InteractionCommandExt},
     Context,
 };

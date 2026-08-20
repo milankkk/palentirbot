@@ -1,5 +1,6 @@
 #![deny(clippy::all, nonstandard_style, rust_2018_idioms)]
 #![warn(unused)]
+#![allow(dead_code, unused_imports, unused_variables, deprecated)]
 #[macro_use]
 extern crate eyre;
 

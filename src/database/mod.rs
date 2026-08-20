@@ -2,7 +2,6 @@ use eyre::Result;
 use sqlx::{postgres::PgPoolOptions, PgPool};
 
 mod impls;
-mod models;
 
 pub struct Database {
     pool: PgPool,

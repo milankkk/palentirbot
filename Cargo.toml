@@ -28,7 +28,7 @@ rosu-v2 = { git = "https://github.com/MaxOhn/rosu-v2", branch = "main", default-
 rosu-pp = { git = "https://github.com/MaxOhn/rosu-pp", branch = "main" }
 reqwest = { version = "0.11", features = ["json"] }
 serde = { version = "1.0", features = ["derive"] }
-serde_json = { version = "1.0" }
+serde_json = { version = "1.0", features = ["preserve_order"] }
 smallstr = { version = "0.2", features = ["serde"] }
 smallvec = { version = "1.0", features = ["serde"] }
 sqlx = { version = "0.6.2",  features = ["macros", "postgres", "runtime-tokio-rustls"]}

@@ -6,15 +6,13 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-use twilight_http::request;
-use twilight_http::Client;
 use zip::ZipArchive;
 
 use crate::{
     core::{BotConfig, Context as TwilightContext},
     util::{
         builder::MessageBuilder,
-        constants::{GENERAL_ISSUE, NOT_OWNER},
+        constants::GENERAL_ISSUE,
         interaction::InteractionCommand,
         Authored, InteractionCommandExt,
     },
@@ -27,9 +25,9 @@ pub async fn add(
     command: InteractionCommand,
     args: SkinAdd,
 ) -> Result<()> {
-    let config = BotConfig::get();
+    let _config = BotConfig::get();
 
-    let user = match command.user() {
+    let _user = match command.user() {
         Ok(user) => user,
         Err(err) => {
             command.error_callback(&ctx, GENERAL_ISSUE, false).await?;

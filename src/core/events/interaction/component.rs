@@ -9,8 +9,8 @@ use crate::{
     util::{interaction::InteractionComponent, Authored},
 };
 
-pub async fn handle_component(ctx: Arc<Context>, mut component: InteractionComponent) {
-    let name = mem::take(&mut component.data.custom_id);
+pub async fn handle_component(ctx: Arc<Context>, component: InteractionComponent) {
+    let name = component.data.custom_id.clone();
 
     {
         let username = component
@@ -33,6 +33,10 @@ pub async fn handle_component(ctx: Arc<Context>, mut component: InteractionCompo
         "profile_compact" => handle_profile_compact(ctx, component).await,
         "profile_medium" => handle_profile_medium(ctx, component).await,
         "profile_full" => handle_profile_full(ctx, component).await,
+        "owner_settings_section" => crate::commands::owner::settings::handle_owner_settings_section(ctx, component).await,
+        _ if name.starts_with("owner_settings_prop_") => crate::commands::owner::settings::handle_owner_settings_prop(ctx, component).await,
+        _ if name.starts_with("oset_applyall_") => crate::commands::owner::settings::handle_owner_settings_applyall(ctx, component).await,
+        "oset_skipall" => crate::commands::owner::settings::handle_owner_settings_skipall(ctx, component).await,
         _ => return error!("unknown message component `{name}`"),
     };
 

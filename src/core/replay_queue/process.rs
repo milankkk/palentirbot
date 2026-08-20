@@ -1,5 +1,4 @@
 use crate::util::builder::EmbedBuilder;
-use crate::util::builder::FooterBuilder;
 use crate::util::MessageExt;
 use crate::{
     core::{BotConfig, Context, ReplayStatus},
@@ -8,7 +7,6 @@ use crate::{
 use bytes::Bytes;
 use eyre::{Context as _, ContextCompat, Report, Result};
 use rosu_pp::Beatmap;
-use rosu_v2::prelude::BeatmapExtended;
 use rosu_v2::prelude::GameModsLegacy;
 use std::{
     error::Error as StdError,
@@ -21,8 +19,8 @@ use std::{
     sync::Arc,
 };
 use tokio::io::AsyncBufReadExt;
-use tokio::io::{AsyncReadExt, BufReader};
-use tokio::process::{ChildStdout, Command};
+use tokio::io::AsyncReadExt;
+use tokio::process::Command;
 use tokio::time::{sleep, Duration};
 use zip::ZipArchive;
 
@@ -50,10 +48,10 @@ impl ReplayQueue {
                 replay,
                 time_points,
                 user,
-                title,
-                player_name,
-                map_title,
-                difficulty_name,
+                title: _,
+                player_name: _,
+                map_title: _,
+                difficulty_name: _,
                 queue_message,
             } = ctx.replay_queue.peek().await;
 
@@ -162,7 +160,7 @@ impl ReplayQueue {
             warn!("danser dir: {:?}", config.paths.danser());
             warn!("danser path: {:?}", danser_path);
             let path =
-                std::fs::canonicalize(&path).context("failed to canonicalize replay path")?;
+            tokio::fs::canonicalize(&path).await.context("failed to canonicalize replay path")?;
             command
                 .current_dir(config.paths.danser())
                 .arg("-noupdatecheck")
@@ -286,7 +284,7 @@ impl ReplayQueue {
                 .unwrap_or_else(|| (title.clone(), String::new()));
 
             // Create a cleaner display title (e.g. "Ava Max - So Am I (Nightcore Cut Ver) [Outcast]")
-            let formatted_title = if difficulty.is_empty() {
+            let _formatted_title = if difficulty.is_empty() {
                 base_name
             } else {
                 format!("{} [{}]", base_name, difficulty)
@@ -298,8 +296,8 @@ impl ReplayQueue {
                 max_pp,
                 nochoke_pp,
                 max_possible_combo,
-                stars,
-                acc,
+                stars: _,
+                acc: _,
             } = match create_title(&replay, map_path.clone(), &title).await {
                 Ok(result) => result,
                 Err(err) => {
@@ -433,15 +431,14 @@ impl ReplayQueue {
             info!("Finished upload to server");
             warn!("upload returned link: {}", link);
 
-            if let Ok(mut warmup_msg) = output_channel
+            if let Ok(warmup_msg) = output_channel
                 .create_message(&ctx, &MessageBuilder::new().content(link.clone()))
                 .await
             {
                 sleep(Duration::from_millis(1200)).await;
                 let _ = warmup_msg.delete(&ctx).await;
             }
-
-            let file_size_bytes = std::fs::metadata(&new_filepath)?.len();
+            let file_size_bytes = tokio::fs::metadata(&new_filepath).await?.len();
             let wait_secs = calculate_warmup_delay_secs(file_size_bytes);
             warn!("Wait time for dc cache: {}", wait_secs);
             // Set uploading status with countdown before sleeping
@@ -461,17 +458,17 @@ impl ReplayQueue {
             //let watch_link = link.replacen("https://replays.insertdomainname.be/watch/", "https://replays.insertdomainname.be/", 1);
             // Send replay details embed before the link
             let legacy_mods = GameModsLegacy::from_bits(replay.mods);
-            let mods_str = if legacy_mods.is_empty() {
+            let _mods_str = if legacy_mods.is_empty() {
                 String::new()
             } else {
                 format!("+{}", legacy_mods)
             };
 
-            let player = replay.player_name.as_ref().map(|user| user.clone());
+            let _player = replay.player_name.as_ref().map(|user| user.clone());
 
             let acc = replay.accuracy();
 
-            use rosu_v2::prelude::GameMode;
+            
             use rosu_v2::prelude::Grade;
             use twilight_model::channel::message::embed::EmbedField;
             let emojis = &BotConfig::get().emojis;
@@ -500,7 +497,7 @@ impl ReplayQueue {
                 .timestamp
                 .and_then(|ts: i64| time::OffsetDateTime::from_unix_timestamp(ts).ok());
             let dt = replay_datetime;
-            let mut embed_builder = EmbedBuilder::new()
+            let embed_builder = EmbedBuilder::new()
                 //.title(format!("{stars}⭐ {player} | {title} {mods_str} ({acc}%"))
                 .color(0x96DFE3)
                 .title(video_title)
@@ -691,7 +688,7 @@ async fn download_mapset(ctx: &Context, mapset_id: u32) -> Result<()> {
 }
 
 async fn request_mapset(ctx: &Context, mapset_id: u32) -> Result<Bytes> {
-    let official = match ctx
+    let _official = match ctx
         .client()
         .download_official_mapset(mapset_id, &BotConfig::get().tokens.osu_api_key)
         .await

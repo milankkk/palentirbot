@@ -9,7 +9,7 @@ use crate::{
     core::Context,
     util::{
         builder::{EmbedBuilder, MessageBuilder},
-        constants::{INVITE_LINK, SHISHABOT_DISCORD, SHISHABOT_GITHUB, SHISHABOT_WEBSITE},
+        constants::{INVITE_LINK, SHISHABOT_DISCORD, SHISHABOT_GITHUB},
         datetime::how_long_ago_dynamic,
         interaction::InteractionCommand,
         numbers::with_comma_int,
