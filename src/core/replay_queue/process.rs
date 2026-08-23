@@ -53,6 +53,7 @@ impl ReplayQueue {
                 map_title: _,
                 difficulty_name: _,
                 queue_message,
+is_lazer,
             } = ctx.replay_queue.peek().await;
 
             let replay_hash = replay.replay_hash.as_deref().unwrap_or("");
@@ -292,13 +293,18 @@ impl ReplayQueue {
 
             let TitleResult {
                 title: video_title,
-                pp,
-                max_pp,
-                nochoke_pp,
+                mut pp,
+                mut max_pp,
+                mut nochoke_pp,
+                pp_latest, max_pp_latest, nochoke_pp_latest,
+                pp_2025, max_pp_2025, nochoke_pp_2025,
+                pp_2024, max_pp_2024, nochoke_pp_2024,
+                pp_2022, max_pp_2022, nochoke_pp_2022,
+                pp_2021, max_pp_2021, nochoke_pp_2021,
                 max_possible_combo,
                 stars: _,
                 acc: _,
-            } = match create_title(&replay, map_path.clone(), &title).await {
+            } = match create_title(&replay, map_path.clone(), &title, is_lazer, &path).await {
                 Ok(result) => result,
                 Err(err) => {
                     let err = err.wrap_err("failed to create title");
@@ -497,6 +503,11 @@ impl ReplayQueue {
                 .timestamp
                 .and_then(|ts: i64| time::OffsetDateTime::from_unix_timestamp(ts).ok());
             let dt = replay_datetime;
+            if let Some(p) = pp_latest { pp = p; }
+            if let Some(mp) = max_pp_latest { max_pp = mp; }
+            if let Some(np) = nochoke_pp_latest { nochoke_pp = np; }
+            let is_perfect_fc = nochoke_pp == pp;
+
             let embed_builder = EmbedBuilder::new()
                 //.title(format!("{stars}⭐ {player} | {title} {mods_str} ({acc}%"))
                 .color(0x96DFE3)
@@ -525,6 +536,7 @@ impl ReplayQueue {
                         name: "Max Combo".to_owned(),
                         value: format!("{}/{}x", replay.max_combo, max_possible_combo),
                     },
+
                     EmbedField {
                         inline: true,
                         name: "pp".to_owned(),
@@ -562,8 +574,67 @@ impl ReplayQueue {
                 ]);
 
             let embed = embed_builder.build();
-
-            let embed_builder = MessageBuilder::new().embed(embed);
+            let mut components: Vec<twilight_model::channel::message::Component> = vec![];
+            if let (Some(p_lat), Some(mp_lat), Some(np_lat), Some(p25), Some(mp25), Some(np25), Some(p24), Some(mp24), Some(np24), Some(p22), Some(mp22), Some(np22), Some(p21), Some(mp21), Some(np21)) = (pp_latest, max_pp_latest, nochoke_pp_latest, pp_2025, max_pp_2025, nochoke_pp_2025, pp_2024, max_pp_2024, nochoke_pp_2024, pp_2022, max_pp_2022, nochoke_pp_2022, pp_2021, max_pp_2021, nochoke_pp_2021) {
+                let options = vec![
+                    twilight_model::channel::message::component::SelectMenuOption {
+                        default: true,
+                        description: Some("Real-time official osu! backend calculations".to_string()),
+                        emoji: None,
+                        label: "Latest Rework (C# backend)".to_string(),
+                        value: format!("pp_lat|{is_perfect_fc}|{p_lat:.2}|{mp_lat:.2}|{np_lat:.2}"),
+                    },
+                    twilight_model::channel::message::component::SelectMenuOption {
+                        default: false,
+                        description: Some("Performance points & star rating updates".to_string()),
+                        emoji: None,
+                        label: "rosu-pp v4 (July 2026)".to_string(),
+                        value: format!("pp_v4|{is_perfect_fc}|{pp:.2}|{max_pp:.2}|{nochoke_pp:.2}"),
+                    },
+                    twilight_model::channel::message::component::SelectMenuOption {
+                        default: false,
+                        description: Some("March 2025 Rework".to_string()),
+                        emoji: None,
+                        label: "March 2025 Rework".to_string(),
+                        value: format!("pp_v25|{is_perfect_fc}|{p25:.2}|{mp25:.2}|{np25:.2}"),
+                    },
+                    twilight_model::channel::message::component::SelectMenuOption {
+                        default: false,
+                        description: Some("Removal of combo scaling from standard PP".to_string()),
+                        emoji: None,
+                        label: "October 2024 Combo Scaling Removal".to_string(),
+                        value: format!("pp_v24|{is_perfect_fc}|{p24:.2}|{mp24:.2}|{np24:.2}"),
+                    },
+                    twilight_model::channel::message::component::SelectMenuOption {
+                        default: false,
+                        description: Some("Major performance & difficulty changes".to_string()),
+                        emoji: None,
+                        label: "September 2022 Rework".to_string(),
+                        value: format!("pp_v22|{is_perfect_fc}|{p22:.2}|{mp22:.2}|{np22:.2}"),
+                    },
+                    twilight_model::channel::message::component::SelectMenuOption {
+                        default: false,
+                        description: Some("Rhythm complexity & aim rework".to_string()),
+                        emoji: None,
+                        label: "November 2021 Xexxar Rework".to_string(),
+                        value: format!("pp_v21|{is_perfect_fc}|{p21:.2}|{mp21:.2}|{np21:.2}"),
+                    },
+                ];
+                components.push(twilight_model::channel::message::component::Component::ActionRow(twilight_model::channel::message::component::ActionRow {
+                    components: vec![twilight_model::channel::message::component::Component::SelectMenu(twilight_model::channel::message::component::SelectMenu {
+                        custom_id: "pp_version_select".to_string(),
+                        disabled: false,
+                        max_values: Some(1),
+                        min_values: Some(1),
+                        options: Some(options),
+                        placeholder: Some("Select PP Version".to_string()),
+                        channel_types: None,
+                        default_values: None,
+                        kind: twilight_model::channel::message::component::SelectMenuType::Text,
+                    })],
+                }));
+            }
+            let embed_builder = MessageBuilder::new().embed(embed).components(components);
             if let Err(err) = output_channel.create_message(&ctx, &embed_builder).await {
                 warn!(
                     "{:?}",
@@ -757,22 +828,93 @@ struct TitleResult {
     pp: f64,
     max_pp: f64,
     nochoke_pp: f64,
+    pp_latest: Option<f64>, max_pp_latest: Option<f64>, nochoke_pp_latest: Option<f64>,
+    pp_2025: Option<f64>, max_pp_2025: Option<f64>, nochoke_pp_2025: Option<f64>,
+    pp_2024: Option<f64>, max_pp_2024: Option<f64>, nochoke_pp_2024: Option<f64>,
+    pp_2022: Option<f64>, max_pp_2022: Option<f64>, nochoke_pp_2022: Option<f64>,
+    pp_2021: Option<f64>, max_pp_2021: Option<f64>, nochoke_pp_2021: Option<f64>,
     max_possible_combo: u16,
     stars: f64,
     acc: f32,
+}
+
+
+async fn calc_latest_pp(map_path: &std::path::Path, replay: &crate::core::replay_queue::data::ReplaySlim, max_combo: u32, is_nochoke: bool, is_max: bool, is_lazer: bool, osr_path: Option<&std::path::Path>) -> Option<f64> {
+    let mut cmd = tokio::process::Command::new("/home/serverx/.dotnet/dotnet");
+    cmd.env("DOTNET_ROLL_FORWARD", "Major");
+    cmd.arg("/tmp/osu-tools/PerformanceCalculator/bin/Release/net8.0/PerformanceCalculator.dll");
+    
+    if !is_max && !is_nochoke && osr_path.is_some() {
+        cmd.arg("performance").arg("replay").arg("-j");
+        cmd.arg(osr_path.unwrap());
+        cmd.arg("-b").arg(map_path);
+    } else {
+        cmd.arg("simulate").arg("osu").arg("-j");
+        
+        if is_max {
+            // Defaults to SS
+        } else if is_nochoke {
+            cmd.arg("--combo").arg(max_combo.to_string());
+            cmd.arg("--goods").arg(replay.count_100.to_string());
+            cmd.arg("--mehs").arg(replay.count_50.to_string());
+            cmd.arg("--misses").arg("0");
+        } else {
+            cmd.arg("--combo").arg(replay.max_combo.to_string());
+            cmd.arg("--goods").arg(replay.count_100.to_string());
+            cmd.arg("--mehs").arg(replay.count_50.to_string());
+            cmd.arg("--misses").arg(replay.count_miss.to_string());
+        }
+
+        let m = replay.mods;
+        if (m & 1) != 0 { cmd.arg("-m").arg("nf"); }
+        if (m & 2) != 0 { cmd.arg("-m").arg("ez"); }
+        if (m & 4) != 0 { cmd.arg("-m").arg("td"); }
+        if (m & 8) != 0 { cmd.arg("-m").arg("hd"); }
+        if (m & 16) != 0 { cmd.arg("-m").arg("hr"); }
+        if (m & 32) != 0 { cmd.arg("-m").arg("sd"); }
+        if (m & 64) != 0 { cmd.arg("-m").arg("dt"); }
+        if (m & 128) != 0 { cmd.arg("-m").arg("rx"); }
+        if (m & 256) != 0 { cmd.arg("-m").arg("ht"); }
+        if (m & 512) != 0 { cmd.arg("-m").arg("nc"); }
+        if (m & 1024) != 0 { cmd.arg("-m").arg("fl"); }
+        if !is_lazer { cmd.arg("-m").arg("cl"); }
+
+        cmd.arg(map_path);
+    }
+
+    if let Ok(output) = cmd.output().await {
+        if output.status.success() {
+            if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
+                if let Some(pp) = json.get("performance_attributes").and_then(|attrs| attrs.get("pp")).and_then(|pp| pp.as_f64()) {
+                    return Some(pp);
+                } else {
+                    tracing::warn!("Failed to parse PP from JSON: {:?}", json);
+                }
+            } else {
+                tracing::warn!("Failed to parse JSON: {}", String::from_utf8_lossy(&output.stdout));
+            }
+        } else {
+            tracing::warn!("Command failed: {}", String::from_utf8_lossy(&output.stderr));
+        }
+    } else {
+        tracing::warn!("Failed to spawn command");
+    }
+    None
 }
 
 async fn create_title(
     replay: &ReplaySlim,
     map_path: PathBuf,
     map_title: &str,
+    is_lazer: bool,
+    osr_path: &std::path::Path,
 ) -> Result<TitleResult> {
     let map = Beatmap::from_path(&map_path)
         .with_context(|| format!("failed to parse map at {map_path:?}"))?;
 
     let difficulty = rosu_pp::Difficulty::new()
         .mods(replay.mods as u32)
-        .lazer(false)
+        .lazer(is_lazer)
         .calculate(&map);
 
     let stars = difficulty.stars();
@@ -786,14 +928,14 @@ async fn create_title(
         .n50(replay.count_50 as u32)
         .misses(replay.count_miss as u32)
         .combo(replay.max_combo as u32)
-        .lazer(false)
+        .lazer(is_lazer)
         //.legacy_total_score(replay.score as u32)
         .calculate()
         .pp();
 
     let max_pp = rosu_pp::Performance::new(&map)
         .mods(replay.mods as u32)
-        .lazer(false)
+        .lazer(is_lazer)
         .calculate()
         .pp();
     let nochoke_pp = rosu_pp::Performance::new(&map)
@@ -803,10 +945,49 @@ async fn create_title(
         .n50(replay.count_50 as u32)
         .misses(0) // Force 0 misses
         .combo(max_possible_combo)
-        .lazer(false)
+        .lazer(is_lazer)
         .calculate()
         .pp();
     let stars = (stars * 100.0).round() / 100.0;
+    
+    let pp_latest; let max_pp_latest; let nochoke_pp_latest;
+    let (p_lat, mp_lat, np_lat) = tokio::join!(
+        calc_latest_pp(&map_path, replay, max_possible_combo as u32, false, false, is_lazer, Some(osr_path)),
+        calc_latest_pp(&map_path, replay, max_possible_combo as u32, false, true, is_lazer, None),
+        calc_latest_pp(&map_path, replay, max_possible_combo as u32, true, false, is_lazer, None)
+    );
+    pp_latest = p_lat; max_pp_latest = mp_lat; nochoke_pp_latest = np_lat;
+    let mut pp_2025 = None; let mut max_pp_2025 = None; let mut nochoke_pp_2025 = None;
+    let mut pp_2024 = None; let mut max_pp_2024 = None; let mut nochoke_pp_2024 = None;
+    let mut pp_2022 = None; let mut max_pp_2022 = None; let mut nochoke_pp_2022 = None;
+    let mut pp_2021 = None; let mut max_pp_2021 = None; let mut nochoke_pp_2021 = None;
+
+    if !is_lazer {
+        if let Ok(map_2025) = rosu_pp_2025::Beatmap::from_path(&map_path) {
+            let diff_2025 = rosu_pp_2025::Difficulty::new().mods(replay.mods as u32).calculate(&map_2025);
+            pp_2025 = Some(rosu_pp_2025::Performance::new(diff_2025.clone()).mods(replay.mods as u32).n300(replay.count_300 as u32).n100(replay.count_100 as u32).n50(replay.count_50 as u32).misses(replay.count_miss as u32).combo(replay.max_combo as u32).calculate().pp());
+            max_pp_2025 = Some(rosu_pp_2025::Performance::new(diff_2025.clone()).mods(replay.mods as u32).calculate().pp());
+            nochoke_pp_2025 = Some(rosu_pp_2025::Performance::new(diff_2025).mods(replay.mods as u32).n300((replay.count_300 + replay.count_miss) as u32).n100(replay.count_100 as u32).n50(replay.count_50 as u32).misses(0).combo(max_possible_combo).calculate().pp());
+        }
+        if let Ok(map_2024) = rosu_pp_2024::Beatmap::from_path(&map_path) {
+            let diff_2024 = rosu_pp_2024::Difficulty::new().mods(replay.mods as u32).calculate(&map_2024);
+            pp_2024 = Some(rosu_pp_2024::Performance::new(diff_2024.clone()).mods(replay.mods as u32).n300(replay.count_300 as u32).n100(replay.count_100 as u32).n50(replay.count_50 as u32).misses(replay.count_miss as u32).combo(replay.max_combo as u32).calculate().pp());
+            max_pp_2024 = Some(rosu_pp_2024::Performance::new(diff_2024.clone()).mods(replay.mods as u32).calculate().pp());
+            nochoke_pp_2024 = Some(rosu_pp_2024::Performance::new(diff_2024).mods(replay.mods as u32).n300((replay.count_300 + replay.count_miss) as u32).n100(replay.count_100 as u32).n50(replay.count_50 as u32).misses(0).combo(max_possible_combo).calculate().pp());
+        }
+        if let Ok(map_2022) = rosu_pp_2022::Beatmap::from_path(&map_path) {
+            pp_2022 = Some(rosu_pp_2022::AnyPP::new(&map_2022).mods(replay.mods as u32).n300(replay.count_300 as usize).n100(replay.count_100 as usize).n50(replay.count_50 as usize).n_misses(replay.count_miss as usize).combo(replay.max_combo as usize).calculate().pp());
+            max_pp_2022 = Some(rosu_pp_2022::AnyPP::new(&map_2022).mods(replay.mods as u32).calculate().pp());
+            nochoke_pp_2022 = Some(rosu_pp_2022::AnyPP::new(&map_2022).mods(replay.mods as u32).n300((replay.count_300 + replay.count_miss) as usize).n100(replay.count_100 as usize).n50(replay.count_50 as usize).n_misses(0).combo(max_possible_combo as usize).calculate().pp());
+        }
+        if let Ok(map_2021) = rosu_pp_2021::Beatmap::from_path(&map_path) {
+            let diff_2021 = rosu_pp_2021::Difficulty::new().mods(replay.mods as u32).calculate(&map_2021);
+            pp_2021 = Some(rosu_pp_2021::Performance::new(diff_2021.clone()).mods(replay.mods as u32).n300(replay.count_300 as u32).n100(replay.count_100 as u32).n50(replay.count_50 as u32).misses(replay.count_miss as u32).combo(replay.max_combo as u32).calculate().pp());
+            max_pp_2021 = Some(rosu_pp_2021::Performance::new(diff_2021.clone()).mods(replay.mods as u32).calculate().pp());
+            nochoke_pp_2021 = Some(rosu_pp_2021::Performance::new(diff_2021).mods(replay.mods as u32).n300((replay.count_300 + replay.count_miss) as u32).n100(replay.count_100 as u32).n50(replay.count_50 as u32).misses(0).combo(max_possible_combo).calculate().pp());
+        }
+    }
+
     let player_name = replay.player_name.as_ref().map(|user| user.clone());
     let player = player_name.as_deref().unwrap_or("Unknown player");
     let acc = replay.accuracy();
@@ -825,6 +1006,11 @@ async fn create_title(
         max_possible_combo: max_possible_combo.try_into().unwrap(),
         stars,
         acc,
+        pp_latest, max_pp_latest, nochoke_pp_latest,
+        pp_2025, max_pp_2025, nochoke_pp_2025,
+        pp_2024, max_pp_2024, nochoke_pp_2024,
+        pp_2022, max_pp_2022, nochoke_pp_2022,
+        pp_2021, max_pp_2021, nochoke_pp_2021,
     })
 }
 

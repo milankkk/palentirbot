@@ -26,6 +26,10 @@ rand = { version = "0.8" }
 #rosu-v2 = { git = "https://github.com/MaxOhn/rosu-v2", rev = "e3852e27285f8cec610417ba6f93e6f29915ee3b", default-features = false }
 rosu-v2 = { git = "https://github.com/MaxOhn/rosu-v2", branch = "main", default-features = false }
 rosu-pp = { git = "https://github.com/MaxOhn/rosu-pp", branch = "main" }
+rosu-pp-2021 = { package = "rosu-pp", version = "1.1.0" }
+rosu-pp-2022 = { package = "rosu-pp", version = "0.9.5" }
+rosu-pp-2024 = { package = "rosu-pp", version = "2.0.0" }
+rosu-pp-2025 = { package = "rosu-pp", version = "3.0.0" }
 reqwest = { version = "0.11", features = ["json"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
@@ -67,6 +71,7 @@ twilight-interactions = { git = "https://github.com/MaxOhn/twilight-interactions
 twilight-model = { version = "0.16", default-features = false }
 twilight-standby = { version = "0.16", default-features = false }
 twilight-validate = "0.16"
+oppai-rs = "0.2.3"
 
 
 [profile.release]

@@ -105,7 +105,7 @@ pub async fn edit(
         let file = File::open(&user_path)
             .with_context(|| format!("failed to open settings file at {user_path:?}"))?;
 
-        serde_json::from_reader(file)
+        serde_json::from_reader(std::io::BufReader::new(file))
             .with_context(|| format!("failed to deserialize settings file at {user_path:?}"))?
     } else {
         let mut default_path = danser_path.to_owned();
@@ -116,7 +116,7 @@ pub async fn edit(
 
         let file = File::open(&user_path).context("failed to open default settings file")?;
 
-        serde_json::from_reader(file).context("failed to deserialize default settings file")?
+        serde_json::from_reader(std::io::BufReader::new(file)).context("failed to deserialize default settings file")?
     };
 
     if let Some(attached) = attached {

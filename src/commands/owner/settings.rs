@@ -12,7 +12,7 @@ pub async fn settings(ctx: Arc<Context>, command: InteractionCommand) -> Result<
     default_path.push("settings/default.json");
 
     let file = std::fs::File::open(&default_path).context("failed to open default.json")?;
-    let json: serde_json::Value = serde_json::from_reader(file).context("failed to parse default.json")?;
+    let json: serde_json::Value = serde_json::from_reader(std::io::BufReader::new(file)).context("failed to parse default.json")?;
 
     let mut options = Vec::new();
     if let serde_json::Value::Object(map) = json {
@@ -68,7 +68,7 @@ pub async fn handle_owner_settings_section(ctx: Arc<Context>, component: Interac
     let mut default_path = BotConfig::get().paths.danser().to_owned();
     default_path.push("settings/default.json");
     let file = std::fs::File::open(&default_path).context("failed to open default.json")?;
-    let json: serde_json::Value = serde_json::from_reader(file).context("failed to parse default.json")?;
+    let json: serde_json::Value = serde_json::from_reader(std::io::BufReader::new(file)).context("failed to parse default.json")?;
 
     let mut options = Vec::new();
     if let Some(section_val) = json.get(&section) {
@@ -131,7 +131,7 @@ pub async fn handle_owner_settings_prop(ctx: Arc<Context>, component: Interactio
     let mut default_path = BotConfig::get().paths.danser().to_owned();
     default_path.push("settings/default.json");
     let file = std::fs::File::open(&default_path).context("failed to open default.json")?;
-    let json: serde_json::Value = serde_json::from_reader(file).context("failed to parse default.json")?;
+    let json: serde_json::Value = serde_json::from_reader(std::io::BufReader::new(file)).context("failed to parse default.json")?;
 
     let current_val = json.get(section).and_then(|s| s.get(&prop)).map(|v| v.to_string()).unwrap_or_default();
     let current_val = current_val.trim_matches('"'); 
@@ -170,7 +170,7 @@ pub async fn handle_owner_settings_modal(ctx: Arc<Context>, modal: InteractionMo
     let mut default_path = BotConfig::get().paths.danser().to_owned();
     default_path.push("settings/default.json");
     let file = std::fs::File::open(&default_path).context("failed to open default.json")?;
-    let mut json: serde_json::Value = serde_json::from_reader(file).context("failed to parse default.json")?;
+    let mut json: serde_json::Value = serde_json::from_reader(std::io::BufReader::new(file)).context("failed to parse default.json")?;
 
     if let Some(section_val) = json.get_mut(section) {
         if let Some(prop_val) = section_val.get_mut(prop) {
@@ -265,7 +265,7 @@ pub async fn handle_owner_settings_applyall(ctx: Arc<Context>, component: Intera
     let mut default_path = BotConfig::get().paths.danser().to_owned();
     default_path.push("settings/default.json");
     let file = std::fs::File::open(&default_path).context("failed to open default.json")?;
-    let default_json: serde_json::Value = serde_json::from_reader(file).context("failed to parse default.json")?;
+    let default_json: serde_json::Value = serde_json::from_reader(std::io::BufReader::new(file)).context("failed to parse default.json")?;
 
     let default_val = default_json.get(section).and_then(|s| s.get(prop));
     
@@ -295,7 +295,7 @@ pub async fn handle_owner_settings_applyall(ctx: Arc<Context>, component: Intera
         }
 
         if let Ok(file) = std::fs::File::open(&path) {
-            if let Ok(mut json) = serde_json::from_reader::<_, serde_json::Value>(file) {
+            if let Ok(mut json) = serde_json::from_reader::<_, serde_json::Value>(std::io::BufReader::new(file)) {
                 if let Some(section_val) = json.get_mut(section) {
                     if let Some(prop_val) = section_val.get_mut(prop) {
                         *prop_val = default_val.clone();

@@ -22,6 +22,7 @@ pub struct ReplayData {
     pub map_title: Option<String>,
     pub difficulty_name: Option<String>,
     pub queue_message: Option<(Id<MessageMarker>, Id<ChannelMarker>)>,
+    pub is_lazer: bool,
 }
 
 impl ReplayData {

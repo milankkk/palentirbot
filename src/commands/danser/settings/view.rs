@@ -20,7 +20,7 @@ pub async fn view(
     user_path.push(format!("settings/{}.json", user.id));
 
     let settings = match File::open(&user_path) {
-        Ok(file) => match serde_json::from_reader(file) {
+        Ok(file) => match serde_json::from_reader(std::io::BufReader::new(file)) {
             Ok(settings) => settings,
             Err(err) => {
                 let content = "Failed to read settings file";

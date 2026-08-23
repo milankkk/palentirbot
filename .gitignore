@@ -14,3 +14,9 @@ Cargo.lock
 /data/*
 out*.txt
 prompt.txt
+# Temporary files and directories
+scratch/
+cache/
+scripts/
+*.osu
+*.osr
