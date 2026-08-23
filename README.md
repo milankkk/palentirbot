@@ -1,4 +1,4 @@
-# Palentirbot
+# palentirbot (no correlation)
 
 A modern revival of [shishabot](https://github.com/mezodev0/shishabot) using updated dependencies and robust asynchronous Rust.
 
@@ -13,9 +13,9 @@ A modern revival of [shishabot](https://github.com/mezodev0/shishabot) using upd
 
 ---
 
-## 🛠️ Setup & Installation
+## Setup & Installation
 
-Follow these instructions carefully to host the bot yourself. Some background context can be found in the [original shishabot repository](https://github.com/mezodev0/shishabot).
+Follow these instructions to host the bot yourself. First necessary instructions can be found in the [original shishabot repository](https://github.com/mezodev0/shishabot).
 
 ### 1. Clone the Repository
 ```bash
@@ -41,7 +41,7 @@ python3 upload.py
 
 ### 4. Danser Setup
 1. Download and extract [Danser](https://github.com/Wieku/danser-go) into the `./data/danser` directory.
-   > **Note:** For headless servers, rename `danser-cli` to `danser` and `danser` to `danser-gui`
+   > **Note:** For headless servers, rename `danser-cli` to `danser` and `danser` to `danser-gui` or also set up a fake monitor for it to launch on in case it doesnt work (this is what did it for me)
 2. Make it executable and run it once to generate the settings files:
 ```bash
 cd data/danser
@@ -59,4 +59,4 @@ cargo run --release
 ```
 
 ### 6. Profit
-Pray 🙏 and enjoy your self-hosted render bot!
+Pray 🙏 and enjoy!
