@@ -116,25 +116,28 @@ async fn render_from_msg(ctx: Arc<Context>, mut command: InteractionCommand) -> 
         }
     };
 
-    let fetched_username = ctx.osu().user(user_id).await.ok().map(|u| u.username);
+    let fetched_user = ctx.osu().user(user_id).await.ok();
+    let fetched_map = ctx.osu().beatmap().map_id(beatmap_id).await.ok();
 
     let osu_user = score_to_render
         .user
         .as_ref()
-        .map(|u| u.username.as_str())
-        .or(fetched_username.as_deref())
-        .unwrap_or("unknown player");
+        .map(|user| user.username.as_str())
+        .or_else(|| fetched_user.as_ref().map(|u| u.username.as_str()))
+        .unwrap_or("unknown user");
 
     let map_title = score_to_render
         .mapset
         .as_ref()
-        .map(|m| m.title.as_str())
+        .map(|mapset| mapset.title.as_str())
+        .or_else(|| fetched_map.as_ref().and_then(|m| m.mapset.as_ref().map(|ms| ms.title.as_str())))
         .unwrap_or("unknown map");
 
     let diff_name = score_to_render
         .map
         .as_ref()
-        .map(|m| m.version.as_str())
+        .map(|map| map.version.as_str())
+        .or_else(|| fetched_map.as_ref().map(|m| m.version.as_str()))
         .unwrap_or("unknown diff");
 
     let mut path = BotConfig::get().paths.downloads().to_owned();
@@ -322,22 +325,28 @@ pub async fn render_score_from_embed(
         Err(err) => return Err(Report::new(err).wrap_err("failed to parse replay")),
     };
     replay.grade = score_to_render.grade;
+    let fetched_user = ctx.osu().user(user_id).await.ok();
+    let fetched_map = ctx.osu().beatmap().map_id(beatmap_id).await.ok();
+
     let osu_user = score_to_render
         .user
         .as_ref()
         .map(|user| user.username.as_str())
+        .or_else(|| fetched_user.as_ref().map(|u| u.username.as_str()))
         .unwrap_or("unknown user");
 
     let map_title = score_to_render
         .mapset
         .as_ref()
         .map(|mapset| mapset.title.as_str())
+        .or_else(|| fetched_map.as_ref().and_then(|m| m.mapset.as_ref().map(|ms| ms.title.as_str())))
         .unwrap_or("unknown map");
 
     let diff_name = score_to_render
         .map
         .as_ref()
         .map(|map| map.version.as_str())
+        .or_else(|| fetched_map.as_ref().map(|m| m.version.as_str()))
         .unwrap_or("unknown diff");
 
     let mut path = BotConfig::get().paths.downloads().to_owned();
