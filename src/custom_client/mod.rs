@@ -246,7 +246,8 @@ impl CustomClient {
         let RawReplay { content } = serde_json::from_slice::<RawReplay>(&bytes)
             .with_context(|| format!("failed to deserialize raw replay response: {text}"))?;
 
-        base64::decode(content).context("failed to decode replay through base64")
+        use base64::prelude::*;
+        BASE64_STANDARD.decode(content).context("failed to decode replay through base64")
     }
 
     pub async fn getrawreplay_for_user_map(
@@ -280,7 +281,8 @@ impl CustomClient {
         let RawReplay { content } = serde_json::from_slice::<RawReplay>(&bytes)
             .with_context(|| format!("failed to deserialize raw replay response: {text}"))?;
 
-        base64::decode(content).context("failed to decode replay through base64")
+        use base64::prelude::*;
+        BASE64_STANDARD.decode(content).context("failed to decode replay through base64")
     }
 
     pub async fn download_official_mapset(&self, mapset_id: u32, osu_token: &str) -> Result<Bytes> {

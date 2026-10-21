@@ -1,4 +1,5 @@
 bitflags::bitflags! {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub struct CommandFlags: u8 {
         const AUTHORITY   = 1 << 0;
         const EPHEMERAL   = 1 << 1;

@@ -59,7 +59,7 @@ SET
             .wrap_err("failed to check if server is blacklisted")?;
 
         if let Some(row) = row {
-            Ok((true, row.get("reason")))
+            Ok((true, row.get::<Option<String>, _>("reason")))
         } else {
             Ok((false, None))
         }

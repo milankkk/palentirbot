@@ -20,7 +20,7 @@ impl Flags {
         let bits = self.tokens;
 
         quote! {
-            unsafe { crate::core::commands::CommandFlags::from_bits_unchecked(#bits) }
+            crate::core::commands::CommandFlags::from_bits_retain(#bits)
         }
     }
 }

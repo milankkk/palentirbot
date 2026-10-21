@@ -37,7 +37,7 @@ fn main() {
 }
 
 async fn async_main() -> Result<()> {
-    let _ = dotenv::dotenv().expect("failed to parse .env file");
+    let _ = dotenvy::dotenv().expect("failed to parse .env file");
     let _log_worker_guard = logging::init();
 
     BotConfig::init().context("failed to initialize config")?;
