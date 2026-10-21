@@ -78,10 +78,10 @@ pub async fn create_context_embed(ctx: &Context, channel_id: Id<ChannelMarker>) 
     let progress_bar = make_progress_bar(total_used_tokens, max_window, 16);
 
     // 4. Last actual generation stats from Ollama (if available)
-    let last_stats = ctx.ai().last_stats().await;
+    let last_stats = ctx.ai().last_stats(channel_id).await;
 
     // 5. Hardware & queue info
-    let queue_len = ctx.ai().queue_len();
+    let queue_len = ctx.ai().queue_len().await;
     let queue_status = if queue_len == 0 {
         "Idle (0 waiting)".to_string()
     } else {

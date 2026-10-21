@@ -45,7 +45,8 @@ pub async fn remove(
 
     skin_list.sort_unstable_by_key(|entry| entry.file_name().to_ascii_lowercase());
 
-    if let Some(skin_to_remove) = skin_list.get(index - 1) {
+    let skin_to_remove_opt = index.checked_sub(1).and_then(|idx| skin_list.get(idx));
+    if let Some(skin_to_remove) = skin_to_remove_opt {
         fs::remove_dir_all(skin_to_remove.path())?;
 
         // Reset the skin list cache

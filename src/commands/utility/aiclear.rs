@@ -67,7 +67,7 @@ async fn slash_aiclear(ctx: Arc<Context>, mut command: InteractionCommand) -> Re
         }
     }
 
-    let queued = ctx.ai().queue_len();
+    let queued = ctx.ai().queue_len().await;
     if queued > 0 {
         response.push_str(&format!("\nℹ️ Note: {queued} request(s) currently in the AI queue."));
     }

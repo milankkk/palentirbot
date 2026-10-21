@@ -1,4 +1,4 @@
-pub use self::{blacklist::*, queue::*, render::*, settings::*, setup::*, skin::*};
+pub use self::{blacklist::*, queue::*, render::*, render_score::*, settings::*, setup::*, skin::*};
 
 mod blacklist;
 pub mod queue;

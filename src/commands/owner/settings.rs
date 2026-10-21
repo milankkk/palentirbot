@@ -4,7 +4,12 @@ use twilight_model::channel::message::component::{ActionRow, Component, SelectMe
 
 use crate::{
     core::{BotConfig, Context},
-    util::{builder::MessageBuilder, interaction::{InteractionCommand, InteractionComponent, InteractionModal}, ComponentExt, InteractionCommandExt, builder::ModalBuilder, ModalExt},
+    util::{
+        builder::{MessageBuilder, ModalBuilder},
+        constants::NOT_OWNER,
+        interaction::{InteractionCommand, InteractionComponent, InteractionModal},
+        Authored, ComponentExt, InteractionCommandExt, ModalExt,
+    },
 };
 
 pub async fn settings(ctx: Arc<Context>, command: InteractionCommand) -> Result<()> {
@@ -60,6 +65,12 @@ pub async fn settings(ctx: Arc<Context>, command: InteractionCommand) -> Result<
 }
 
 pub async fn handle_owner_settings_section(ctx: Arc<Context>, component: InteractionComponent) -> Result<()> {
+    let user_id = component.user_id()?;
+    if !BotConfig::get().owners.contains(&user_id) {
+        component.callback(&ctx, MessageBuilder::new().content(NOT_OWNER)).await?;
+        return Ok(());
+    }
+
     let section = component.data.values.first().cloned().unwrap_or_default();
     if section.is_empty() {
         return Ok(());
@@ -118,6 +129,12 @@ pub async fn handle_owner_settings_section(ctx: Arc<Context>, component: Interac
 }
 
 pub async fn handle_owner_settings_prop(ctx: Arc<Context>, component: InteractionComponent) -> Result<()> {
+    let user_id = component.user_id()?;
+    if !BotConfig::get().owners.contains(&user_id) {
+        component.callback(&ctx, MessageBuilder::new().content(NOT_OWNER)).await?;
+        return Ok(());
+    }
+
     let custom_id = &component.data.custom_id;
     let section = custom_id.trim_start_matches("owner_settings_prop_");
     let prop = component.data.values.first().cloned().unwrap_or_default();
@@ -149,6 +166,12 @@ pub async fn handle_owner_settings_prop(ctx: Arc<Context>, component: Interactio
 }
 
 pub async fn handle_owner_settings_modal(ctx: Arc<Context>, modal: InteractionModal) -> Result<()> {
+    let user_id = modal.user_id()?;
+    if !BotConfig::get().owners.contains(&user_id) {
+        modal.callback(&ctx, MessageBuilder::new().content(NOT_OWNER)).await?;
+        return Ok(());
+    }
+
     let custom_id = &modal.data.custom_id;
     let parts: Vec<&str> = custom_id.trim_start_matches("oset_modal_").splitn(2, '_').collect();
     if parts.len() != 2 {
@@ -248,12 +271,24 @@ pub async fn handle_owner_settings_modal(ctx: Arc<Context>, modal: InteractionMo
 }
 
 pub async fn handle_owner_settings_skipall(ctx: Arc<Context>, component: InteractionComponent) -> Result<()> {
+    let user_id = component.user_id()?;
+    if !BotConfig::get().owners.contains(&user_id) {
+        component.callback(&ctx, MessageBuilder::new().content(NOT_OWNER)).await?;
+        return Ok(());
+    }
+
     let builder = MessageBuilder::new().content("Settings change applied only to the default config.").components(vec![]);
     component.callback(&ctx, builder).await?;
     Ok(())
 }
 
 pub async fn handle_owner_settings_applyall(ctx: Arc<Context>, component: InteractionComponent) -> Result<()> {
+    let user_id = component.user_id()?;
+    if !BotConfig::get().owners.contains(&user_id) {
+        component.callback(&ctx, MessageBuilder::new().content(NOT_OWNER)).await?;
+        return Ok(());
+    }
+
     let custom_id = &component.data.custom_id;
     let parts: Vec<&str> = custom_id.trim_start_matches("oset_applyall_").splitn(2, '_').collect();
     if parts.len() != 2 {

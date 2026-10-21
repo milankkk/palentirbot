@@ -83,6 +83,13 @@ pub enum ReplayStatus {
     Uploading(u64),
 }
 
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
+pub struct PpTriple {
+    pub pp: f64,
+    pub nochoke_pp: f64,
+    pub max_pp: f64,
+}
+
 #[derive(Clone)]
 pub struct ReplaySlim {
     pub beatmap_hash: Option<String>,

@@ -49,7 +49,7 @@ async fn slash_ask(ctx: Arc<Context>, mut command: InteractionCommand) -> Result
     command.defer(&ctx, false).await?;
 
     // Enter the fair FIFO AI queue to avoid overloading the backend
-    let ticket = match ctx.ai().queue().enter() {
+    let ticket = match ctx.ai().queue().enter().await {
         Ok(ticket) => ticket,
         Err(len) => {
             let content = format!(
@@ -145,7 +145,7 @@ pub async fn handle_prefix_ask(
     }
 
     // Enter the fair FIFO AI queue to avoid overloading the backend
-    let ticket = match ctx.ai().queue().enter() {
+    let ticket = match ctx.ai().queue().enter().await {
         Ok(ticket) => ticket,
         Err(len) => {
             let content = format!(
@@ -270,7 +270,7 @@ pub async fn execute_ai_question(
     )));
 
     // Ask whichever AI backend is configured in AiClient.
-    let answer = ctx.ai().ask(&messages).await?;
+    let answer = ctx.ai().ask(channel_id, &messages).await?;
 
     // Remove role prefixes that some local models generate.
     let answer = clean_ai_response(&answer);

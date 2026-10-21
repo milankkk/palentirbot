@@ -1,8 +1,10 @@
+use std::collections::HashMap;
 use std::time::Duration;
 
 use eyre::{Context, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use twilight_model::id::{marker::ChannelMarker, Id};
 
 use super::AiMessage;
 
@@ -25,7 +27,7 @@ pub struct OllamaClient {
     num_ctx: u32,
     repeat_penalty: f32,
     temperature: f32,
-    last_stats: tokio::sync::RwLock<Option<LastGenerationStats>>,
+    last_stats: tokio::sync::RwLock<HashMap<Id<ChannelMarker>, LastGenerationStats>>,
 }
 
 #[derive(Serialize)]
@@ -101,7 +103,7 @@ impl OllamaClient {
             num_ctx,
             repeat_penalty,
             temperature,
-            last_stats: tokio::sync::RwLock::new(None),
+            last_stats: tokio::sync::RwLock::new(HashMap::new()),
         }
     }
 
@@ -113,11 +115,11 @@ impl OllamaClient {
         &self.model
     }
 
-    pub async fn last_stats(&self) -> Option<LastGenerationStats> {
-        self.last_stats.read().await.clone()
+    pub async fn last_stats(&self, channel_id: Id<ChannelMarker>) -> Option<LastGenerationStats> {
+        self.last_stats.read().await.get(&channel_id).cloned()
     }
 
-    pub async fn ask(&self, messages: &[AiMessage]) -> Result<String> {
+    pub async fn ask(&self, channel_id: Id<ChannelMarker>, messages: &[AiMessage]) -> Result<String> {
         let request = OllamaRequest {
             model: &self.model,
             messages,
@@ -156,7 +158,7 @@ impl OllamaClient {
                 eval_duration_ms: response.eval_duration.map(|ns| ns / 1_000_000).unwrap_or(0),
                 total_duration_ms: response.total_duration.map(|ns| ns / 1_000_000).unwrap_or(0),
             };
-            *self.last_stats.write().await = Some(stats);
+            self.last_stats.write().await.insert(channel_id, stats);
         }
 
         Ok(response.message.content)

@@ -1,107 +1,120 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
-use tokio::sync::{Mutex, MutexGuard};
+use std::collections::VecDeque;
+use std::sync::Arc;
+use tokio::sync::{oneshot, Mutex};
 
 pub const DEFAULT_MAX_AI_QUEUE_SIZE: usize = 15;
 
-/// Fair FIFO queue for AI generation requests.
-/// Ensures only one request is actively processed by the AI backend at a time
-/// to prevent server overload, while preserving strict request order.
+/// Strict FIFO queue for AI generation requests.
+/// Ensures requests are processed in the exact order they entered the queue,
+/// preventing server overload and race conditions.
 pub struct AiQueue {
-    lock: Mutex<()>,
-    total_queued: AtomicUsize,
+    inner: Arc<Mutex<AiQueueInner>>,
     max_size: usize,
 }
 
-pub struct AiQueueTicket<'a> {
-    queue: &'a AiQueue,
-    position: usize,
-    active: bool,
+struct AiQueueInner {
+    running: bool,
+    waiters: VecDeque<oneshot::Sender<()>>,
 }
 
-pub struct AiQueuePermit<'a> {
-    _guard: MutexGuard<'a, ()>,
-    queue: &'a AiQueue,
+pub struct AiQueueTicket {
+    inner: Arc<Mutex<AiQueueInner>>,
+    receiver: Option<oneshot::Receiver<()>>,
+    position: usize,
+}
+
+pub struct AiQueuePermit {
+    inner: Arc<Mutex<AiQueueInner>>,
 }
 
 impl AiQueue {
     pub fn new(max_size: usize) -> Self {
         Self {
-            lock: Mutex::new(()),
-            total_queued: AtomicUsize::new(0),
+            inner: Arc::new(Mutex::new(AiQueueInner {
+                running: false,
+                waiters: VecDeque::new(),
+            })),
             max_size,
         }
     }
 
-    /// Try to enter the queue.
-    ///
-    /// Returns `Ok(ticket)` if a slot is available, or `Err(queue_length)`
-    /// if the queue has reached `max_size`.
-    pub fn enter(&self) -> Result<AiQueueTicket<'_>, usize> {
-        let mut current = self.total_queued.load(Ordering::SeqCst);
-        loop {
-            if current >= self.max_size {
-                return Err(current);
-            }
-            match self.total_queued.compare_exchange_weak(
-                current,
-                current + 1,
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-            ) {
-                Ok(_) => break,
-                Err(actual) => current = actual,
-            }
+    /// Enter the queue, reserving your exact spot in FIFO order.
+    pub async fn enter(&self) -> Result<AiQueueTicket, usize> {
+        let mut inner = self.inner.lock().await;
+        let total = if inner.running {
+            1 + inner.waiters.len()
+        } else {
+            0
+        };
+
+        if total >= self.max_size {
+            return Err(total);
         }
 
-        let position = current;
-        Ok(AiQueueTicket {
-            queue: self,
-            position,
-            active: true,
-        })
+        if !inner.running {
+            inner.running = true;
+            Ok(AiQueueTicket {
+                inner: Arc::clone(&self.inner),
+                receiver: None,
+                position: 0,
+            })
+        } else {
+            let (tx, rx) = oneshot::channel();
+            inner.waiters.push_back(tx);
+            let position = inner.waiters.len();
+            Ok(AiQueueTicket {
+                inner: Arc::clone(&self.inner),
+                receiver: Some(rx),
+                position,
+            })
+        }
     }
 
     /// Total number of AI requests currently executing or waiting in line.
-    pub fn len(&self) -> usize {
-        self.total_queued.load(Ordering::SeqCst)
+    pub async fn len(&self) -> usize {
+        let inner = self.inner.lock().await;
+        if inner.running {
+            1 + inner.waiters.len()
+        } else {
+            0
+        }
     }
 
     /// Whether the queue is currently empty.
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
+    pub async fn is_empty(&self) -> bool {
+        self.len().await == 0
     }
 }
 
-impl<'a> AiQueueTicket<'a> {
+impl AiQueueTicket {
     /// Number of requests ahead in the queue.
-    ///
-    /// 0 means no one is ahead and the request will run immediately.
-    /// Values > 0 indicate the position in line waiting for the AI.
     pub fn position(&self) -> usize {
         self.position
     }
 
-    /// Wait in fair FIFO order until it is this request's turn.
-    pub async fn wait(mut self) -> AiQueuePermit<'a> {
-        let guard = self.queue.lock.lock().await;
-        self.active = false;
+    /// Wait in strict FIFO order until it is this request's turn.
+    pub async fn wait(mut self) -> AiQueuePermit {
+        if let Some(rx) = self.receiver.take() {
+            let _ = rx.await;
+        }
+
         AiQueuePermit {
-            _guard: guard,
-            queue: self.queue,
+            inner: Arc::clone(&self.inner),
         }
     }
 }
 
-impl<'a> Drop for AiQueueTicket<'a> {
+impl Drop for AiQueuePermit {
     fn drop(&mut self) {
-        if self.active {
-            self.queue.total_queued.fetch_sub(1, Ordering::SeqCst);
-        }
-    }
-}
-
-impl<'a> Drop for AiQueuePermit<'a> {
-    fn drop(&mut self) {
-        self.queue.total_queued.fetch_sub(1, Ordering::SeqCst);
+        let inner_clone = Arc::clone(&self.inner);
+        tokio::spawn(async move {
+            let mut inner = inner_clone.lock().await;
+            while let Some(tx) = inner.waiters.pop_front() {
+                if tx.send(()).is_ok() {
+                    return; // Next waiter activated
+                }
+            }
+            inner.running = false;
+        });
     }
 }

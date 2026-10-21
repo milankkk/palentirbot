@@ -102,6 +102,22 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
 
                 // Blacklist check
                 if let Some(guild_id) = msg.guild_id {
+                    let is_allowed = ctx
+                        .guild_settings(guild_id, |s| {
+                            s.input_channels.is_empty() || s.input_channels.contains(&msg.channel_id)
+                        })
+                        .unwrap_or(true);
+
+                    if !is_allowed {
+                        let _ = msg
+                            .error(
+                                &ctx,
+                                "This channel is not an allowed input channel for rendering.",
+                            )
+                            .await;
+                        return;
+                    }
+
                     if let Ok((true, reason)) = ctx.psql()._is_server_blacklisted(guild_id).await {
                         let mut c = String::from("This server has been blacklisted.");
                         if let Some(r) = reason {
@@ -114,7 +130,10 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
                 }
 
                 // Resolve output channel
-                let output_channel = msg.channel_id;
+                let output_channel = msg
+                    .guild_id
+                    .and_then(|gid| ctx.guild_settings(gid, |server| server.output_channel).flatten())
+                    .unwrap_or(msg.channel_id);
 
                 // Parse optional args: start=MM:SS end=MM:SS pitch=1.5
                 let mut start_secs: u32 = 0;
@@ -189,8 +208,9 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
                 }
 
                 // Push to queue
-                use crate::core::replay_queue::{ReplayData, ReplaySlim, TimePoints};
+                use crate::core::replay_queue::{is_lazer_replay, ReplayData, ReplaySlim, TimePoints};
                 let was_empty = ctx.replay_queue.queue.lock().await.is_empty();
+                let is_lazer = is_lazer_replay(replay.version);
                 ctx.replay_queue
                     .push(ReplayData {
                         input_channel: msg.channel_id,
@@ -207,7 +227,8 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
                         player_name: None,
                         map_title: None,
                         difficulty_name: None,
-                        queue_message: None, is_lazer: false,
+                        queue_message: None,
+                        is_lazer,
                     })
                     .await;
 
@@ -228,11 +249,36 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
                     });
                 }
             } else if let Some(replied) = msg.referenced_message.as_deref() {
+                if let Some(guild_id) = msg.guild_id {
+                    let is_allowed = ctx
+                        .guild_settings(guild_id, |s| {
+                            s.input_channels.is_empty() || s.input_channels.contains(&msg.channel_id)
+                        })
+                        .unwrap_or(true);
+
+                    if !is_allowed {
+                        let _ = msg
+                            .error(
+                                &ctx,
+                                "This channel is not an allowed input channel for rendering.",
+                            )
+                            .await;
+                        return;
+                    }
+                }
+
+                let output_channel = msg
+                    .guild_id
+                    .and_then(|gid| ctx.guild_settings(gid, |server| server.output_channel).flatten())
+                    .unwrap_or(msg.channel_id);
+
+                let was_empty = ctx.replay_queue.queue.lock().await.is_empty();
+
                 match render_score_from_message(
                     Arc::clone(&ctx),
                     replied,
                     msg.channel_id,
-                    msg.channel_id,
+                    output_channel,
                     msg.author.id,
                 )
                 .await
@@ -246,7 +292,12 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
                             )
                             .await;
 
-                        let _ = send_queue_status(Arc::clone(&ctx), msg.channel_id).await;
+                        if was_empty {
+                            let ctx_clone = Arc::clone(&ctx);
+                            tokio::spawn(async move {
+                                let _ = send_queue_status(ctx_clone, output_channel).await;
+                            });
+                        }
                     }
                     Ok(None) => {
                         let _ = msg

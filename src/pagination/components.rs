@@ -76,7 +76,7 @@ pub async fn handle_pagination_back(
     ctx: Arc<Context>,
     component: InteractionComponent,
 ) -> Result<()> {
-    let f = |pages: &mut Pages| pages.index -= pages.per_page;
+    let f = |pages: &mut Pages| pages.index = pages.index.saturating_sub(pages.per_page);
 
     handle_pagination_component(ctx, component, f).await
 }
@@ -85,7 +85,7 @@ pub async fn handle_pagination_step(
     ctx: Arc<Context>,
     component: InteractionComponent,
 ) -> Result<()> {
-    let f = |pages: &mut Pages| pages.index += pages.per_page;
+    let f = |pages: &mut Pages| pages.index = (pages.index + pages.per_page).min(pages.last_index);
 
     handle_pagination_component(ctx, component, f).await
 }

@@ -25,9 +25,9 @@ pub async fn add(
     command: InteractionCommand,
     args: SkinAdd,
 ) -> Result<()> {
-    let _config = BotConfig::get();
+    let config = BotConfig::get();
 
-    let _user = match command.user() {
+    let user = match command.user() {
         Ok(user) => user,
         Err(err) => {
             command.error_callback(&ctx, GENERAL_ISSUE, false).await?;
@@ -35,10 +35,12 @@ pub async fn add(
         }
     };
 
-    //if !config.owners.contains(&user.id) {
-    //    command.error_callback(&ctx, NOT_OWNER, true).await?;
-    //    return Ok(());
-    //}
+    if !config.owners.contains(&user.id) {
+        command
+            .error_callback(&ctx, crate::util::constants::NOT_OWNER, true)
+            .await?;
+        return Ok(());
+    }
 
     let SkinAdd { skin, url } = args;
 
@@ -70,6 +72,43 @@ pub async fn add(
                     .await?;
                 return Ok(());
             }
+
+            let parsed = match reqwest::Url::parse(&url) {
+                Ok(u) => u,
+                Err(_) => {
+                    command.error_callback(&ctx, "Invalid URL!", true).await?;
+                    return Ok(());
+                }
+            };
+
+            if parsed.scheme() != "http" && parsed.scheme() != "https" {
+                command
+                    .error_callback(&ctx, "URL must use http or https scheme!", true)
+                    .await?;
+                return Ok(());
+            }
+
+            if let Some(host) = parsed.host_str() {
+                let h = host.to_ascii_lowercase();
+                if h == "localhost"
+                    || h == "127.0.0.1"
+                    || h == "0.0.0.0"
+                    || h == "::1"
+                    || h.starts_with("192.168.")
+                    || h.starts_with("10.")
+                    || h.starts_with("172.")
+                {
+                    command
+                        .error_callback(
+                            &ctx,
+                            "Local or private network addresses are not allowed!",
+                            true,
+                        )
+                        .await?;
+                    return Ok(());
+                }
+            }
+
             let builder = MessageBuilder::new().embed("Downloading from URL...");
             command.callback(&ctx, builder, false).await?;
 
@@ -160,11 +199,37 @@ pub async fn add(
     builder = builder.embed("Extracting...");
     command.update(&ctx, &builder).await?;
 
-    if let Err(err) = archive.extract(&skin_file) {
-        let _ = command.error(&ctx, GENERAL_ISSUE).await;
-        let err = Report::from(err).wrap_err("failed to extract zip archive");
+    const MAX_UNCOMPRESSED_SKIN_BYTES: u64 = 400 * 1024 * 1024; // 400 MB
+    let skin_file_clone = skin_file.clone();
+    let extract_res = tokio::task::spawn_blocking(move || -> Result<(), Report> {
+        let mut total_size: u64 = 0;
+        for i in 0..archive.len() {
+            let file = archive
+                .by_index(i)
+                .map_err(|e| Report::from(e).wrap_err("corrupt zip entry in skin archive"))?;
+            total_size += file.size();
+            if total_size > MAX_UNCOMPRESSED_SKIN_BYTES {
+                eyre::bail!("Skin archive exceeds 400MB uncompressed limit!");
+            }
+        }
+        archive
+            .extract(&skin_file_clone)
+            .map_err(|e| Report::from(e).wrap_err("failed to extract zip archive"))?;
+        Ok(())
+    })
+    .await;
 
-        return Err(err);
+    match extract_res {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => {
+            let msg = err.to_string();
+            let _ = command.error(&ctx, msg).await;
+            return Err(err);
+        }
+        Err(err) => {
+            let _ = command.error(&ctx, GENERAL_ISSUE).await;
+            return Err(Report::from(err).wrap_err("extraction task panicked"));
+        }
     }
 
     let mut skin_ini_path = skin_file.clone();

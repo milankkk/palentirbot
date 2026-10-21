@@ -2,7 +2,7 @@ use crate::util::builder::EmbedBuilder;
 use crate::util::MessageExt;
 use crate::{
     core::{BotConfig, Context, ReplayStatus},
-    util::{builder::MessageBuilder, levenshtein_similarity, ChannelExt},
+    util::{builder::MessageBuilder, ChannelExt},
 };
 use bytes::Bytes;
 use eyre::{Context as _, ContextCompat, Report, Result};
@@ -12,19 +12,16 @@ use std::{
     error::Error as StdError,
     ffi::OsStr,
     fmt::{Display, Formatter, Result as FmtResult},
-    fs,
     io::Cursor,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Stdio,
     sync::Arc,
 };
-use tokio::io::AsyncBufReadExt;
-use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio::time::{sleep, Duration};
 use zip::ZipArchive;
 
-use super::{ReplayData, ReplayQueue, ReplaySlim};
+use super::{PpTriple, ReplayData, ReplayQueue, ReplaySlim};
 
 impl ReplayQueue {
     pub fn process(ctx: Arc<Context>) {
@@ -40,642 +37,627 @@ impl ReplayQueue {
         }
 
         loop {
-            let ReplayData {
-                input_channel,
-                output_channel,
-                pitch,
-                path,
-                replay,
-                time_points,
-                user,
-                title: _,
-                player_name: _,
-                map_title: _,
-                difficulty_name: _,
-                queue_message,
-is_lazer,
-            } = ctx.replay_queue.peek().await;
+            let data = ctx.replay_queue.peek().await;
+            let replay_path = data.path.clone();
+            let queue_message = data.queue_message;
 
-            let replay_hash = replay.replay_hash.as_deref().unwrap_or("");
-
-            let (mapset_id, map_id) = match replay.beatmap_hash.as_deref() {
-                Some(hash) => match ctx.osu().beatmap().checksum(hash).await {
-                    Ok(map) => match map.mapset {
-                        Some(mapset) => (mapset.mapset_id, map.map_id),
-                        None => {
-                            warn!("map without mapset");
-
-                            let content = "The mapset was not received when requesting the map from the osu!api";
-                            input_channel.error(&ctx, content).await?;
-                            ctx.replay_queue.reset_peek().await;
-
-                            continue;
-                        }
-                    },
-                    Err(err) => {
-                        let context = format!("failed to request map with hash {hash}");
-                        let err = Report::from(err).wrap_err(context);
-
-                        warn!("{err:?}");
-
-                        let content = "Failed to retrieve map. Maybe it's not submitted?";
-                        input_channel.error(&ctx, content).await?;
-                        ctx.replay_queue.reset_peek().await;
-
-                        continue;
-                    }
-                },
-                None => {
-                    warn!("missing hash in replay requested by user {user}");
-
-                    let content = "Missing the beatmap hash in the replay file";
-                    input_channel.error(&ctx, content).await?;
-                    ctx.replay_queue.reset_peek().await;
-
-                    continue;
+            if let Err(err) = process_single_replay(Arc::clone(&ctx), data, &danser_path).await {
+                warn!("Replay processing failed: {err:?}");
+                if let Some((msg_id, channel_id)) = queue_message {
+                    let _ = ctx.http.delete_message(channel_id, msg_id).await;
                 }
-            };
-
-            warn!("Started map download");
-            let mut mapset_path = config.paths.songs();
-            mapset_path.push(mapset_id.to_string());
-
-            if mapset_path.exists() {
-                warn!("Mapset {mapset_id} already exists locally, skipping download.");
-                ctx.replay_queue.set_status(ReplayStatus::MapFound).await;
-                ctx.replay_queue.notify.notify_waiters();
-
-                // Sleep for 1 second just so the emoji is visible briefly before rendering starts
-                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-            } else {
-                warn!("Started map download");
-                ctx.replay_queue.set_status(ReplayStatus::Downloading).await;
-                ctx.replay_queue.notify.notify_waiters();
-
-                if let Err(err) = download_mapset(&ctx, mapset_id).await {
-                    warn!("{err:?}");
-                    let content =
-                        "Failed to download map. Mirrors are likely down, try again later.";
-                    let _ = input_channel
-                        .create_message(
-                            &ctx,
-                            &crate::util::builder::MessageBuilder::new().content(content),
-                        )
-                        .await;
-                    ctx.replay_queue.reset_peek().await;
-                    continue;
-                }
-                warn!("Finished map download");
+                // Best effort cleanup of replay file if not already deleted
+                let _ = tokio::fs::remove_file(&replay_path).await;
             }
 
-            let mut settings_path = config.paths.danser().to_owned();
-            settings_path.push(format!("settings/{user}.json"));
-
-            let settings = if settings_path.exists() {
-                user.to_string()
-            } else {
-                "default".to_owned()
-            };
-
-            let filename_opt = path
-                .file_name()
-                .and_then(OsStr::to_str)
-                .and_then(|name: &str| name.split('.').next());
-
-            let filename = match filename_opt {
-                Some(name) => name,
-                None => {
-                    warn!("replay path `{path:?}` has an unexpected form");
-
-                    let content = "There was an error resolving the beatmap path";
-                    let _ = input_channel.error(&ctx, content).await?;
-
-                    ctx.replay_queue.reset_peek().await;
-                    continue;
-                }
-            };
-
-            tracing::warn!(mods = replay.mods, "replay mods being sent to danser");
-
-            let mut command = Command::new(&danser_path);
-            warn!("danser dir: {:?}", config.paths.danser());
-            warn!("danser path: {:?}", danser_path);
-            let path =
-            tokio::fs::canonicalize(&path).await.context("failed to canonicalize replay path")?;
-            command
-                .current_dir(config.paths.danser())
-                .arg("-noupdatecheck")
-                //.arg("-nodbcheck")
-                .arg("-replay")
-                .arg(&path)
-                .arg("-record")
-                .arg("-settings")
-                .arg(settings)
-                .arg("-quickstart")
-                .arg("-out")
-                .arg(filename)
-                .arg("-preciseprogress")
-                .stderr(Stdio::piped())
-                .stdout(Stdio::piped());
-
-            // conditional args
-            if time_points.start > 0 {
-                command.args(["-start", &time_points.start.to_string()]);
-            }
-            if time_points.end > 0 {
-                command.args(["-end", &time_points.end.to_string()]);
-            }
-            if let Some(pitch) = pitch {
-                let pitch_val: f64 = pitch;
-                command.args(["-pitch", &pitch_val.to_string()]);
-            }
-
-            info!("Started replay processing");
-
-            ctx.replay_queue
-                .set_status(ReplayStatus::Rendering(0))
-                .await;
-
-            match command.spawn() {
-                Ok(mut child) => {
-                    let stdout = child.stdout.take().expect("missing stdout on child");
-                    let stderr = child.stderr.take().expect("missing stderr on child");
-
-                    let stdout_reader = tokio::io::BufReader::new(stdout);
-                    let stderr_reader = tokio::io::BufReader::new(stderr);
-
-                    // Spawn background tasks to constantly drain both pipes so they never fill up
-                    let ctx1 = ctx.clone();
-                    tokio::spawn(async move {
-                        read_danser_progress(ctx1, stdout_reader).await;
-                    });
-
-                    let ctx2 = ctx.clone();
-                    tokio::spawn(async move {
-                        read_danser_progress(ctx2, stderr_reader).await;
-                    });
-
-                    // Now we can safely wait for the process to finish
-                    let childres = child.wait().await;
-                    tracing::trace!("Danser finished");
-
-                    if let Err(err) = childres {
-                        let err = eyre::Report::from(err).wrap_err("failed to run danser command");
-                        tracing::warn!("{:?}", err);
-                        let content = "Failed to run danser on the replay";
-                        let _ = input_channel.error(&ctx, content).await;
-                        ctx.replay_queue.reset_peek().await;
-                        continue;
-                    }
-                }
-                Err(err) => {
-                    let err = eyre::Report::from(err).wrap_err("failed to start danser command");
-                    tracing::warn!("{:?}", err);
-                    let content = "Failed to run danser on the replay";
-                    let _ = input_channel.error(&ctx, content).await;
-                    ctx.replay_queue.reset_peek().await;
-                    continue;
-                }
-            }
-
-            //warn!("api mods bits: {}", score_to_render.mods);
-            warn!("parsed replay mods bits: {}", replay.mods);
-            warn!(
-                "parsed replay mods: {:?}",
-                GameModsLegacy::from_bits(replay.mods)
-            );
-            info!("Finished replay processing");
-
-            let title = match get_title() {
-                Ok(title) => title,
-                Err(err) => {
-                    warn!("{err:?}");
-
-                    let content = "Failed to read danser logs";
-                    let _ = input_channel.error(&ctx, content).await?;
-
-                    ctx.replay_queue.reset_peek().await;
-                    continue;
-                }
-            };
-
-            let map_osu_file = match get_beatmap_osu_file(mapset_id, &title).await {
-                Ok(osu_file) => osu_file,
-                Err(err) => {
-                    let err = err.wrap_err("failed to get map_osu_file");
-                    warn!("{err:?}");
-
-                    let content = "danser did not like the replay file";
-                    let _ = input_channel.error(&ctx, content).await?;
-
-                    ctx.replay_queue.reset_peek().await;
-                    continue;
-                }
-            };
-
-            let mut map_path = config.paths.songs();
-            map_path.push(format!("{mapset_id}/{map_osu_file}"));
-
-            // --- NEW PARSING LOGIC HERE ---
-            // Extract the song name and difficulty from the `.osu` filename
-            let (base_name, difficulty) = map_osu_file
-                .strip_suffix(".osu")
-                .and_then(|s| s.rsplit_once(" ["))
-                .map(|(left, right)| (left.to_string(), right.trim_end_matches(']').to_string()))
-                .unwrap_or_else(|| (title.clone(), String::new()));
-
-            // Create a cleaner display title (e.g. "Ava Max - So Am I (Nightcore Cut Ver) [Outcast]")
-            let _formatted_title = if difficulty.is_empty() {
-                base_name
-            } else {
-                format!("{} [{}]", base_name, difficulty)
-            };
-
-            let TitleResult {
-                title: video_title,
-                mut pp,
-                mut max_pp,
-                mut nochoke_pp,
-                pp_latest, max_pp_latest, nochoke_pp_latest,
-                pp_2025, max_pp_2025, nochoke_pp_2025,
-                pp_2024, max_pp_2024, nochoke_pp_2024,
-                pp_2022, max_pp_2022, nochoke_pp_2022,
-                pp_2021, max_pp_2021, nochoke_pp_2021,
-                max_possible_combo,
-                stars: _,
-                acc: _,
-            } = match create_title(&replay, map_path.clone(), &title, is_lazer, &path).await {
-                Ok(result) => result,
-                Err(err) => {
-                    let err = err.wrap_err("failed to create title");
-                    warn!("{err:?}");
-                    let content = "There was an error while trying to create the video title";
-                    let _ = input_channel.error(&ctx, content).await;
-                    ctx.replay_queue.reset_peek().await;
-                    continue;
-                }
-            };
-            // Store the formatted title back so the queue embed can display it
-            ctx.replay_queue
-                .queue
-                .lock()
-                .await
-                .front_mut()
-                .map(|d| d.title = Some(video_title.clone()));
-
-            // 1. Parse the components out of: "[7.05⭐] WhiteCat | DECO*27 - First Storm +HDDT 98.5%"
-            let without_prefix = video_title.trim_start_matches('[');
-            let (stars, rest) = without_prefix
-                .split_once("⭐] ")
-                .unwrap_or(("0.00", without_prefix));
-            let (player, rest) = rest.split_once(" | ").unwrap_or(("Unknown", rest));
-
-            let rest = rest.trim_end_matches('%');
-            let (rest, acc) = rest.rsplit_once(' ').unwrap_or((rest, "100.00"));
-
-            let (map_name, mods) = if let Some((m, md)) = rest.rsplit_once(" +") {
-                (m, md)
-            } else {
-                (rest, "NM")
-            };
-
-            // 2. Helper function to safely replace dots/spaces with underscores
-            let sanitize = |s: &str| -> String {
-                let mut res = String::new();
-                let mut last_was_underscore = false;
-                for c in s.chars() {
-                    if c.is_ascii_alphanumeric() {
-                        res.push(c);
-                        last_was_underscore = false;
-                    } else if c == '-' {
-                        res.push('-');
-                        last_was_underscore = false;
-                    } else if !last_was_underscore {
-                        res.push('_');
-                        last_was_underscore = true;
-                    }
-                }
-                res.trim_matches(|c| c == '_' || c == '-').to_string()
-            };
-
-            // 3. Combine the sanitized values and add the replay hash at the end!
-            // We take the first 8 characters of the replay hash to keep the filename from getting too long.
-            //let hash_suffix = if replay_hash.len() > 8 { &replay_hash[..8] } else { replay_hash };
-
-            use std::time::{SystemTime, UNIX_EPOCH};
-
-            let timestamp = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
-
-            let safe_filename = format!(
-                "{}-{}-{}-{}-{}_{}_{}",
-                sanitize(stars),
-                sanitize(player),
-                sanitize(map_name),
-                sanitize(mods),
-                sanitize(acc),
-                if replay_hash.len() > 8 {
-                    &replay_hash[..8]
-                } else {
-                    replay_hash
-                },
-                timestamp // Forces a 100% unique filename every single time
-            );
-
-            // 4. Rename the file locally
-            let mut old_filepath = config.paths.replays().clone();
-            old_filepath.push(format!("{}.mp4", filename));
-
-            let mut new_filepath = config.paths.replays().clone();
-            new_filepath.push(format!("{}.mp4", safe_filename));
-
-            if let Err(err) = tokio::fs::rename(&old_filepath, &new_filepath).await {
-                warn!("Failed to rename MP4 file: {:?}", err);
-            }
-
-            info!("Started upload to server");
-            ctx.replay_queue
-                .set_status(ReplayStatus::Uploading(0))
-                .await;
-            let beatmap_link = format!("https://osu.ppy.sh/beatmapsets/{}", mapset_id);
-
-            // 6. Upload the RENAMED file!
-            let upload_hash = if replay_hash.is_empty() {
-                "nohash"
-            } else {
-                &replay_hash
-            };
-            let upload_fut = ctx.client().upload_video(
-                &video_title,
-                user,
-                &new_filepath,
-                &beatmap_link,
-                upload_hash,
-            );
-
-            let link = match upload_fut.await {
-                Ok(res) if res.error == 1 => {
-                    let err = format!("failed to upload: `{}`", res.text);
-                    warn!("{err}");
-                    let _ = input_channel.error(&ctx, err).await?;
-                    ctx.replay_queue.reset_peek().await;
-                    continue;
-                }
-                Ok(res) => res.text,
-                Err(err) => {
-                    let err = err.wrap_err("failed to upload file");
-                    warn!("{err:?}");
-                    let content = "Failed to upload file";
-                    let _ = input_channel.error(&ctx, content).await?;
-                    ctx.replay_queue.reset_peek().await;
-                    continue;
-                }
-            };
-
-            info!("Finished upload to server");
-            warn!("upload returned link: {}", link);
-
-            if let Ok(warmup_msg) = output_channel
-                .create_message(&ctx, &MessageBuilder::new().content(link.clone()))
-                .await
-            {
-                sleep(Duration::from_millis(1200)).await;
-                let _ = warmup_msg.delete(&ctx).await;
-            }
-            let file_size_bytes = tokio::fs::metadata(&new_filepath).await?.len();
-            let wait_secs = calculate_warmup_delay_secs(file_size_bytes);
-            warn!("Wait time for dc cache: {}", wait_secs);
-            // Set uploading status with countdown before sleeping
-            //ctx.replay_queue.set_status(ReplayStatus::Uploading(wait_secs)).await;
-            let mut remaining = wait_secs;
-            while remaining > 0 {
-                ctx.replay_queue
-                    .set_status(ReplayStatus::Uploading(remaining))
-                    .await;
-                ctx.replay_queue.notify.notify_waiters();
-                sleep(Duration::from_secs(1)).await;
-                remaining = remaining.saturating_sub(1);
-            }
-            ctx.replay_queue.notify.notify_waiters();
-
-            //let content = format!("<@{user}> your replay is ready!\n{link}");
-            //let watch_link = link.replacen("https://replays.insertdomainname.be/watch/", "https://replays.insertdomainname.be/", 1);
-            // Send replay details embed before the link
-            let legacy_mods = GameModsLegacy::from_bits(replay.mods);
-            let _mods_str = if legacy_mods.is_empty() {
-                String::new()
-            } else {
-                format!("+{}", legacy_mods)
-            };
-
-            let _player = replay.player_name.as_ref().map(|user| user.clone());
-
-            let acc = replay.accuracy();
-
-            
-            use rosu_v2::prelude::Grade;
-            use twilight_model::channel::message::embed::EmbedField;
-            let emojis = &BotConfig::get().emojis;
-
-            let score_value = {
-                use crate::util::numbers::with_comma_int;
-                with_comma_int(replay.score as u64).to_string()
-            };
-
-            let grade = replay.grade;
-            tracing::warn!("grade reported: {:?}", grade);
-            let rank_value = match grade {
-                Grade::XH => format!("{}", emojis.grade_xh),
-                Grade::X => format!("{}", emojis.grade_x),
-                Grade::SH => format!("{}", emojis.grade_sh),
-                Grade::S => format!("{}", emojis.grade_s),
-                Grade::A => format!("{}", emojis.grade_a),
-                Grade::B => format!("{}", emojis.grade_b),
-                Grade::C => format!("{}", emojis.grade_c),
-                Grade::D => format!("{}", emojis.grade_d),
-                _ => format!("{}", emojis.grade_fail),
-            };
-
-            let is_perfect_fc = replay.max_combo == max_possible_combo && replay.count_miss == 0;
-            let replay_datetime: Option<time::OffsetDateTime> = replay
-                .timestamp
-                .and_then(|ts: i64| time::OffsetDateTime::from_unix_timestamp(ts).ok());
-            let dt = replay_datetime;
-            if let Some(p) = pp_latest { pp = p; }
-            if let Some(mp) = max_pp_latest { max_pp = mp; }
-            if let Some(np) = nochoke_pp_latest { nochoke_pp = np; }
-            let is_perfect_fc = nochoke_pp == pp;
-
-            let embed_builder = EmbedBuilder::new()
-                //.title(format!("{stars}⭐ {player} | {title} {mods_str} ({acc}%"))
-                .color(0x96DFE3)
-                .title(video_title)
-                .url(format!("https://osu.ppy.sh/beatmaps/{map_id}"))
-                .fields(vec![
-                    // ── Score:
-                    EmbedField {
-                        inline: true,
-                        name: "Rank".to_owned(),
-                        value: rank_value,
-                    },
-                    EmbedField {
-                        inline: true,
-                        name: "Score".to_owned(),
-                        value: score_value,
-                    },
-                    // ── All other info
-                    EmbedField {
-                        inline: true,
-                        name: "Accuracy".to_owned(),
-                        value: format!("{acc}%"),
-                    },
-                    EmbedField {
-                        inline: true,
-                        name: "Max Combo".to_owned(),
-                        value: format!("{}/{}x", replay.max_combo, max_possible_combo),
-                    },
-
-                    EmbedField {
-                        inline: true,
-                        name: "pp".to_owned(),
-                        value: if is_perfect_fc {
-                            // Hides the "If FC" text ONLY on a perfect FC
-                            format!("{:.2}pp / {:.2}pp", pp, max_pp)
-                        } else {
-                            // Shows the "If FC" text if they missed, sliderbroke, or dropped slider ends
-                            format!(
-                                "{:.2}pp *(No Choke: {:.2}pp)* / {:.2}pp",
-                                pp, nochoke_pp, max_pp
-                            )
-                        },
-                    },
-                    EmbedField {
-                        inline: false,
-                        name: "Hits".to_owned(),
-                        value: format!(
-                            "{} {} | {} {} | {} {} | {} {}",
-                            emojis.hit_300,
-                            replay.count_300,
-                            emojis.hit_100,
-                            replay.count_100,
-                            emojis.hit_50,
-                            replay.count_50,
-                            emojis.hit_miss,
-                            replay.count_miss,
-                        ),
-                    },
-                    EmbedField {
-                        inline: false,
-                        name: "\u{200B}".to_owned(),
-                        value: format!("Played on <t:{}:F>", dt.expect("DATE").unix_timestamp()),
-                    },
-                ]);
-
-            let embed = embed_builder.build();
-            let mut components: Vec<twilight_model::channel::message::Component> = vec![];
-            if let (Some(p_lat), Some(mp_lat), Some(np_lat), Some(p25), Some(mp25), Some(np25), Some(p24), Some(mp24), Some(np24), Some(p22), Some(mp22), Some(np22), Some(p21), Some(mp21), Some(np21)) = (pp_latest, max_pp_latest, nochoke_pp_latest, pp_2025, max_pp_2025, nochoke_pp_2025, pp_2024, max_pp_2024, nochoke_pp_2024, pp_2022, max_pp_2022, nochoke_pp_2022, pp_2021, max_pp_2021, nochoke_pp_2021) {
-                let options = vec![
-                    twilight_model::channel::message::component::SelectMenuOption {
-                        default: true,
-                        description: Some("Real-time official osu! backend calculations".to_string()),
-                        emoji: None,
-                        label: "Latest Rework (C# backend)".to_string(),
-                        value: format!("pp_lat|{is_perfect_fc}|{p_lat:.2}|{mp_lat:.2}|{np_lat:.2}"),
-                    },
-                    twilight_model::channel::message::component::SelectMenuOption {
-                        default: false,
-                        description: Some("Performance points & star rating updates".to_string()),
-                        emoji: None,
-                        label: "rosu-pp v4 (July 2026)".to_string(),
-                        value: format!("pp_v4|{is_perfect_fc}|{pp:.2}|{max_pp:.2}|{nochoke_pp:.2}"),
-                    },
-                    twilight_model::channel::message::component::SelectMenuOption {
-                        default: false,
-                        description: Some("March 2025 Rework".to_string()),
-                        emoji: None,
-                        label: "March 2025 Rework".to_string(),
-                        value: format!("pp_v25|{is_perfect_fc}|{p25:.2}|{mp25:.2}|{np25:.2}"),
-                    },
-                    twilight_model::channel::message::component::SelectMenuOption {
-                        default: false,
-                        description: Some("Removal of combo scaling from standard PP".to_string()),
-                        emoji: None,
-                        label: "October 2024 Combo Scaling Removal".to_string(),
-                        value: format!("pp_v24|{is_perfect_fc}|{p24:.2}|{mp24:.2}|{np24:.2}"),
-                    },
-                    twilight_model::channel::message::component::SelectMenuOption {
-                        default: false,
-                        description: Some("Major performance & difficulty changes".to_string()),
-                        emoji: None,
-                        label: "September 2022 Rework".to_string(),
-                        value: format!("pp_v22|{is_perfect_fc}|{p22:.2}|{mp22:.2}|{np22:.2}"),
-                    },
-                    twilight_model::channel::message::component::SelectMenuOption {
-                        default: false,
-                        description: Some("Rhythm complexity & aim rework".to_string()),
-                        emoji: None,
-                        label: "November 2021 Xexxar Rework".to_string(),
-                        value: format!("pp_v21|{is_perfect_fc}|{p21:.2}|{mp21:.2}|{np21:.2}"),
-                    },
-                ];
-                components.push(twilight_model::channel::message::component::Component::ActionRow(twilight_model::channel::message::component::ActionRow {
-                    components: vec![twilight_model::channel::message::component::Component::SelectMenu(twilight_model::channel::message::component::SelectMenu {
-                        custom_id: "pp_version_select".to_string(),
-                        disabled: false,
-                        max_values: Some(1),
-                        min_values: Some(1),
-                        options: Some(options),
-                        placeholder: Some("Select PP Version".to_string()),
-                        channel_types: None,
-                        default_values: None,
-                        kind: twilight_model::channel::message::component::SelectMenuType::Text,
-                    })],
-                }));
-            }
-            let embed_builder = MessageBuilder::new().embed(embed).components(components);
-            if let Err(err) = output_channel.create_message(&ctx, &embed_builder).await {
-                warn!(
-                    "{:?}",
-                    Report::from(err).wrap_err("failed to send replay details embed")
-                );
-            }
-
-            // existing code continues below:
-            // let content = format!("{user} your replay is ready! ...
-
-            let link = link.replacen(".mp4", "", 1);
-            let content = format!("<@{user}> [Replay]({link})");
-
-            let builder = MessageBuilder::new().content(content);
-            if let Some((msg_id, channel_id)) = queue_message {
-                let _ = ctx.http.delete_message(channel_id, msg_id).await;
-            }
-
-            if let Err(err) = output_channel.create_message(&ctx, &builder).await {
-                let err = Report::from(err).wrap_err("failed to send video link");
-                warn!("{err:?}");
-            }
-            // 1. Delete the generated .mp4 from the Replays folder after upload
-            if let Err(err) = tokio::fs::remove_file(&new_filepath).await {
-                warn!(
-                    "Failed to delete local MP4 file {:?}: {}",
-                    new_filepath, err
-                );
-            } else {
-                warn!("Cleaned up local MP4 file at: {:?}.", new_filepath);
-            }
-
-            // 2. Delete the .osr from the Downloads folder
-            if let Err(err) = tokio::fs::remove_file(&path).await {
-                warn!("Failed to delete local OSR file {:?}: {}", path, err);
-            } else {
-                warn!("Cleaned up local OSR file at: {:?}.", path);
-            }
             ctx.replay_queue.reset_peek().await;
         }
     }
+}
+
+async fn process_single_replay(
+    ctx: Arc<Context>,
+    data: ReplayData,
+    danser_path: &Path,
+) -> Result<()> {
+    let ReplayData {
+        input_channel,
+        output_channel,
+        pitch,
+        path,
+        replay,
+        time_points,
+        user,
+        title: _,
+        player_name: _,
+        map_title: _,
+        difficulty_name: _,
+        queue_message,
+        is_lazer,
+    } = data;
+
+    let replay_hash = replay.replay_hash.as_deref().unwrap_or("");
+
+    let (mapset_id, map_id, map_version, mapset_title) = match replay.beatmap_hash.as_deref() {
+        Some(hash) => match ctx.osu().beatmap().checksum(hash).await {
+            Ok(map) => match map.mapset {
+                Some(mapset) => (
+                    mapset.mapset_id,
+                    map.map_id,
+                    map.version,
+                    format!("{} - {}", mapset.artist, mapset.title),
+                ),
+                None => {
+                    warn!("map without mapset");
+                    let content = "The mapset was not received when requesting the map from the osu!api";
+                    let _ = input_channel.error(&ctx, content).await;
+                    eyre::bail!("map without mapset");
+                }
+            },
+            Err(err) => {
+                let context = format!("failed to request map with hash {hash}");
+                let err = Report::from(err).wrap_err(context);
+                warn!("{err:?}");
+                let content = "Failed to retrieve map. Maybe it's not submitted?";
+                let _ = input_channel.error(&ctx, content).await;
+                return Err(err);
+            }
+        },
+        None => {
+            warn!("missing hash in replay requested by user {user}");
+            let content = "Missing the beatmap hash in the replay file";
+            let _ = input_channel.error(&ctx, content).await;
+            eyre::bail!("missing hash in replay");
+        }
+    };
+
+    let config = BotConfig::get();
+    let mut mapset_path = config.paths.songs();
+    mapset_path.push(mapset_id.to_string());
+
+    if mapset_path.exists() {
+        warn!("Mapset {mapset_id} already exists locally, skipping download.");
+        ctx.replay_queue.set_status(ReplayStatus::MapFound).await;
+        ctx.replay_queue.notify.notify_waiters();
+        sleep(Duration::from_secs(1)).await;
+    } else {
+        warn!("Started map download");
+        ctx.replay_queue.set_status(ReplayStatus::Downloading).await;
+        ctx.replay_queue.notify.notify_waiters();
+
+        if let Err(err) = download_mapset(&ctx, mapset_id).await {
+            warn!("{err:?}");
+            let content = "Failed to download map. Mirrors are likely down, try again later.";
+            let _ = input_channel
+                .create_message(
+                    &ctx,
+                    &crate::util::builder::MessageBuilder::new().content(content),
+                )
+                .await;
+            return Err(err);
+        }
+        warn!("Finished map download");
+    }
+
+    let mut settings_path = config.paths.danser().to_owned();
+    settings_path.push(format!("settings/{user}.json"));
+
+    let settings = if settings_path.exists() {
+        user.to_string()
+    } else {
+        "default".to_owned()
+    };
+
+    let filename_opt = path.file_stem().and_then(OsStr::to_str);
+
+    let filename = match filename_opt {
+        Some(name) => name,
+        None => {
+            warn!("replay path `{path:?}` has an unexpected form");
+            let content = "There was an error resolving the beatmap path";
+            let _ = input_channel.error(&ctx, content).await;
+            eyre::bail!("replay path `{path:?}` has an unexpected form");
+        }
+    };
+
+    tracing::warn!(mods = replay.mods, "replay mods being sent to danser");
+
+    let canonical_path = tokio::fs::canonicalize(&path)
+        .await
+        .context("failed to canonicalize replay path")?;
+
+    let mut command = Command::new(danser_path);
+    warn!("danser dir: {:?}", config.paths.danser());
+    warn!("danser path: {:?}", danser_path);
+    command
+        .current_dir(config.paths.danser())
+        .arg("-noupdatecheck")
+        .arg("-replay")
+        .arg(&canonical_path)
+        .arg("-record")
+        .arg("-settings")
+        .arg(settings)
+        .arg("-quickstart")
+        .arg("-out")
+        .arg(filename)
+        .arg("-preciseprogress")
+        .stderr(Stdio::piped())
+        .stdout(Stdio::piped());
+
+    if time_points.start > 0 {
+        command.args(["-start", &time_points.start.to_string()]);
+    }
+    if time_points.end > 0 {
+        command.args(["-end", &time_points.end.to_string()]);
+    }
+    if let Some(pitch) = pitch {
+        let pitch_val: f64 = pitch;
+        command.args(["-pitch", &pitch_val.to_string()]);
+    }
+
+    info!("Started replay processing");
+
+    ctx.replay_queue
+        .set_status(ReplayStatus::Rendering(0))
+        .await;
+
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(err) => {
+            let err = Report::from(err).wrap_err("failed to start danser command");
+            tracing::warn!("{:?}", err);
+            let content = "Failed to run danser on the replay";
+            let _ = input_channel.error(&ctx, content).await;
+            return Err(err);
+        }
+    };
+
+    let stdout = child.stdout.take().expect("missing stdout on child");
+    let stderr = child.stderr.take().expect("missing stderr on child");
+
+    let stdout_reader = tokio::io::BufReader::new(stdout);
+    let stderr_reader = tokio::io::BufReader::new(stderr);
+
+    let ctx1 = Arc::clone(&ctx);
+    tokio::spawn(async move {
+        read_danser_progress(ctx1, stdout_reader).await;
+    });
+
+    let ctx2 = Arc::clone(&ctx);
+    tokio::spawn(async move {
+        read_danser_progress(ctx2, stderr_reader).await;
+    });
+
+    let childres = child.wait().await;
+    tracing::trace!("Danser finished");
+
+    match childres {
+        Ok(status) => {
+            if !status.success() {
+                let content = "Danser crashed or exited with an error code.";
+                let _ = input_channel.error(&ctx, content).await;
+                eyre::bail!("danser exited with non-zero status: {status}");
+            }
+        }
+        Err(err) => {
+            let err = Report::from(err).wrap_err("failed to run danser command");
+            tracing::warn!("{:?}", err);
+            let content = "Failed to run danser on the replay";
+            let _ = input_channel.error(&ctx, content).await;
+            return Err(err);
+        }
+    }
+
+    warn!("parsed replay mods bits: {}", replay.mods);
+    warn!(
+        "parsed replay mods: {:?}",
+        GameModsLegacy::from_bits(replay.mods)
+    );
+    info!("Finished replay processing");
+
+    let map_osu_file = match find_beatmap_osu_file(mapset_id, map_id, &map_version).await {
+        Ok(osu_file) => osu_file,
+        Err(err) => {
+            let err = err.wrap_err("failed to find beatmap osu file");
+            warn!("{err:?}");
+            let content = "Could not find matching difficulty file in beatmapset";
+            let _ = input_channel.error(&ctx, content).await;
+            return Err(err);
+        }
+    };
+
+    let mut map_path = config.paths.songs();
+    map_path.push(format!("{mapset_id}/{map_osu_file}"));
+
+    let title_for_display = format!("{mapset_title} [{map_version}]");
+
+    let TitleResult {
+        title: video_title,
+        pp_v4,
+        pp_latest,
+        pp_2025,
+        pp_2024,
+        pp_2022,
+        pp_2021,
+        max_possible_combo,
+        stars: _,
+        acc: _,
+    } = match create_title(&replay, map_path.clone(), &title_for_display, is_lazer).await {
+        Ok(result) => result,
+        Err(err) => {
+            let err = err.wrap_err("failed to create title");
+            warn!("{err:?}");
+            let content = "There was an error while trying to create the video title";
+            let _ = input_channel.error(&ctx, content).await;
+            return Err(err);
+        }
+    };
+
+    // Store the formatted title back so the queue embed can display it
+    if let Some(front) = ctx.replay_queue.queue.lock().await.front_mut() {
+        front.title = Some(video_title.clone());
+    }
+
+    let without_prefix = video_title.trim_start_matches('[');
+    let (stars, rest) = without_prefix
+        .split_once("⭐] ")
+        .unwrap_or(("0.00", without_prefix));
+    let (player, rest) = rest.split_once(" | ").unwrap_or(("Unknown", rest));
+
+    let rest = rest.trim_end_matches('%');
+    let (rest, acc) = rest.rsplit_once(' ').unwrap_or((rest, "100.00"));
+
+    let (map_name, mods) = if let Some((m, md)) = rest.rsplit_once(" +") {
+        (m, md)
+    } else {
+        (rest, "NM")
+    };
+
+    let sanitize = |s: &str| -> String {
+        let mut res = String::new();
+        let mut last_was_underscore = false;
+        for c in s.chars() {
+            if c.is_ascii_alphanumeric() {
+                res.push(c);
+                last_was_underscore = false;
+            } else if c == '-' {
+                res.push('-');
+                last_was_underscore = false;
+            } else if !last_was_underscore {
+                res.push('_');
+                last_was_underscore = true;
+            }
+        }
+        res.trim_matches(|c| c == '_' || c == '-').to_string()
+    };
+
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let safe_filename = format!(
+        "{}-{}-{}-{}-{}_{}_{}",
+        sanitize(stars),
+        sanitize(player),
+        sanitize(map_name),
+        sanitize(mods),
+        sanitize(acc),
+        if replay_hash.len() > 8 {
+            &replay_hash[..8]
+        } else {
+            replay_hash
+        },
+        timestamp
+    );
+
+    let mut old_filepath = config.paths.replays().clone();
+    old_filepath.push(format!("{}.mp4", filename));
+
+    let mut new_filepath = config.paths.replays().clone();
+    new_filepath.push(format!("{}.mp4", safe_filename));
+
+    if let Err(err) = tokio::fs::rename(&old_filepath, &new_filepath).await {
+        warn!("Failed to rename MP4 file: {:?}", err);
+        new_filepath = old_filepath;
+    }
+
+    info!("Started upload to server");
+    ctx.replay_queue
+        .set_status(ReplayStatus::Uploading(0))
+        .await;
+    let beatmap_link = format!("https://osu.ppy.sh/beatmapsets/{}", mapset_id);
+
+    let upload_hash = if replay_hash.is_empty() {
+        "nohash"
+    } else {
+        replay_hash
+    };
+    let upload_fut = ctx.client().upload_video(
+        &video_title,
+        user,
+        &new_filepath,
+        &beatmap_link,
+        upload_hash,
+    );
+
+    let link = match upload_fut.await {
+        Ok(res) if res.error != 0 => {
+            let err = format!("failed to upload: `{}`", res.text);
+            warn!("{err}");
+            let _ = input_channel.error(&ctx, err).await;
+            let _ = tokio::fs::remove_file(&new_filepath).await;
+            eyre::bail!("upload server returned error {}", res.error);
+        }
+        Ok(res) => res.text,
+        Err(err) => {
+            let err = err.wrap_err("failed to upload file");
+            warn!("{err:?}");
+            let content = "Failed to upload file";
+            let _ = input_channel.error(&ctx, content).await;
+            let _ = tokio::fs::remove_file(&new_filepath).await;
+            return Err(err);
+        }
+    };
+
+    info!("Finished upload to server");
+    warn!("upload returned link: {}", link);
+
+    if let Ok(warmup_msg) = output_channel
+        .create_message(&ctx, &MessageBuilder::new().content(link.clone()))
+        .await
+    {
+        sleep(Duration::from_millis(1200)).await;
+        let _ = warmup_msg.delete(&ctx).await;
+    }
+    let file_size_bytes = tokio::fs::metadata(&new_filepath)
+        .await
+        .map(|m| m.len())
+        .unwrap_or(0);
+    let wait_secs = calculate_warmup_delay_secs(file_size_bytes);
+    warn!("Wait time for dc cache: {}", wait_secs);
+
+    let mut remaining = wait_secs;
+    while remaining > 0 {
+        ctx.replay_queue
+            .set_status(ReplayStatus::Uploading(remaining))
+            .await;
+        ctx.replay_queue.notify.notify_waiters();
+        sleep(Duration::from_secs(1)).await;
+        remaining = remaining.saturating_sub(1);
+    }
+    ctx.replay_queue.notify.notify_waiters();
+
+    let _legacy_mods = GameModsLegacy::from_bits(replay.mods);
+    let acc = replay.accuracy();
+
+    use rosu_v2::prelude::Grade;
+    use twilight_model::channel::message::embed::EmbedField;
+    let emojis = &BotConfig::get().emojis;
+
+    let score_value = {
+        use crate::util::numbers::with_comma_int;
+        with_comma_int(replay.score as u64).to_string()
+    };
+
+    let grade = replay.grade;
+    tracing::warn!("grade reported: {:?}", grade);
+    let rank_value = match grade {
+        Grade::XH => format!("{}", emojis.grade_xh),
+        Grade::X => format!("{}", emojis.grade_x),
+        Grade::SH => format!("{}", emojis.grade_sh),
+        Grade::S => format!("{}", emojis.grade_s),
+        Grade::A => format!("{}", emojis.grade_a),
+        Grade::B => format!("{}", emojis.grade_b),
+        Grade::C => format!("{}", emojis.grade_c),
+        Grade::D => format!("{}", emojis.grade_d),
+        _ => format!("{}", emojis.grade_fail),
+    };
+
+    let is_perfect_fc = replay.max_combo == max_possible_combo && replay.count_miss == 0;
+    let replay_datetime: Option<time::OffsetDateTime> = replay
+        .timestamp
+        .and_then(|ts: i64| time::OffsetDateTime::from_unix_timestamp(ts).ok());
+
+    let active_pp = pp_latest.unwrap_or(pp_v4);
+    let display_pp = active_pp.pp;
+    let display_max_pp = active_pp.max_pp;
+    let display_nochoke_pp = active_pp.nochoke_pp;
+
+    let played_field_value = match replay_datetime {
+        Some(dt) => format!("Played on <t:{}:F>", dt.unix_timestamp()),
+        None => "Unknown play date".to_string(),
+    };
+
+    let embed_builder = EmbedBuilder::new()
+        .color(0x96DFE3)
+        .title(video_title)
+        .url(format!("https://osu.ppy.sh/beatmaps/{map_id}"))
+        .fields(vec![
+            EmbedField {
+                inline: true,
+                name: "Rank".to_owned(),
+                value: rank_value,
+            },
+            EmbedField {
+                inline: true,
+                name: "Score".to_owned(),
+                value: score_value,
+            },
+            EmbedField {
+                inline: true,
+                name: "Accuracy".to_owned(),
+                value: format!("{acc}%"),
+            },
+            EmbedField {
+                inline: true,
+                name: "Max Combo".to_owned(),
+                value: format!("{}/{}x", replay.max_combo, max_possible_combo),
+            },
+            EmbedField {
+                inline: true,
+                name: "pp".to_owned(),
+                value: if is_perfect_fc {
+                    format!("{:.2}pp / {:.2}pp", display_pp, display_max_pp)
+                } else {
+                    format!(
+                        "{:.2}pp *(No Choke: {:.2}pp)* / {:.2}pp",
+                        display_pp, display_nochoke_pp, display_max_pp
+                    )
+                },
+            },
+            EmbedField {
+                inline: false,
+                name: "Hits".to_owned(),
+                value: format!(
+                    "{} {} | {} {} | {} {} | {} {}",
+                    emojis.hit_300,
+                    replay.count_300,
+                    emojis.hit_100,
+                    replay.count_100,
+                    emojis.hit_50,
+                    replay.count_50,
+                    emojis.hit_miss,
+                    replay.count_miss,
+                ),
+            },
+            EmbedField {
+                inline: false,
+                name: "\u{200B}".to_owned(),
+                value: played_field_value,
+            },
+        ]);
+
+    let embed = embed_builder.build();
+    let mut components: Vec<twilight_model::channel::message::Component> = vec![];
+
+    let mut options = Vec::new();
+    let mut push_opt = |id: &str, label: &str, desc: &str, t: PpTriple, is_default: bool| {
+        options.push(
+            twilight_model::channel::message::component::SelectMenuOption {
+                default: is_default,
+                description: Some(desc.to_string()),
+                emoji: None,
+                label: label.to_string(),
+                value: format!("{id}|{is_perfect_fc}|{:.2}|{:.2}|{:.2}", t.pp, t.max_pp, t.nochoke_pp),
+            },
+        );
+    };
+
+    if let Some(lat) = pp_latest {
+        push_opt(
+            "pp_lat",
+            "Latest Rework (C# backend)",
+            "Real-time official osu! backend calculations",
+            lat,
+            true,
+        );
+    }
+    push_opt(
+        "pp_v4",
+        "rosu-pp v4 (July 2026)",
+        "Performance points & star rating updates",
+        pp_v4,
+        pp_latest.is_none(),
+    );
+
+    if let Some(t) = pp_2025 {
+        push_opt("pp_v25", "March 2025 Rework", "March 2025 Rework", t, false);
+    }
+    if let Some(t) = pp_2024 {
+        push_opt(
+            "pp_v24",
+            "October 2024 Combo Scaling Removal",
+            "Removal of combo scaling from standard PP",
+            t,
+            false,
+        );
+    }
+    if let Some(t) = pp_2022 {
+        push_opt(
+            "pp_v22",
+            "September 2022 Rework",
+            "Major performance & difficulty changes",
+            t,
+            false,
+        );
+    }
+    if let Some(t) = pp_2021 {
+        push_opt(
+            "pp_v21",
+            "November 2021 Xexxar Rework",
+            "Rhythm complexity & aim rework",
+            t,
+            false,
+        );
+    }
+
+    if options.len() > 1 {
+        components.push(
+            twilight_model::channel::message::component::Component::ActionRow(
+                twilight_model::channel::message::component::ActionRow {
+                    components: vec![
+                        twilight_model::channel::message::component::Component::SelectMenu(
+                            twilight_model::channel::message::component::SelectMenu {
+                                custom_id: "pp_version_select".to_string(),
+                                disabled: false,
+                                max_values: Some(1),
+                                min_values: Some(1),
+                                options: Some(options),
+                                placeholder: Some("Select PP Version".to_string()),
+                                channel_types: None,
+                                default_values: None,
+                                kind:
+                                    twilight_model::channel::message::component::SelectMenuType::Text,
+                            },
+                        ),
+                    ],
+                },
+            ),
+        );
+    }
+    let embed_builder = MessageBuilder::new().embed(embed).components(components);
+    if let Err(err) = output_channel.create_message(&ctx, &embed_builder).await {
+        warn!(
+            "{:?}",
+            Report::from(err).wrap_err("failed to send replay details embed")
+        );
+    }
+
+    let link = link.replacen(".mp4", "", 1);
+    let content = format!("<@{user}> [Replay]({link})");
+
+    let builder = MessageBuilder::new().content(content);
+    if let Some((msg_id, channel_id)) = queue_message {
+        let _ = ctx.http.delete_message(channel_id, msg_id).await;
+    }
+
+    if let Err(err) = output_channel.create_message(&ctx, &builder).await {
+        let err = Report::from(err).wrap_err("failed to send video link");
+        warn!("{err:?}");
+    }
+
+    // 1. Delete generated .mp4 from Replays folder
+    if let Err(err) = tokio::fs::remove_file(&new_filepath).await {
+        if err.kind() != std::io::ErrorKind::NotFound {
+            warn!("Failed to delete local MP4 file {:?}: {}", new_filepath, err);
+        }
+    } else {
+        warn!("Cleaned up local MP4 file at: {:?}.", new_filepath);
+    }
+
+    // 2. Delete .osr from Downloads folder
+    if let Err(err) = tokio::fs::remove_file(&path).await {
+        if err.kind() != std::io::ErrorKind::NotFound {
+            warn!("Failed to delete local OSR file {:?}: {}", path, err);
+        }
+    } else {
+        warn!("Cleaned up local OSR file at: {:?}.", path);
+    }
+
+    Ok(())
 }
 
 async fn read_danser_progress<R: tokio::io::AsyncRead + Unpin>(
@@ -699,7 +681,6 @@ async fn read_danser_progress<R: tokio::io::AsyncRead + Unpin>(
         let incomplete = lines.pop().unwrap_or("").to_string();
 
         for line in lines {
-            // Find "Progress: X%" exactly as it appeared in your log
             if let Some(idx) = line.find("Progress: ") {
                 let remainder = &line[idx + 10..];
                 if let Some(pct_str) = remainder.split('%').next() {
@@ -719,9 +700,9 @@ async fn read_danser_progress<R: tokio::io::AsyncRead + Unpin>(
 #[derive(Debug)]
 struct MapsetDownloadError {
     kitsu: Report,
-    chimu: Report,
     nerinyan: Report,
     catboy: Report,
+    chimu: Report,
 }
 
 impl Display for MapsetDownloadError {
@@ -731,8 +712,10 @@ impl Display for MapsetDownloadError {
             f,
             "failed to download mapset:\n\
             kitsu: {:?}\n\
+            nerinyan: {:?}\n\
+            catboy: {:?}\n\
             chimu: {:?}",
-            self.kitsu, self.chimu
+            self.kitsu, self.nerinyan, self.catboy, self.chimu
         )
     }
 }
@@ -746,155 +729,196 @@ impl StdError for MapsetDownloadError {
 
 async fn download_mapset(ctx: &Context, mapset_id: u32) -> Result<()> {
     let bytes = request_mapset(ctx, mapset_id).await?;
-    let cursor = Cursor::new(bytes);
-
-    let mut archive = ZipArchive::new(cursor).context("failed to create zip archive")?;
-
     let mut out_path = BotConfig::get().paths.songs();
     out_path.push(mapset_id.to_string());
 
-    archive
-        .extract(&out_path)
-        .with_context(|| format!("failed to extract zip archive at `{out_path:?}`"))
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        let cursor = Cursor::new(bytes);
+        let mut archive = ZipArchive::new(cursor).context("failed to create zip archive")?;
+        archive
+            .extract(&out_path)
+            .with_context(|| format!("failed to extract zip archive at `{out_path:?}`"))?;
+        Ok(())
+    })
+    .await
+    .context("blocking zip extraction task panicked")?
 }
 
 async fn request_mapset(ctx: &Context, mapset_id: u32) -> Result<Bytes> {
-    let _official = match ctx
-        .client()
-        .download_official_mapset(mapset_id, &BotConfig::get().tokens.osu_api_key)
-        .await
-    {
-        Ok(bytes) => {
-            warn!("official succes");
-            return Ok(bytes);
-        }
-        Err(err) => {
-            warn!("official also failed: {err}");
-            err
-        }
-    };
     let kitsu = match ctx.client().download_kitsu_mapset(mapset_id).await {
         Ok(bytes) => {
-            warn!("osu.direct succes");
+            warn!("osu.direct success");
             return Ok(bytes);
         }
         Err(err) => {
-            warn!("osu.direct also failed: {err}");
+            warn!("osu.direct failed: {err}");
             err
         }
     };
     let nerinyan = match ctx.client().download_nerinyan_mapset(mapset_id).await {
         Ok(bytes) => {
-            warn!("nerinyan succes");
+            warn!("nerinyan success");
             return Ok(bytes);
         }
         Err(err) => {
-            warn!("nerinyan also failed: {err}");
+            warn!("nerinyan failed: {err}");
             err
         }
     };
     let catboy = match ctx.client().download_catboy_mapset(mapset_id).await {
         Ok(bytes) => {
-            warn!("nekoha succes");
+            warn!("catboy/nekoha success");
             return Ok(bytes);
         }
         Err(err) => {
-            warn!("nekoha also failed: {err}");
+            warn!("catboy/nekoha failed: {err}");
             err
         }
     };
-
     let chimu = match ctx.client().download_chimu_mapset(mapset_id).await {
         Ok(bytes) => {
-            warn!("direct2 succes");
+            warn!("chimu success");
             return Ok(bytes);
         }
         Err(err) => {
-            warn!("osu.direct2 also failed: {err}");
+            warn!("chimu failed: {err}");
             err
         }
     };
 
     Err(Report::from(MapsetDownloadError {
         kitsu,
-        chimu,
         nerinyan,
         catboy,
+        chimu,
     }))
 }
 
 struct TitleResult {
     title: String,
-    pp: f64,
-    max_pp: f64,
-    nochoke_pp: f64,
-    pp_latest: Option<f64>, max_pp_latest: Option<f64>, nochoke_pp_latest: Option<f64>,
-    pp_2025: Option<f64>, max_pp_2025: Option<f64>, nochoke_pp_2025: Option<f64>,
-    pp_2024: Option<f64>, max_pp_2024: Option<f64>, nochoke_pp_2024: Option<f64>,
-    pp_2022: Option<f64>, max_pp_2022: Option<f64>, nochoke_pp_2022: Option<f64>,
-    pp_2021: Option<f64>, max_pp_2021: Option<f64>, nochoke_pp_2021: Option<f64>,
+    pp_v4: PpTriple,
+    pp_latest: Option<PpTriple>,
+    pp_2025: Option<PpTriple>,
+    pp_2024: Option<PpTriple>,
+    pp_2022: Option<PpTriple>,
+    pp_2021: Option<PpTriple>,
     max_possible_combo: u16,
     stars: f64,
     acc: f32,
 }
 
+#[derive(Copy, Clone)]
+enum SimulateMode {
+    Actual,
+    NoChoke,
+    Max,
+}
 
-async fn calc_latest_pp(map_path: &std::path::Path, replay: &crate::core::replay_queue::data::ReplaySlim, max_combo: u32, is_nochoke: bool, is_max: bool, is_lazer: bool, osr_path: Option<&std::path::Path>) -> Option<f64> {
-    let mut cmd = tokio::process::Command::new("/home/serverx/.dotnet/dotnet");
+async fn calc_single_latest_pp(
+    dotnet_path: &str,
+    perf_calc_path: &str,
+    map_path: &std::path::Path,
+    replay: &crate::core::replay_queue::data::ReplaySlim,
+    max_combo: u32,
+    mode: SimulateMode,
+    is_lazer: bool,
+) -> Option<f64> {
+    let mut cmd = tokio::process::Command::new(dotnet_path);
     cmd.env("DOTNET_ROLL_FORWARD", "Major");
-    cmd.arg("/home/serverx/Documents/osudcbots/palentirbot/data/osu-tools/PerformanceCalculator/bin/Release/net8.0/PerformanceCalculator.dll");
-    
-    if !is_max && !is_nochoke && osr_path.is_some() {
-        cmd.arg("performance").arg("replay").arg("-j");
-        cmd.arg(osr_path.unwrap());
-        cmd.arg("-b").arg(map_path);
-    } else {
-        cmd.arg("simulate").arg("osu").arg("-j");
-        
-        if is_max {
-            // Defaults to SS
-        } else if is_nochoke {
+    cmd.arg(perf_calc_path);
+    cmd.arg("simulate").arg("osu").arg("-j");
+
+    match mode {
+        SimulateMode::Max => {
+            // Defaults to SS max combo
+        }
+        SimulateMode::NoChoke => {
             cmd.arg("--combo").arg(max_combo.to_string());
             cmd.arg("--goods").arg(replay.count_100.to_string());
             cmd.arg("--mehs").arg(replay.count_50.to_string());
             cmd.arg("--misses").arg("0");
-        } else {
+            if !is_lazer {
+                cmd.arg("-l").arg(replay.score.to_string());
+            }
+        }
+        SimulateMode::Actual => {
             cmd.arg("--combo").arg(replay.max_combo.to_string());
             cmd.arg("--goods").arg(replay.count_100.to_string());
             cmd.arg("--mehs").arg(replay.count_50.to_string());
             cmd.arg("--misses").arg(replay.count_miss.to_string());
+            if !is_lazer {
+                cmd.arg("-l").arg(replay.score.to_string());
+            }
         }
-
-        let m = replay.mods;
-        if (m & 1) != 0 { cmd.arg("-m").arg("nf"); }
-        if (m & 2) != 0 { cmd.arg("-m").arg("ez"); }
-        if (m & 4) != 0 { cmd.arg("-m").arg("td"); }
-        if (m & 8) != 0 { cmd.arg("-m").arg("hd"); }
-        if (m & 16) != 0 { cmd.arg("-m").arg("hr"); }
-        if (m & 32) != 0 { cmd.arg("-m").arg("sd"); }
-        if (m & 64) != 0 { cmd.arg("-m").arg("dt"); }
-        if (m & 128) != 0 { cmd.arg("-m").arg("rx"); }
-        if (m & 256) != 0 { cmd.arg("-m").arg("ht"); }
-        if (m & 512) != 0 { cmd.arg("-m").arg("nc"); }
-        if (m & 1024) != 0 { cmd.arg("-m").arg("fl"); }
-        if !is_lazer { cmd.arg("-m").arg("cl"); }
-
-        cmd.arg(map_path);
     }
+
+    let m = replay.mods;
+    if (m & 1) != 0 {
+        cmd.arg("-m").arg("nf");
+    }
+    if (m & 2) != 0 {
+        cmd.arg("-m").arg("ez");
+    }
+    if (m & 4) != 0 {
+        cmd.arg("-m").arg("td");
+    }
+    if (m & 8) != 0 {
+        cmd.arg("-m").arg("hd");
+    }
+    if (m & 16) != 0 {
+        cmd.arg("-m").arg("hr");
+    }
+    if (m & 16384) != 0 {
+        cmd.arg("-m").arg("pf");
+    } else if (m & 32) != 0 {
+        cmd.arg("-m").arg("sd");
+    }
+    if (m & 512) != 0 {
+        cmd.arg("-m").arg("nc");
+    } else if (m & 64) != 0 {
+        cmd.arg("-m").arg("dt");
+    }
+    if (m & 128) != 0 {
+        cmd.arg("-m").arg("rx");
+    }
+    if (m & 256) != 0 {
+        cmd.arg("-m").arg("ht");
+    }
+    if (m & 1024) != 0 {
+        cmd.arg("-m").arg("fl");
+    }
+    if (m & 4096) != 0 {
+        cmd.arg("-m").arg("so");
+    }
+    if !is_lazer {
+        cmd.arg("-m").arg("cl");
+    }
+
+    cmd.arg(map_path);
 
     if let Ok(output) = cmd.output().await {
         if output.status.success() {
             if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
-                if let Some(pp) = json.get("performance_attributes").and_then(|attrs| attrs.get("pp")).and_then(|pp| pp.as_f64()) {
+                if let Some(pp) = json
+                    .get("performance_attributes")
+                    .and_then(|attrs| attrs.get("pp"))
+                    .and_then(|pp| pp.as_f64())
+                {
                     return Some(pp);
                 } else {
                     tracing::warn!("Failed to parse PP from JSON: {:?}", json);
                 }
             } else {
-                tracing::warn!("Failed to parse JSON: {}", String::from_utf8_lossy(&output.stdout));
+                tracing::warn!(
+                    "Failed to parse JSON: {}",
+                    String::from_utf8_lossy(&output.stdout)
+                );
             }
         } else {
-            tracing::warn!("Command failed: {}", String::from_utf8_lossy(&output.stderr));
+            tracing::warn!(
+                "Command failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
     } else {
         tracing::warn!("Failed to spawn command");
@@ -902,91 +926,282 @@ async fn calc_latest_pp(map_path: &std::path::Path, replay: &crate::core::replay
     None
 }
 
+async fn calc_latest_pp(
+    map_path: &std::path::Path,
+    replay: &crate::core::replay_queue::data::ReplaySlim,
+    max_combo: u32,
+    is_lazer: bool,
+) -> Option<PpTriple> {
+    let dotnet_path = std::env::var("DOTNET_PATH")
+        .unwrap_or_else(|_| "/home/serverx/.dotnet/dotnet".to_string());
+    let perf_calc_path = std::env::var("PERF_CALC_PATH").unwrap_or_else(|_| {
+        let net10 = "/home/serverx/Documents/osudcbots/palentirbot/data/osu-tools/PerformanceCalculator/bin/Release/net10.0/PerformanceCalculator.dll";
+        if std::path::Path::new(net10).exists() {
+            net10.to_string()
+        } else {
+            "/home/serverx/Documents/osudcbots/palentirbot/data/osu-tools/PerformanceCalculator/bin/Release/net8.0/PerformanceCalculator.dll".to_string()
+        }
+    });
+
+    if !std::path::Path::new(&dotnet_path).exists()
+        || !std::path::Path::new(&perf_calc_path).exists()
+    {
+        return None;
+    }
+
+    let (pp, max_pp, nochoke_pp) = tokio::join!(
+        calc_single_latest_pp(
+            &dotnet_path,
+            &perf_calc_path,
+            map_path,
+            replay,
+            max_combo,
+            SimulateMode::Actual,
+            is_lazer
+        ),
+        calc_single_latest_pp(
+            &dotnet_path,
+            &perf_calc_path,
+            map_path,
+            replay,
+            max_combo,
+            SimulateMode::Max,
+            is_lazer
+        ),
+        calc_single_latest_pp(
+            &dotnet_path,
+            &perf_calc_path,
+            map_path,
+            replay,
+            max_combo,
+            SimulateMode::NoChoke,
+            is_lazer
+        )
+    );
+
+    match (pp, max_pp, nochoke_pp) {
+        (Some(pp), Some(max_pp), Some(nochoke_pp)) => Some(PpTriple {
+            pp,
+            nochoke_pp,
+            max_pp,
+        }),
+        _ => None,
+    }
+}
+
 async fn create_title(
     replay: &ReplaySlim,
     map_path: PathBuf,
     map_title: &str,
     is_lazer: bool,
-    osr_path: &std::path::Path,
 ) -> Result<TitleResult> {
     let map = Beatmap::from_path(&map_path)
         .with_context(|| format!("failed to parse map at {map_path:?}"))?;
 
-    let difficulty = rosu_pp::Difficulty::new()
+    let diff_attrs = rosu_pp::Difficulty::new()
         .mods(replay.mods as u32)
         .lazer(is_lazer)
         .calculate(&map);
 
-    let stars = difficulty.stars();
-    let max_possible_combo = difficulty.max_combo();
+    let stars = diff_attrs.stars();
+    let max_possible_combo = diff_attrs.max_combo();
 
-    let pp = rosu_pp::Performance::new(&map)
-        //.legacy_score
+    let mut perf = rosu_pp::Performance::new(diff_attrs.clone())
         .mods(replay.mods as u32)
         .n300(replay.count_300 as u32)
         .n100(replay.count_100 as u32)
         .n50(replay.count_50 as u32)
         .misses(replay.count_miss as u32)
         .combo(replay.max_combo as u32)
-        .lazer(is_lazer)
-        //.legacy_total_score(replay.score as u32)
-        .calculate()
-        .pp();
+        .lazer(is_lazer);
 
-    let max_pp = rosu_pp::Performance::new(&map)
+    if !is_lazer {
+        perf = perf.legacy_total_score(replay.score);
+    }
+    let pp = perf.calculate().pp();
+
+    let max_pp = rosu_pp::Performance::new(diff_attrs.clone())
         .mods(replay.mods as u32)
         .lazer(is_lazer)
         .calculate()
         .pp();
-    let nochoke_pp = rosu_pp::Performance::new(&map)
+
+    let mut nochoke_perf = rosu_pp::Performance::new(diff_attrs)
         .mods(replay.mods as u32)
         .n300((replay.count_300 + replay.count_miss) as u32)
         .n100(replay.count_100 as u32)
         .n50(replay.count_50 as u32)
-        .misses(0) // Force 0 misses
+        .misses(0)
         .combo(max_possible_combo)
-        .lazer(is_lazer)
-        .calculate()
-        .pp();
-    let stars = (stars * 100.0).round() / 100.0;
-    
-    let pp_latest; let max_pp_latest; let nochoke_pp_latest;
-    let (p_lat, mp_lat, np_lat) = tokio::join!(
-        calc_latest_pp(&map_path, replay, max_possible_combo as u32, false, false, is_lazer, Some(osr_path)),
-        calc_latest_pp(&map_path, replay, max_possible_combo as u32, false, true, is_lazer, None),
-        calc_latest_pp(&map_path, replay, max_possible_combo as u32, true, false, is_lazer, None)
-    );
-    pp_latest = p_lat; max_pp_latest = mp_lat; nochoke_pp_latest = np_lat;
-    let mut pp_2025 = None; let mut max_pp_2025 = None; let mut nochoke_pp_2025 = None;
-    let mut pp_2024 = None; let mut max_pp_2024 = None; let mut nochoke_pp_2024 = None;
-    let mut pp_2022 = None; let mut max_pp_2022 = None; let mut nochoke_pp_2022 = None;
-    let mut pp_2021 = None; let mut max_pp_2021 = None; let mut nochoke_pp_2021 = None;
+        .lazer(is_lazer);
 
     if !is_lazer {
-        if let Ok(map_2025) = rosu_pp_2025::Beatmap::from_path(&map_path) {
-            let diff_2025 = rosu_pp_2025::Difficulty::new().mods(replay.mods as u32).calculate(&map_2025);
-            pp_2025 = Some(rosu_pp_2025::Performance::new(diff_2025.clone()).mods(replay.mods as u32).n300(replay.count_300 as u32).n100(replay.count_100 as u32).n50(replay.count_50 as u32).misses(replay.count_miss as u32).combo(replay.max_combo as u32).calculate().pp());
-            max_pp_2025 = Some(rosu_pp_2025::Performance::new(diff_2025.clone()).mods(replay.mods as u32).calculate().pp());
-            nochoke_pp_2025 = Some(rosu_pp_2025::Performance::new(diff_2025).mods(replay.mods as u32).n300((replay.count_300 + replay.count_miss) as u32).n100(replay.count_100 as u32).n50(replay.count_50 as u32).misses(0).combo(max_possible_combo).calculate().pp());
-        }
-        if let Ok(map_2024) = rosu_pp_2024::Beatmap::from_path(&map_path) {
-            let diff_2024 = rosu_pp_2024::Difficulty::new().mods(replay.mods as u32).calculate(&map_2024);
-            pp_2024 = Some(rosu_pp_2024::Performance::new(diff_2024.clone()).mods(replay.mods as u32).n300(replay.count_300 as u32).n100(replay.count_100 as u32).n50(replay.count_50 as u32).misses(replay.count_miss as u32).combo(replay.max_combo as u32).calculate().pp());
-            max_pp_2024 = Some(rosu_pp_2024::Performance::new(diff_2024.clone()).mods(replay.mods as u32).calculate().pp());
-            nochoke_pp_2024 = Some(rosu_pp_2024::Performance::new(diff_2024).mods(replay.mods as u32).n300((replay.count_300 + replay.count_miss) as u32).n100(replay.count_100 as u32).n50(replay.count_50 as u32).misses(0).combo(max_possible_combo).calculate().pp());
-        }
-        if let Ok(map_2022) = rosu_pp_2022::Beatmap::from_path(&map_path) {
-            pp_2022 = Some(rosu_pp_2022::AnyPP::new(&map_2022).mods(replay.mods as u32).n300(replay.count_300 as usize).n100(replay.count_100 as usize).n50(replay.count_50 as usize).n_misses(replay.count_miss as usize).combo(replay.max_combo as usize).calculate().pp());
-            max_pp_2022 = Some(rosu_pp_2022::AnyPP::new(&map_2022).mods(replay.mods as u32).calculate().pp());
-            nochoke_pp_2022 = Some(rosu_pp_2022::AnyPP::new(&map_2022).mods(replay.mods as u32).n300((replay.count_300 + replay.count_miss) as usize).n100(replay.count_100 as usize).n50(replay.count_50 as usize).n_misses(0).combo(max_possible_combo as usize).calculate().pp());
-        }
-        if let Ok(map_2021) = rosu_pp_2021::Beatmap::from_path(&map_path) {
-            let diff_2021 = rosu_pp_2021::Difficulty::new().mods(replay.mods as u32).calculate(&map_2021);
-            pp_2021 = Some(rosu_pp_2021::Performance::new(diff_2021.clone()).mods(replay.mods as u32).n300(replay.count_300 as u32).n100(replay.count_100 as u32).n50(replay.count_50 as u32).misses(replay.count_miss as u32).combo(replay.max_combo as u32).calculate().pp());
-            max_pp_2021 = Some(rosu_pp_2021::Performance::new(diff_2021.clone()).mods(replay.mods as u32).calculate().pp());
-            nochoke_pp_2021 = Some(rosu_pp_2021::Performance::new(diff_2021).mods(replay.mods as u32).n300((replay.count_300 + replay.count_miss) as u32).n100(replay.count_100 as u32).n50(replay.count_50 as u32).misses(0).combo(max_possible_combo).calculate().pp());
-        }
+        nochoke_perf = nochoke_perf.legacy_total_score(replay.score);
     }
+    let nochoke_pp = nochoke_perf.calculate().pp();
+
+    let pp_v4 = PpTriple {
+        pp,
+        nochoke_pp,
+        max_pp,
+    };
+
+    let stars = (stars * 100.0).round() / 100.0;
+
+    let pp_latest = calc_latest_pp(&map_path, replay, max_possible_combo as u32, is_lazer).await;
+
+    let pp_2025 = if !is_lazer {
+        if let Ok(map_2025) = rosu_pp_2025::Beatmap::from_path(&map_path) {
+            let diff_2025 = rosu_pp_2025::Difficulty::new()
+                .mods(replay.mods as u32)
+                .calculate(&map_2025);
+            let pp = rosu_pp_2025::Performance::new(diff_2025.clone())
+                .mods(replay.mods as u32)
+                .n300(replay.count_300 as u32)
+                .n100(replay.count_100 as u32)
+                .n50(replay.count_50 as u32)
+                .misses(replay.count_miss as u32)
+                .combo(replay.max_combo as u32)
+                .calculate()
+                .pp();
+            let max_pp = rosu_pp_2025::Performance::new(diff_2025.clone())
+                .mods(replay.mods as u32)
+                .calculate()
+                .pp();
+            let nochoke_pp = rosu_pp_2025::Performance::new(diff_2025)
+                .mods(replay.mods as u32)
+                .n300((replay.count_300 + replay.count_miss) as u32)
+                .n100(replay.count_100 as u32)
+                .n50(replay.count_50 as u32)
+                .misses(0)
+                .combo(max_possible_combo)
+                .calculate()
+                .pp();
+            Some(PpTriple {
+                pp,
+                nochoke_pp,
+                max_pp,
+            })
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let pp_2024 = if !is_lazer {
+        if let Ok(map_2024) = rosu_pp_2024::Beatmap::from_path(&map_path) {
+            let diff_2024 = rosu_pp_2024::Difficulty::new()
+                .mods(replay.mods as u32)
+                .calculate(&map_2024);
+            let pp = rosu_pp_2024::Performance::new(diff_2024.clone())
+                .mods(replay.mods as u32)
+                .n300(replay.count_300 as u32)
+                .n100(replay.count_100 as u32)
+                .n50(replay.count_50 as u32)
+                .misses(replay.count_miss as u32)
+                .combo(replay.max_combo as u32)
+                .calculate()
+                .pp();
+            let max_pp = rosu_pp_2024::Performance::new(diff_2024.clone())
+                .mods(replay.mods as u32)
+                .calculate()
+                .pp();
+            let nochoke_pp = rosu_pp_2024::Performance::new(diff_2024)
+                .mods(replay.mods as u32)
+                .n300((replay.count_300 + replay.count_miss) as u32)
+                .n100(replay.count_100 as u32)
+                .n50(replay.count_50 as u32)
+                .misses(0)
+                .combo(max_possible_combo)
+                .calculate()
+                .pp();
+            Some(PpTriple {
+                pp,
+                nochoke_pp,
+                max_pp,
+            })
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let pp_2022 = if !is_lazer {
+        if let Ok(map_2022) = rosu_pp_2022::Beatmap::from_path(&map_path) {
+            let pp = rosu_pp_2022::AnyPP::new(&map_2022)
+                .mods(replay.mods as u32)
+                .n300(replay.count_300 as usize)
+                .n100(replay.count_100 as usize)
+                .n50(replay.count_50 as usize)
+                .n_misses(replay.count_miss as usize)
+                .combo(replay.max_combo as usize)
+                .calculate()
+                .pp();
+            let max_pp = rosu_pp_2022::AnyPP::new(&map_2022)
+                .mods(replay.mods as u32)
+                .calculate()
+                .pp();
+            let nochoke_pp = rosu_pp_2022::AnyPP::new(&map_2022)
+                .mods(replay.mods as u32)
+                .n300((replay.count_300 + replay.count_miss) as usize)
+                .n100(replay.count_100 as usize)
+                .n50(replay.count_50 as usize)
+                .n_misses(0)
+                .combo(max_possible_combo as usize)
+                .calculate()
+                .pp();
+            Some(PpTriple {
+                pp,
+                nochoke_pp,
+                max_pp,
+            })
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let pp_2021 = if !is_lazer {
+        if let Ok(map_2021) = rosu_pp_2021::Beatmap::from_path(&map_path) {
+            let diff_2021 = rosu_pp_2021::Difficulty::new()
+                .mods(replay.mods as u32)
+                .calculate(&map_2021);
+            let pp = rosu_pp_2021::Performance::new(diff_2021.clone())
+                .mods(replay.mods as u32)
+                .n300(replay.count_300 as u32)
+                .n100(replay.count_100 as u32)
+                .n50(replay.count_50 as u32)
+                .misses(replay.count_miss as u32)
+                .combo(replay.max_combo as u32)
+                .calculate()
+                .pp();
+            let max_pp = rosu_pp_2021::Performance::new(diff_2021.clone())
+                .mods(replay.mods as u32)
+                .calculate()
+                .pp();
+            let nochoke_pp = rosu_pp_2021::Performance::new(diff_2021)
+                .mods(replay.mods as u32)
+                .n300((replay.count_300 + replay.count_miss) as u32)
+                .n100(replay.count_100 as u32)
+                .n50(replay.count_50 as u32)
+                .misses(0)
+                .combo(max_possible_combo)
+                .calculate()
+                .pp();
+            Some(PpTriple {
+                pp,
+                nochoke_pp,
+                max_pp,
+            })
+        } else {
+            None
+        }
+    } else {
+        None
+    };
 
     let player_name = replay.player_name.as_ref().map(|user| user.clone());
     let player = player_name.as_deref().unwrap_or("Unknown player");
@@ -1000,74 +1215,97 @@ async fn create_title(
 
     Ok(TitleResult {
         title: format!("[{stars}⭐] {player} | {map_title}{mods} ({acc}%)"),
-        pp,
-        max_pp,
-        nochoke_pp,
-        max_possible_combo: max_possible_combo.try_into().unwrap(),
+        pp_v4,
+        pp_latest,
+        pp_2025,
+        pp_2024,
+        pp_2022,
+        pp_2021,
+        max_possible_combo: max_possible_combo.try_into().unwrap_or(0),
         stars,
         acc,
-        pp_latest, max_pp_latest, nochoke_pp_latest,
-        pp_2025, max_pp_2025, nochoke_pp_2025,
-        pp_2024, max_pp_2024, nochoke_pp_2024,
-        pp_2022, max_pp_2022, nochoke_pp_2022,
-        pp_2021, max_pp_2021, nochoke_pp_2021,
     })
 }
 
-async fn get_beatmap_osu_file(mapset_id: u32, map_without_artist: &str) -> Result<String> {
+async fn find_beatmap_osu_file(mapset_id: u32, map_id: u32, version: &str) -> Result<String> {
     let mut items_dir = BotConfig::get().paths.songs();
     items_dir.push(mapset_id.to_string());
 
-    let items = fs::read_dir(&items_dir)
-        .with_context(|| format!("failed to read items dir at {items_dir:?}"))?;
+    let mut entries = tokio::fs::read_dir(&items_dir)
+        .await
+        .with_context(|| format!("failed to read songs dir at {items_dir:?}"))?;
 
-    let mut max_similarity = 0.0;
-    let mut final_file_name = String::new();
+    let mut candidate_by_version_content = None;
+    let mut candidate_by_filename = None;
+    let mut any_osu = None;
 
-    for entry in items {
-        match entry {
-            Ok(entry) => {
-                let file_name = entry.file_name();
+    let target_diff_suffix = format!("[{}].osu", version.to_lowercase());
 
-                if let Some(file_name) = file_name.to_str().filter(|name| name.ends_with(".osu")) {
-                    debug!("COMPARING: {map_without_artist} WITH: {file_name}");
+    while let Some(entry) = entries.next_entry().await? {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("osu") {
+            continue;
+        }
 
-                    let similarity = levenshtein_similarity(map_without_artist, file_name);
+        let file_name = match entry.file_name().into_string() {
+            Ok(name) => name,
+            Err(_) => continue,
+        };
 
-                    if similarity > max_similarity {
-                        max_similarity = similarity;
-                        final_file_name = file_name.to_owned();
+        if any_osu.is_none() {
+            any_osu = Some(file_name.clone());
+        }
+
+        if file_name.to_lowercase().ends_with(&target_diff_suffix) {
+            candidate_by_filename = Some(file_name.clone());
+        }
+
+        if let Ok(content) = tokio::fs::read_to_string(&path).await {
+            let mut file_beatmap_id = None;
+            let mut file_version = None;
+
+            for line in content.lines() {
+                if line.starts_with('[')
+                    && !line.starts_with("[General]")
+                    && !line.starts_with("[Metadata]")
+                    && !line.starts_with("[Editor]")
+                {
+                    break;
+                }
+                if let Some(rest) = line.strip_prefix("BeatmapID:") {
+                    if let Ok(id) = rest.trim().parse::<u32>() {
+                        file_beatmap_id = Some(id);
                     }
+                } else if let Some(rest) = line.strip_prefix("Version:") {
+                    file_version = Some(rest.trim().to_string());
                 }
             }
-            Err(err) => {
-                let context = format!("there was an error while reading files in {items_dir:?}");
 
-                return Err(Report::from(err).wrap_err(context));
+            if let Some(id) = file_beatmap_id {
+                if id == map_id {
+                    return Ok(file_name);
+                }
+            }
+
+            if let Some(ref v) = file_version {
+                if v.eq_ignore_ascii_case(version) {
+                    candidate_by_version_content = Some(file_name.clone());
+                }
             }
         }
     }
 
-    debug!("FINAL TITLE: {final_file_name} SIMILARITY: {max_similarity}");
+    if let Some(f) = candidate_by_version_content {
+        return Ok(f);
+    }
+    if let Some(f) = candidate_by_filename {
+        return Ok(f);
+    }
+    if let Some(f) = any_osu {
+        return Ok(f);
+    }
 
-    Ok(final_file_name)
-}
-
-fn get_title() -> Result<String> {
-    let mut logs_path = BotConfig::get().paths.danser().to_owned();
-    logs_path.push("danser.log");
-
-    let logs = fs::read_to_string(logs_path).context("failed to read danser logs")?;
-
-    let line = logs
-        .lines()
-        .find(|line| line.contains("Playing:"))
-        .context("expected `Playing:` in danser logs")?;
-
-    line.splitn(4, ' ')
-        .last()
-        .map(str::to_owned)
-        .with_context(|| format!("expected at least 5 words in danser log line `{line}`"))
+    eyre::bail!("no matching .osu file found in {items_dir:?} for map_id {map_id} ({version})")
 }
 
 fn calculate_warmup_delay_secs(file_size_bytes: u64) -> u64 {

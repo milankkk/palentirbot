@@ -326,13 +326,16 @@ impl CustomClient {
     }
 
     pub async fn get_skin_from_url(&self, url: &str) -> Result<Bytes> {
-        self.make_get_request(url, Site::DownloadCatboy).await
+        let bytes = self.make_get_request(url, Site::DownloadCatboy).await?;
+        const MAX_SKIN_BYTES: usize = 150 * 1024 * 1024; // 150 MB limit
+        ensure!(bytes.len() <= MAX_SKIN_BYTES, "skin file exceeds 150MB limit");
+        Ok(bytes)
     }
 
     pub async fn download_chimu_mapset(&self, mapset_id: u32) -> Result<Bytes> {
-        let url = format!("https://osu.direct/api/d/{mapset_id}");
+        let url = format!("https://api.chimu.moe/v1/download/{mapset_id}");
         let bytes = self.make_get_request(url, Site::DownloadChimu).await?;
-        ensure!(bytes.starts_with(b"PK"), "catboy returned invalid data");
+        ensure!(bytes.starts_with(b"PK"), "chimu returned invalid data");
         Ok(bytes)
     }
 

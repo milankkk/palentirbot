@@ -57,6 +57,7 @@ impl Commands {
                     AiContext => AICONTEXT_SLASH,
                 },
                 msg {
+                    RENDER_FROM_MSG,
                 }
             }
         })

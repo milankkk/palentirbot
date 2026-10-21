@@ -5,7 +5,7 @@ use tokio::sync::{
     Mutex, Notify,
 };
 
-pub use self::data::{ReplayData, ReplaySlim, ReplayStatus, TimePoints};
+pub use self::data::{is_lazer_replay, PpTriple, ReplayData, ReplaySlim, ReplayStatus, TimePoints};
 
 mod data;
 pub mod process;

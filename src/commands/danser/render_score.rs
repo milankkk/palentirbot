@@ -10,7 +10,7 @@ use crate::{
     },
 };
 use command_macros::msg_command;
-use eyre::{Context as _, ContextCompat, Report};
+use eyre::{Context as _, ContextCompat, Report, Result};
 use osu_db::Replay;
 use rosu_v2::prelude::Score;
 use time::{Date, OffsetDateTime, PrimitiveDateTime, Time};
@@ -23,6 +23,94 @@ use twilight_model::{
     },
     util::Timestamp,
 };
+
+/// Helper to sanitize filenames so slashes and special characters don't break file paths
+pub fn sanitize_filename(name: &str) -> String {
+    name.chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            other => other,
+        })
+        .collect()
+}
+
+async fn find_score_to_render(
+    ctx: &Context,
+    user_id: u32,
+    beatmap_id: u32,
+    timestamp: Option<Timestamp>,
+) -> Result<Option<Score>> {
+    if let Some(timestamp) = timestamp {
+        let ts_unix = timestamp.as_secs();
+
+        // check recents
+        let recent_scores = ctx
+            .osu()
+            .user_scores(user_id)
+            .recent()
+            .include_fails(false)
+            .limit(100)
+            .await
+            .context("failed to get recent scores")?;
+
+        if let Some(score) = recent_scores
+            .into_iter()
+            .find(|score| (score.ended_at.unix_timestamp() - ts_unix).abs() <= 3)
+        {
+            return Ok(Some(score));
+        }
+
+        // check tops
+        let top_scores = ctx
+            .osu()
+            .user_scores(user_id)
+            .best()
+            .limit(100)
+            .await
+            .context("failed to get top scores")?;
+
+        if let Some(score) = top_scores
+            .into_iter()
+            .find(|score| (score.ended_at.unix_timestamp() - ts_unix).abs() <= 3)
+        {
+            return Ok(Some(score));
+        }
+
+        tracing::warn!(
+            "Fetching map scores for user {} on beatmap {}",
+            user_id,
+            beatmap_id
+        );
+        let map_scores = ctx
+            .osu()
+            .beatmap_user_scores(beatmap_id, user_id)
+            .await
+            .context("failed to get map scores")?;
+        tracing::warn!("Got {} map scores", map_scores.len());
+        let score_opt = map_scores
+            .iter()
+            .find(|score| (score.ended_at.unix_timestamp() - ts_unix).abs() <= 3)
+            .cloned()
+            .or_else(|| map_scores.into_iter().next());
+
+        Ok(score_opt)
+    } else {
+        // No timestamp (<current embed) — pick best score on this map
+        tracing::warn!(
+            user_id,
+            beatmap_id,
+            "no timestamp, fetching beatmap user scores"
+        );
+
+        let map_scores = ctx
+            .osu()
+            .beatmap_user_scores(beatmap_id, user_id)
+            .await
+            .context("failed to get user scores on beatmap")?;
+
+        Ok(map_scores.into_iter().next())
+    }
+}
 
 #[msg_command(name = "Render score")]
 async fn render_from_msg(ctx: Arc<Context>, mut command: InteractionCommand) -> Result<()> {
@@ -41,60 +129,12 @@ async fn render_from_msg(ctx: Arc<Context>, mut command: InteractionCommand) -> 
         }
     };
 
-    let ts_unix = OffsetDateTime::from_unix_timestamp(timestamp.unwrap().as_secs())
-        .unwrap()
-        .unix_timestamp();
-
-    // check recents
-    let recent_scores = ctx
-        .osu()
-        .user_scores(user_id)
-        .recent()
-        .include_fails(false)
-        .limit(100)
-        .await
-        .context("failed to get recent scores")?;
-
-    let score_to_render = recent_scores
-        .into_iter()
-        .find(|score| (score.ended_at.unix_timestamp() - ts_unix).abs() <= 3 );
-
-    // check tops
-    let score_to_render = match score_to_render {
+    let score_to_render = match find_score_to_render(&ctx, user_id, beatmap_id, timestamp).await? {
         Some(score) => score,
         None => {
-            let top_scores = ctx
-                .osu()
-                .user_scores(user_id)
-                .best()
-                .limit(100)
-                .await
-                .context("failed to get top scores")?;
-
-            let score_opt = top_scores.into_iter().find(|score| {
-                (score.ended_at.unix_timestamp() - ts_unix).abs() <= 3 
-            });
-
-            match score_opt {
-                Some(score) => score,
-                None => {
-                    tracing::warn!("Fetching map scores for user {} on beatmap {}", user_id, beatmap_id);
-                    let map_scores = ctx.osu().beatmap_user_scores(beatmap_id, user_id).await.context("failed to get map scores")?;
-                    tracing::warn!("Got {} map scores", map_scores.len());
-                    let score_opt = map_scores.iter().find(|score| {
-                        (score.ended_at.unix_timestamp() - ts_unix).abs() <= 3
-                    }).cloned().or_else(|| map_scores.into_iter().next());
-                    
-                    match score_opt {
-                        Some(score) => score,
-                        None => {
-                            let content = "Couldn't find the replay for this score (not in recents, tops, or map bests).";
-                            command.error(&ctx, content).await?;
-                            return Ok(());
-                        }
-                    }
-                }
-            }
+            let content = "Couldn't find the replay for this score (not in recents, tops, or map bests).";
+            command.error(&ctx, content).await?;
+            return Ok(());
         }
     };
 
@@ -141,7 +181,10 @@ async fn render_from_msg(ctx: Arc<Context>, mut command: InteractionCommand) -> 
         .unwrap_or("unknown diff");
 
     let mut path = BotConfig::get().paths.downloads().to_owned();
-    path.push(format!("{osu_user} - {map_title} [{diff_name}].osr"));
+    let safe_user = sanitize_filename(osu_user);
+    let safe_title = sanitize_filename(map_title);
+    let safe_diff = sanitize_filename(diff_name);
+    path.push(format!("{safe_user} - {safe_title} [{safe_diff}].osr"));
 
     tokio::fs::write(&path, &replay_bytes).await.context("failed to write into replay file")?;
 
@@ -177,13 +220,13 @@ async fn render_from_msg(ctx: Arc<Context>, mut command: InteractionCommand) -> 
         player_name: Some(osu_user.to_string()),
         map_title: Some(map_title.to_string()),
         difficulty_name: Some(diff_name.to_string()),
-        queue_message: Some((queue_msg.id, queue_msg.channel_id)), is_lazer: score_to_render.set_on_lazer,
+        queue_message: Some((queue_msg.id, queue_msg.channel_id)),
+        is_lazer: score_to_render.set_on_lazer,
     };
 
     let was_empty = ctx.replay_queue.queue.lock().await.is_empty();
     ctx.replay_queue.push(replay_data).await;
 
-    command.update(&ctx, &builder).await?;
     if was_empty {
         let ctx_clone = Arc::clone(&ctx);
         tokio::spawn(async move {
@@ -226,79 +269,12 @@ pub async fn render_score_from_embed(
         return Ok(None);
     };
 
-    let score_to_render: Score = if let Some(timestamp) = timestamp {
-        let ts_unix = timestamp.as_secs();
-
-        // Check recents
-        let recent_scores = ctx
-            .osu()
-            .user_scores(user_id)
-            .recent()
-            .include_fails(false)
-            .limit(100)
-            .await
-            .context("failed to get recent scores")?;
-
-        let score = recent_scores
-            .into_iter()
-            .find(|s| (s.ended_at.unix_timestamp() - ts_unix).abs() <= 3 );
-
-        if let Some(score) = score {
-            score
-        } else {
-            // Check tops
-            let top_scores = ctx
-                .osu()
-                .user_scores(user_id)
-                .best()
-                .limit(100)
-                .await
-                .context("failed to get top scores")?;
-
-            match top_scores
-                .into_iter()
-                .find(|s| (s.ended_at.unix_timestamp() - ts_unix).abs() <= 3 )
-            {
-                Some(score) => score,
-                None => {
-                    let map_scores = ctx.osu().beatmap_user_scores(beatmap_id, user_id).await.context("failed to get map scores")?;
-                    let score_opt = map_scores.iter().find(|score| {
-                        (score.ended_at.unix_timestamp() - ts_unix).abs() <= 3
-                    }).cloned().or_else(|| map_scores.into_iter().next());
-                    
-                    match score_opt {
-                        Some(score) => score,
-                        None => {
-                            let content = "Couldn't find the replay for this score (not in recents, tops, or map bests).";
-                            let _ = input_channel.error(&ctx, content).await;
-                            return Ok(None);
-                        }
-                    }
-                }
-            }
-        }
-    } else {
-        // No timestamp (<current embed) — pick best replayable score on this map
-        tracing::warn!(
-            user_id,
-            beatmap_id,
-            "no timestamp, fetching beatmap user scores"
-        );
-
-        let map_scores = ctx
-            .osu()
-            .beatmap_user_scores(beatmap_id, user_id)
-            .await
-            .context("failed to get user scores on beatmap")?;
-
-        match map_scores.into_iter().find(|s| true) {
-            Some(score) => score,
-            None => {
-                input_channel
-                    .error(&ctx, "No replayable score found on this map")
-                    .await?;
-                return Ok(None);
-            }
+    let score_to_render = match find_score_to_render(&ctx, user_id, beatmap_id, timestamp).await? {
+        Some(s) => s,
+        None => {
+            let content = "Couldn't find the replay for this score (not in recents, tops, or map bests).";
+            let _ = input_channel.error(&ctx, content).await;
+            return Ok(None);
         }
     };
 
@@ -350,7 +326,10 @@ pub async fn render_score_from_embed(
         .unwrap_or("unknown diff");
 
     let mut path = BotConfig::get().paths.downloads().to_owned();
-    path.push(format!("{osu_user} - {map_title}.osr"));
+    let safe_user = sanitize_filename(osu_user);
+    let safe_title = sanitize_filename(map_title);
+    let safe_diff = sanitize_filename(diff_name);
+    path.push(format!("{safe_user} - {safe_title} [{safe_diff}].osr"));
 
     tokio::fs::write(&path, replay_bytes).await.context("failed to write replay file")?;
 
@@ -367,7 +346,8 @@ pub async fn render_score_from_embed(
             player_name: Some(osu_user.to_string()),
             map_title: Some(map_title.to_string()),
             difficulty_name: Some(diff_name.to_string()),
-            queue_message: None, is_lazer: false,
+            queue_message: None,
+            is_lazer: score_to_render.set_on_lazer,
         })
         .await;
 

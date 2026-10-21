@@ -44,7 +44,7 @@ pub struct SkinAdd {
 /// Remove a skin to the skinlist
 pub struct SkinRemove {
     /// Index of the skin that you want to remove
-    #[command(min_value = 0, max_value = 65_535)]
+    #[command(min_value = 1, max_value = 65_535)]
     index: usize,
 }
 

@@ -9,7 +9,10 @@ use std::time::Duration;
 use time::OffsetDateTime;
 use twilight_interactions::command::{CommandModel, CreateCommand};
 use twilight_model::channel::message::{embed::EmbedField, Message};
-use twilight_model::id::{marker::ChannelMarker, Id};
+use twilight_model::id::{
+    marker::{ChannelMarker, MessageMarker},
+    Id,
+};
 
 use crate::{
     core::{Context, ReplayStatus},
@@ -125,15 +128,21 @@ pub async fn send_queue_status(ctx: Arc<Context>, channel_id: Id<ChannelMarker>)
         .await?;
 
     let message_id = msg.id;
+    spawn_queue_updater(ctx, channel_id, message_id);
+    Ok(())
+}
 
+pub fn spawn_queue_updater(
+    ctx: Arc<Context>,
+    channel_id: Id<ChannelMarker>,
+    message_id: Id<MessageMarker>,
+) {
     tokio::spawn(async move {
         let notify = Arc::clone(&ctx.replay_queue.notify);
 
         loop {
-            // Wait for a notification, but throttle updates to max once every 3 seconds to avoid Discord rate limits!
-            // We use timeout to also wake up periodically if we missed a notification.
+            // Wait for a status notification or wake periodically up to 3s
             let _ = tokio::time::timeout(Duration::from_secs(3), notify.notified()).await;
-            tokio::time::sleep(Duration::from_secs(3)).await;
 
             // Read current state
             let (is_empty, status) = {
@@ -160,8 +169,6 @@ pub async fn send_queue_status(ctx: Arc<Context>, channel_id: Id<ChannelMarker>)
             }
         }
     });
-
-    Ok(())
 }
 
 async fn slash_queue(ctx: Arc<Context>, command: InteractionCommand) -> Result<()> {
@@ -195,39 +202,7 @@ async fn slash_queue(ctx: Arc<Context>, command: InteractionCommand) -> Result<(
     let channel_id = msg.channel_id;
     let message_id = msg.id;
 
-    tokio::spawn(async move {
-        let notify = Arc::clone(&ctx.replay_queue.notify);
-
-        loop {
-            // Wait for a notification, but throttle updates to max once every 3 seconds to avoid Discord rate limits!
-            // We use timeout to also wake up periodically if we missed a notification.
-            let _ = tokio::time::timeout(Duration::from_secs(3), notify.notified()).await;
-            tokio::time::sleep(Duration::from_secs(3)).await;
-
-            // Read current state
-            let (is_empty, status) = {
-                let is_empty = {
-                    let q = ctx.replay_queue.queue.lock().await;
-                    let q: &std::collections::VecDeque<crate::core::ReplayData> = &*q;
-                    q.is_empty()
-                };
-                let status = *ctx.replay_queue.status.lock().await;
-                (is_empty, status)
-            };
-
-            let embed = build_queue_embed(&ctx).await.build();
-            let _ = ctx
-                .http
-                .update_message(channel_id, message_id)
-                .embeds(Some(&[embed]))
-                .await;
-            // Stop only after pop has completed: queue empty and status is Waiting
-            if is_empty && matches!(status, ReplayStatus::Waiting) {
-                let _ = ctx.http.delete_message(channel_id, message_id).await;
-                break;
-            }
-        }
-    });
+    spawn_queue_updater(ctx, channel_id, message_id);
 
     Ok(())
 }

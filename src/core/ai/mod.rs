@@ -78,17 +78,17 @@ impl AiClient {
     }
 
     /// Total number of AI requests currently executing or waiting in line.
-    pub fn queue_len(&self) -> usize {
-        self.queue.len()
+    pub async fn queue_len(&self) -> usize {
+        self.queue.len().await
     }
 
-    pub async fn ask(&self, messages: &[AiMessage]) -> Result<String> {
-        self.ollama.ask(messages).await
+    pub async fn ask(&self, channel_id: Id<ChannelMarker>, messages: &[AiMessage]) -> Result<String> {
+        self.ollama.ask(channel_id, messages).await
     }
 
-    /// Return statistics from the most recent generation evaluated by Ollama.
-    pub async fn last_stats(&self) -> Option<LastGenerationStats> {
-        self.ollama.last_stats().await
+    /// Return statistics from the most recent generation evaluated by Ollama for this channel.
+    pub async fn last_stats(&self, channel_id: Id<ChannelMarker>) -> Option<LastGenerationStats> {
+        self.ollama.last_stats(channel_id).await
     }
 
     /// The model identifier currently configured.

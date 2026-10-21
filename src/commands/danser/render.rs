@@ -100,13 +100,21 @@ pub async fn slash_render(ctx: Arc<Context>, mut command: InteractionCommand) ->
                 return Ok(());
             }
 
-            // Always reply in the channel the command was used in
-            command.channel_id
+            let is_allowed = ctx
+                .guild_settings(guild, |s| {
+                    s.input_channels.is_empty() || s.input_channels.contains(&command.channel_id)
+                })
+                .unwrap_or(true);
 
-            // Uncomment below to use a configured output channel instead:
-            // ctx.guild_settings(guild, |server| server.output_channel)
-            //     .flatten()
-            //     .unwrap_or(command.channel_id)
+            if !is_allowed {
+                let content = "This channel is not an allowed input channel for rendering.";
+                command.error_callback(&ctx, content, true).await?;
+                return Ok(());
+            }
+
+            ctx.guild_settings(guild, |server| server.output_channel)
+                .flatten()
+                .unwrap_or(command.channel_id)
         }
         None => command.channel_id,
     };
@@ -156,6 +164,7 @@ pub async fn slash_render(ctx: Arc<Context>, mut command: InteractionCommand) ->
         return Err(err).with_context(|| format!("failed writing to file `{replay_file:?}`"));
     };
 
+    let is_lazer = crate::core::replay_queue::is_lazer_replay(replay.version);
     let replay_data = ReplayData {
         input_channel: command.channel_id,
         output_channel,
@@ -171,7 +180,8 @@ pub async fn slash_render(ctx: Arc<Context>, mut command: InteractionCommand) ->
         player_name: Some(command.username()?.to_string()),
         map_title: None,
         difficulty_name: None,
-        queue_message: None, is_lazer: false,
+        queue_message: None,
+        is_lazer,
     };
 
     let was_empty = ctx.replay_queue.queue.lock().await.is_empty();
