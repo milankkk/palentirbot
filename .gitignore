@@ -20,3 +20,5 @@ cache/
 scripts/
 *.osu
 *.osr
+*repomix*
+*.backup-*

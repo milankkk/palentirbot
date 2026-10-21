@@ -52,8 +52,9 @@ impl Commands {
                     Setup => SETUP_SLASH,
                     Skin => SKIN_SLASH,
                     Settings => SETTINGS_SLASH,
-                    Setup => SETUP_SLASH,
                     Ask => ASK_SLASH,
+                    AiClear => AICLEAR_SLASH,
+                    AiContext => AICONTEXT_SLASH,
                 },
                 msg {
                 }

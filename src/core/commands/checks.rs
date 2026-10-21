@@ -6,7 +6,7 @@ use twilight_model::{
     },
 };
 
-use crate::core::Context;
+use crate::core::{BotConfig, Context};
 
 /// Is authority -> None
 /// No authority -> Some(message to user)
@@ -16,6 +16,10 @@ pub async fn check_authority(
     channel: Id<ChannelMarker>,
     guild: Option<Id<GuildMarker>>,
 ) -> Option<&'static str> {
+    if BotConfig::get().owners.contains(&author) {
+        return None;
+    }
+
     let permissions = ctx.cache.get_channel_permissions(author, channel, guild);
 
     if permissions.intersects(Permissions::ADMINISTRATOR | Permissions::MANAGE_CHANNELS) {

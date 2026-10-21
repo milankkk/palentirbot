@@ -130,10 +130,10 @@ pub async fn send_queue_status(ctx: Arc<Context>, channel_id: Id<ChannelMarker>)
         let notify = Arc::clone(&ctx.replay_queue.notify);
 
         loop {
-            // Wake on any status change, or after 5s as a fallback
-            tokio::time::timeout(Duration::from_secs(5), notify.notified())
-                .await
-                .ok();
+            // Wait for a notification, but throttle updates to max once every 3 seconds to avoid Discord rate limits!
+            // We use timeout to also wake up periodically if we missed a notification.
+            let _ = tokio::time::timeout(Duration::from_secs(3), notify.notified()).await;
+            tokio::time::sleep(Duration::from_secs(3)).await;
 
             // Read current state
             let (is_empty, status) = {
@@ -199,10 +199,10 @@ async fn slash_queue(ctx: Arc<Context>, command: InteractionCommand) -> Result<(
         let notify = Arc::clone(&ctx.replay_queue.notify);
 
         loop {
-            // Wake on any status change, or after 5s as a fallback
-            tokio::time::timeout(Duration::from_secs(5), notify.notified())
-                .await
-                .ok();
+            // Wait for a notification, but throttle updates to max once every 3 seconds to avoid Discord rate limits!
+            // We use timeout to also wake up periodically if we missed a notification.
+            let _ = tokio::time::timeout(Duration::from_secs(3), notify.notified()).await;
+            tokio::time::sleep(Duration::from_secs(3)).await;
 
             // Read current state
             let (is_empty, status) = {

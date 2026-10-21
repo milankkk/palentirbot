@@ -131,7 +131,7 @@ impl Context {
             stats,
             replay_queue: ReplayQueue::new(),
             skin_list: Arc::new(Mutex::default()),
-            ai: AiClient::new(),
+            ai: AiClient::new().await,
         };
 
         Ok((ctx, shards))

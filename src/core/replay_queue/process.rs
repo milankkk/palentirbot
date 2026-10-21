@@ -842,7 +842,7 @@ struct TitleResult {
 async fn calc_latest_pp(map_path: &std::path::Path, replay: &crate::core::replay_queue::data::ReplaySlim, max_combo: u32, is_nochoke: bool, is_max: bool, is_lazer: bool, osr_path: Option<&std::path::Path>) -> Option<f64> {
     let mut cmd = tokio::process::Command::new("/home/serverx/.dotnet/dotnet");
     cmd.env("DOTNET_ROLL_FORWARD", "Major");
-    cmd.arg("/tmp/osu-tools/PerformanceCalculator/bin/Release/net8.0/PerformanceCalculator.dll");
+    cmd.arg("/home/serverx/Documents/osudcbots/palentirbot/data/osu-tools/PerformanceCalculator/bin/Release/net8.0/PerformanceCalculator.dll");
     
     if !is_max && !is_nochoke && osr_path.is_some() {
         cmd.arg("performance").arg("replay").arg("-j");

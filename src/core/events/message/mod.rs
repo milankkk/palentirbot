@@ -59,6 +59,21 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
     let args_str = parts.next().unwrap_or("").trim();
 
     match cmd_name.as_str() {
+        // ── ask / ai ──────────────────────────────────────────────────────────
+        "ask" | "ai" | "a" => {
+            crate::commands::utility::handle_prefix_ask(ctx, &msg, args_str, &prefix).await;
+        }
+
+        // ── aicontext / context ───────────────────────────────────────────────
+        "aicontext" | "context" | "aic" => {
+            use crate::util::builder::MessageBuilder;
+            let embed = crate::commands::utility::create_context_embed(&ctx, msg.channel_id).await;
+            let _ = msg
+                .channel_id
+                .create_message(&ctx, &MessageBuilder::new().embed(embed))
+                .await;
+        }
+
         // ── ping ──────────────────────────────────────────────────────────────
         "ping" => {
             use crate::util::builder::MessageBuilder;
@@ -286,6 +301,8 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
 
             let description = format!(
                 "**Prefix commands** (current prefix: `{p}`)\n\n\
+                 `{p}ask <question>` — Ask the AI a question (aliases: `{p}ai`, `{p}a`)\n\
+                 `{p}aicontext` — Show context window usage & engine stats (aliases: `{p}context`, `{p}aic`)\n\
                  `{p}ping` — Check latency\n\
                  `{p}render` — Render a replay (attach `.osr`). Args: `start=MM:SS` `end=MM:SS` `pitch=<float>`\n\
                  `{p}queue` — Show the render queue\n\
