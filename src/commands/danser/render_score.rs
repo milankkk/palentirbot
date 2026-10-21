@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::{fs, sync::Arc};
+use std::sync::Arc;
 
 use super::queue::send_queue_status;
 use crate::util::ChannelExt;
@@ -13,7 +13,6 @@ use command_macros::msg_command;
 use eyre::{Context as _, ContextCompat, Report, Result};
 use osu_db::Replay;
 use rosu_v2::prelude::Score;
-use time::{Date, OffsetDateTime, PrimitiveDateTime, Time};
 use twilight_interactions::command::CommandInputData;
 use twilight_model::{
     channel::{message::embed::Embed, Message},
@@ -454,133 +453,6 @@ fn get_timestamp_from_minimized_embed(embed: &Embed) -> Option<Timestamp> {
     let timestamp_value_as_int = actual_timestamp_value.parse().ok()?;
 
     Timestamp::from_secs(timestamp_value_as_int).ok()
-}
-
-// https://osu.ppy.sh/wiki/en/Client/File_formats/Osr_%28file_format%29
-fn extend_replay_bytes(bytes: &mut Vec<u8>, score: &Score, beatmap_md5: &str, replay_mods: u32) {
-    let initial_len = bytes.len();
-    let mut bytes_written = 0;
-
-    bytes_written += encode_byte(bytes, score.mode as u8);
-    bytes_written += encode_int(bytes, game_version(score.ended_at.date()));
-    bytes_written += encode_string(bytes, beatmap_md5);
-
-    let username = score
-        .user
-        .as_ref()
-        .map(|user| user.username.as_str())
-        .unwrap_or_default();
-    bytes_written += encode_string(bytes, username);
-
-    bytes_written += encode_string(bytes, "");
-
-    let stats = &score.statistics;
-    bytes_written += encode_short(bytes, stats.great as u16);
-    bytes_written += encode_short(bytes, stats.ok as u16);
-    bytes_written += encode_short(bytes, stats.meh as u16);
-    bytes_written += encode_short(bytes, stats.perfect as u16);
-    bytes_written += encode_short(bytes, stats.good as u16);
-    bytes_written += encode_short(bytes, stats.miss as u16);
-
-    bytes_written += encode_int(bytes, score.score);
-    bytes_written += encode_short(bytes, score.max_combo as u16);
-    bytes_written += encode_byte(bytes, score.is_perfect_combo as u8);
-
-    // critical line: use explicit override
-    bytes_written += encode_int(bytes, replay_mods);
-
-    bytes_written += encode_string(bytes, "");
-    bytes_written += encode_datetime(bytes, score.ended_at);
-    bytes_written += encode_int(bytes, initial_len as u32);
-
-    bytes.rotate_right(bytes_written);
-    encode_long(bytes, score.id);
-}
-
-fn encode_byte(bytes: &mut Vec<u8>, byte: u8) -> usize {
-    bytes.push(byte);
-
-    1
-}
-
-fn encode_short(bytes: &mut Vec<u8>, short: u16) -> usize {
-    bytes.extend_from_slice(&short.to_le_bytes());
-
-    2
-}
-
-fn encode_int(bytes: &mut Vec<u8>, int: u32) -> usize {
-    bytes.extend_from_slice(&int.to_le_bytes());
-
-    4
-}
-
-fn encode_long(bytes: &mut Vec<u8>, long: u64) -> usize {
-    bytes.extend_from_slice(&long.to_le_bytes());
-
-    8
-}
-
-fn encode_string(bytes: &mut Vec<u8>, s: &str) -> usize {
-    if s.is_empty() {
-        bytes.push(0x00); // "no string"
-
-        1
-    } else {
-        bytes.push(0x0b); // "string incoming"
-        let len = encode_leb128(bytes, s.len());
-        bytes.extend_from_slice(s.as_bytes());
-
-        1 + len + s.len()
-    }
-}
-
-// https://en.wikipedia.org/wiki/LEB128
-fn encode_leb128(bytes: &mut Vec<u8>, mut n: usize) -> usize {
-    let mut bytes_written = 0;
-
-    loop {
-        let mut byte = ((n & u8::MAX as usize) as u8) & !(1 << 7);
-        n >>= 7;
-
-        if n != 0 {
-            byte |= 1 << 7;
-        }
-
-        bytes.push(byte);
-        bytes_written += 1;
-
-        if n == 0 {
-            return bytes_written;
-        }
-    }
-}
-
-// https://docs.microsoft.com/en-us/dotnet/api/system.datetime.ticks?redirectedfrom=MSDN&view=net-6.0#System_DateTime_Ticks
-fn encode_datetime(bytes: &mut Vec<u8>, datetime: OffsetDateTime) -> usize {
-    let orig_date = Date::from_ordinal_date(1, 1).unwrap();
-    let orig_time = Time::from_hms(0, 0, 0).unwrap();
-
-    let orig = PrimitiveDateTime::new(orig_date, orig_time).assume_utc();
-
-    let orig_nanos = orig.unix_timestamp_nanos();
-    let this_nanos = datetime.unix_timestamp_nanos();
-
-    let long = (this_nanos - orig_nanos) / 100;
-
-    encode_long(bytes, long as u64)
-}
-
-fn game_version(date: Date) -> u32 {
-    let mut version = date.year() as u32;
-    version *= 100;
-
-    version += date.month() as u32;
-    version *= 100;
-
-    version += date.day() as u32;
-
-    version
 }
 
 fn parseembedinputdata(input_: CommandInputData<'_>) -> Option<ParsedEmbed> {

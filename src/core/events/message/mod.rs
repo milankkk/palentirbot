@@ -37,13 +37,7 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
     // ── Resolve per-guild prefix ─────────────────────────────────────────────
     let prefix = msg
         .guild_id
-        .and_then(|gid| {
-            ctx.guild_settings(gid, |s| {
-                s.prefix
-                    .clone()
-                    .unwrap_or_else(|| DEFAULT_PREFIX.to_owned())
-            })
-        })
+        .and_then(|gid| ctx.guild_settings(gid, |s| s.effective_prefix().to_owned()))
         .unwrap_or_else(|| DEFAULT_PREFIX.to_owned());
 
     let content = match msg.content.strip_prefix(prefix.as_str()) {
@@ -341,13 +335,7 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
             use crate::util::builder::{EmbedBuilder, MessageBuilder};
             let p = msg
                 .guild_id
-                .and_then(|gid| {
-                    ctx.guild_settings(gid, |s| {
-                        s.prefix
-                            .clone()
-                            .unwrap_or_else(|| DEFAULT_PREFIX.to_owned())
-                    })
-                })
+                .and_then(|gid| ctx.guild_settings(gid, |s| s.effective_prefix().to_owned()))
                 .unwrap_or_else(|| DEFAULT_PREFIX.to_owned());
 
             let description = format!(

@@ -1,9 +1,6 @@
 use std::fmt::Result as FmtResult;
 
-use time::format_description::{
-    modifier::{Day, Hour, Minute, Month, Second, Year},
-    Component, FormatItem,
-};
+use time::format_description::FormatItem;
 use tracing::{Event, Subscriber};
 use tracing_appender::{
     non_blocking::{NonBlocking, WorkerGuard},
@@ -128,24 +125,5 @@ where
     }
 }
 
-pub const DATE_FORMAT: &[FormatItem<'_>] = &[
-    FormatItem::Component(Component::Year(Year::default())),
-    FormatItem::Literal(b"-"),
-    FormatItem::Component(Component::Month(Month::default())),
-    FormatItem::Literal(b"-"),
-    FormatItem::Component(Component::Day(Day::default())),
-];
-
-pub const TIME_FORMAT: &[FormatItem<'_>] = &[
-    FormatItem::Component(Component::Hour(<Hour>::default())),
-    FormatItem::Literal(b":"),
-    FormatItem::Component(Component::Minute(<Minute>::default())),
-    FormatItem::Literal(b":"),
-    FormatItem::Component(Component::Second(<Second>::default())),
-];
-
-pub const DATETIME_FORMAT: &[FormatItem<'_>] = &[
-    FormatItem::Compound(DATE_FORMAT),
-    FormatItem::Literal(b" "),
-    FormatItem::Compound(TIME_FORMAT),
-];
+pub const DATETIME_FORMAT: &[FormatItem<'_>] =
+    time::macros::format_description!("[year]-[month]-[day] [hour]:[minute]:[second]");

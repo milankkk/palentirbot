@@ -5,7 +5,7 @@ use crate::{
     util::{builder::MessageBuilder, ChannelExt},
 };
 use bytes::Bytes;
-use eyre::{Context as _, ContextCompat, Report, Result};
+use eyre::{Context as _, Report, Result};
 use rosu_pp::Beatmap;
 use rosu_v2::prelude::GameModsLegacy;
 use std::{
@@ -280,8 +280,6 @@ async fn process_single_replay(
         pp_2022,
         pp_2021,
         max_possible_combo,
-        stars: _,
-        acc: _,
     } = match create_title(&replay, map_path.clone(), &title_for_display, is_lazer).await {
         Ok(result) => result,
         Err(err) => {
@@ -803,8 +801,6 @@ struct TitleResult {
     pp_2022: Option<PpTriple>,
     pp_2021: Option<PpTriple>,
     max_possible_combo: u16,
-    stars: f64,
-    acc: f32,
 }
 
 #[derive(Copy, Clone)]
@@ -1222,8 +1218,6 @@ async fn create_title(
         pp_2022,
         pp_2021,
         max_possible_combo: max_possible_combo.try_into().unwrap_or(0),
-        stars,
-        acc,
     })
 }
 

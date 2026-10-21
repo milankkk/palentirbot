@@ -9,4 +9,3 @@ pub const NOT_OWNER: &str = "That command can only be used by the bot owner";
 pub const INVITE_LINK: &str = "https://discord.com/oauth2/authorize?client_id=1490728112173092875&permissions=4503599627388928&integration_type=0&scope=bot+applications.commands";
 pub const SHISHABOT_GITHUB: &str = "https://github.com/milankkk/palentirbot";
 pub const SHISHABOT_DISCORD: &str = "https://discord.gg/N8q9AadrDK";
-pub const SHISHABOT_WEBSITE: &str = "https://replays.insertdomainname.be";

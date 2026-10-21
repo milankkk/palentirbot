@@ -73,14 +73,18 @@ pub struct Tokens {
     pub discord: String,
     pub osu_client_id: u64,
     pub osu_client_secret: String,
+    #[allow(dead_code)]
     pub osu_api_key: String,
     pub upload_secret: String,
 }
 
 #[derive(Debug)]
 pub struct Emojis {
+    #[allow(dead_code)]
     pub man_running: String,
+    #[allow(dead_code)]
     pub white_check_mark: String,
+    #[allow(dead_code)]
     pub hourglass: String,
     pub hit_300: String,
     pub hit_100: String,

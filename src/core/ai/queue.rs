@@ -81,6 +81,7 @@ impl AiQueue {
     }
 
     /// Whether the queue is currently empty.
+    #[allow(dead_code)]
     pub async fn is_empty(&self) -> bool {
         self.len().await == 0
     }

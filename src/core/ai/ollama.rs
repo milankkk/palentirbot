@@ -17,6 +17,7 @@ pub struct LastGenerationStats {
     pub prompt_tokens: usize,
     pub response_tokens: usize,
     pub eval_duration_ms: u64,
+    #[allow(dead_code)]
     pub total_duration_ms: u64,
 }
 

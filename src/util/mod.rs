@@ -24,12 +24,6 @@ macro_rules! set {
     };
 }
 
-pub fn levenshtein_similarity(word_a: &str, word_b: &str) -> f32 {
-    let (dist, len) = levenshtein_distance(word_a, word_b);
-
-    (len - dist) as f32 / len as f32
-}
-
 /// "How many replace/delete/insert operations are necessary to morph one word into the other?"
 ///
 /// Returns (distance, max word length) tuple

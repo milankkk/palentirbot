@@ -19,18 +19,16 @@ static MY_USER_AGENT: &str = env!("CARGO_PKG_NAME");
 #[repr(u8)]
 enum Site {
     DiscordAttachment,
-    DownloadOfficial,
     DownloadChimu,
     DownloadKitsu,
     DownloadNerinyan,
     DownloadCatboy,
-    OsuReplay,
     ShishaMezo,
 }
 
 pub struct CustomClient {
     client: Client,
-    ratelimiters: [LeakyBucket; 8],
+    ratelimiters: [LeakyBucket; 6],
     upload: UploadData,
 }
 
@@ -68,12 +66,10 @@ impl CustomClient {
 
         let ratelimiters = [
             ratelimiter(2), // DiscordAttachment
-            ratelimiter(1), // DownloadOfficial
             ratelimiter(1), // DownloadChimu
             ratelimiter(1), // DownloadKitsu
             ratelimiter(1), // DownloadNerinyan
             ratelimiter(1), // DownloadCatboy
-            ratelimiter(1), // OsuReplay
             ratelimiter(1), // ShishaMezo
         ];
 
@@ -117,111 +113,6 @@ impl CustomClient {
             "Got {} bytes from {url}, starts_with PK: {}",
             bytes.len(),
             bytes.starts_with(b"PK")
-        );
-
-        Ok(bytes)
-    }
-
-    pub async fn get_raw_replay(&self, score_id: u64) -> eyre::Result<Vec<u8>> {
-        let url = format!(
-            "https://osu.ppy.sh/api/get_replay?k={apikey}&s={score_id}",
-            apikey = BotConfig::get().tokens.osu_api_key,
-        );
-
-        let bytes = self.make_get_request(url, Site::OsuReplay).await?;
-        let text = String::from_utf8_lossy(&bytes);
-
-        warn!(
-            "Got {} bytes from osu replay api for score {}, body: {}",
-            bytes.len(),
-            score_id,
-            text
-        );
-
-        #[derive(serde::Deserialize)]
-        struct RawReplay {
-            content: String,
-        }
-
-        #[derive(serde::Deserialize)]
-        struct OsuApiError {
-            error: String,
-        }
-
-        if let Ok(err) = serde_json::from_slice::<OsuApiError>(&bytes) {
-            eyre::bail!(
-                "osu replay api returned error for score {score_id}: {}",
-                err.error
-            );
-        }
-
-        let RawReplay { content } = serde_json::from_slice::<RawReplay>(&bytes)
-            .with_context(|| format!("failed to deserialize raw replay response: {text}"))?;
-
-        use base64::prelude::*;
-        BASE64_STANDARD.decode(content).context("failed to decode replay through base64")
-    }
-
-    pub async fn getrawreplay_for_user_map(
-        &self,
-        beatmap_id: u32,
-        user_id: u32,
-        mode: u8,
-    ) -> eyre::Result<Vec<u8>> {
-        let url = format!(
-            "https://osu.ppy.sh/api/get_replay?k={apikey}&b={beatmap_id}&u={user_id}&m={mode}&type=id",
-            apikey = BotConfig::get().tokens.osu_api_key,
-        );
-
-        let bytes = self.make_get_request(url, Site::OsuReplay).await?;
-        let text = String::from_utf8_lossy(&bytes);
-
-        #[derive(serde::Deserialize)]
-        struct RawReplay {
-            content: String,
-        }
-
-        #[derive(serde::Deserialize)]
-        struct OsuApiError {
-            error: String,
-        }
-
-        if let Ok(err) = serde_json::from_slice::<OsuApiError>(&bytes) {
-            eyre::bail!("osu replay api returned error: {}", err.error);
-        }
-
-        let RawReplay { content } = serde_json::from_slice::<RawReplay>(&bytes)
-            .with_context(|| format!("failed to deserialize raw replay response: {text}"))?;
-
-        use base64::prelude::*;
-        BASE64_STANDARD.decode(content).context("failed to decode replay through base64")
-    }
-
-    pub async fn download_official_mapset(&self, mapset_id: u32, osu_token: &str) -> Result<Bytes> {
-        let url = format!("https://osu.ppy.sh/beatmapsets/{}/download", mapset_id);
-        self.ratelimit(Site::DownloadOfficial).await;
-
-        let response = self
-            .client
-            .get(&url)
-            .bearer_auth(osu_token)
-            .send()
-            .await
-            .with_context(|| format!("failed to receive official download response from {url}"))?;
-
-        let status = response.status();
-        if !status.is_success() {
-            bail!("failed with status code {status} when requesting {url}");
-        }
-
-        let bytes = response
-            .bytes()
-            .await
-            .context("failed to extract official download response bytes")?;
-
-        ensure!(
-            bytes.starts_with(b"PK"),
-            "official download returned invalid data"
         );
 
         Ok(bytes)
@@ -336,10 +227,4 @@ impl CustomClient {
 pub struct UploadResponse {
     pub error: u16,
     pub text: String,
-}
-
-#[derive(Deserialize)]
-pub struct OsuReplayResponse {
-    pub content: String,
-    pub encoding: String,
 }

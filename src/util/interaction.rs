@@ -17,6 +17,7 @@ use super::Authored;
 
 #[derive(Debug)]
 pub struct InteractionCommand {
+    #[allow(dead_code)]
     pub permissions: Option<Permissions>,
     pub channel_id: Id<ChannelMarker>,
     pub data: Box<CommandData>,
@@ -29,6 +30,7 @@ pub struct InteractionCommand {
 
 #[derive(Debug)]
 pub struct InteractionComponent {
+    #[allow(dead_code)]
     pub permissions: Option<Permissions>,
     pub channel_id: Id<ChannelMarker>,
     pub data: MessageComponentInteractionData,
@@ -42,6 +44,7 @@ pub struct InteractionComponent {
 
 #[derive(Debug)]
 pub struct InteractionModal {
+    #[allow(dead_code)]
     pub permissions: Option<Permissions>,
     pub channel_id: Id<ChannelMarker>,
     pub data: ModalInteractionData,

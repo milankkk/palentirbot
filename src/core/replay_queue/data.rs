@@ -18,8 +18,11 @@ pub struct ReplayData {
     pub time_points: TimePoints,
     pub user: Id<UserMarker>,
     pub title: Option<String>,
+    #[allow(dead_code)]
     pub player_name: Option<String>,
+    #[allow(dead_code)]
     pub map_title: Option<String>,
+    #[allow(dead_code)]
     pub difficulty_name: Option<String>,
     pub queue_message: Option<(Id<MessageMarker>, Id<ChannelMarker>)>,
     pub is_lazer: bool,
@@ -96,7 +99,9 @@ pub struct ReplaySlim {
     pub count_300: u16,
     pub count_100: u16,
     pub count_50: u16,
+    #[allow(dead_code)]
     pub count_geki: u16,
+    #[allow(dead_code)]
     pub count_katsu: u16,
     pub count_miss: u16,
     pub max_combo: u16,

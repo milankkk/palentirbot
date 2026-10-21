@@ -1,6 +1,7 @@
 use std::fmt;
 
 /// Round with two decimal positions
+#[allow(dead_code)]
 pub fn round(n: f32) -> f32 {
     (100.0 * n).round() / 100.0
 }

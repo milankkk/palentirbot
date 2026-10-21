@@ -8,8 +8,8 @@ use twilight_model::id::{marker::ChannelMarker, Id};
 mod ollama;
 mod queue;
 
-pub use ollama::{LastGenerationStats, OllamaClient, DEFAULT_NUM_CTX};
-pub use queue::{AiQueue, AiQueuePermit, AiQueueTicket, DEFAULT_MAX_AI_QUEUE_SIZE};
+pub use ollama::{LastGenerationStats, OllamaClient};
+pub use queue::{AiQueue, DEFAULT_MAX_AI_QUEUE_SIZE};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct AiMessage {

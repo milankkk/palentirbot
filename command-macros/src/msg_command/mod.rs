@@ -161,10 +161,11 @@ pub fn impl_(attrs: Attributes, fun: Function) -> Result<TokenStream> {
         };
 
         fn create__() -> twilight_model::application::command::Command {
+            #[allow(deprecated)]
             twilight_model::application::command::Command {
                 application_id: None,
                 default_member_permissions: None,
-                dm_permission: None,
+                dm_permission: #dm_permission,
                 description: String::new(),
                 description_localizations: None,
                 guild_id: None,

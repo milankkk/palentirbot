@@ -17,7 +17,6 @@ use crate::{
 pub trait ChannelExt {
     async fn create_message(&self, ctx: &Context, builder: &MessageBuilder<'_>) -> Result<Message>;
     async fn error(&self, ctx: &Context, content: impl Into<String>) -> Result<Message>;
-    async fn plain_message(&self, ctx: &Context, content: &str) -> Result<Message>;
 }
 
 impl ChannelExt for Id<ChannelMarker> {
@@ -50,16 +49,6 @@ impl ChannelExt for Id<ChannelMarker> {
             .model()
             .await?)
     }
-
-    async fn plain_message(&self, ctx: &Context, content: &str) -> Result<Message> {
-        Ok(ctx
-            .http
-            .create_message(*self)
-            .content(content)
-            .await?
-            .model()
-            .await?)
-    }
 }
 
 impl ChannelExt for Message {
@@ -68,8 +57,5 @@ impl ChannelExt for Message {
     }
     async fn error(&self, ctx: &Context, content: impl Into<String>) -> Result<Message> {
         self.channel_id.error(ctx, content).await
-    }
-    async fn plain_message(&self, ctx: &Context, content: &str) -> Result<Message> {
-        self.channel_id.plain_message(ctx, content).await
     }
 }

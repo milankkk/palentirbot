@@ -20,7 +20,6 @@ mod permissions;
 
 pub struct Cache {
     inner: InMemoryCache,
-    current_user: Option<CurrentUser>,
 }
 
 impl Cache {
@@ -36,10 +35,7 @@ impl Cache {
             .resource_types(resource_types)
             .build();
 
-        let cache = Self {
-            inner,
-            current_user: None,
-        };
+        let cache = Self { inner };
 
         (cache, ResumeData::default())
     }
