@@ -1,26 +1,17 @@
-use std::{hash::Hash, path::Path};
+use std::path::Path;
 
 use crate::core::BotConfig;
 use bytes::Bytes;
-use eyre::{Context as _, ContextCompat, Result};
-use http::{header::CONTENT_LENGTH, Response};
-use hyper::{
-    client::{connect::dns::GaiResolver, Client as HyperClient, HttpConnector},
-    header::{CONTENT_TYPE, USER_AGENT},
-    Body, Method, Request,
-};
-use hyper_rustls::{HttpsConnector, HttpsConnectorBuilder};
+use eyre::{bail, ensure, Context as _, Result};
 use leaky_bucket_lite::LeakyBucket;
+use reqwest::Client;
 use serde::Deserialize;
+use std::ffi::OsStr;
 use tokio::time::Duration;
 use twilight_model::{
     channel::Attachment,
     id::{marker::UserMarker, Id},
 };
-
-use self::multipart::Multipart;
-
-mod multipart;
 
 static MY_USER_AGENT: &str = env!("CARGO_PKG_NAME");
 
@@ -36,8 +27,6 @@ enum Site {
     OsuReplay,
     ShishaMezo,
 }
-
-type Client = HyperClient<HttpsConnector<HttpConnector<GaiResolver>>, Body>;
 
 pub struct CustomClient {
     client: Client,
@@ -62,13 +51,11 @@ impl From<&'static BotConfig> for UploadData {
 
 impl CustomClient {
     pub fn new() -> Self {
-        let connector = HttpsConnectorBuilder::new()
-            .with_webpki_roots()
-            .https_or_http()
-            .enable_http1()
-            .build();
-
-        let client = HyperClient::builder().build(connector);
+        let client = Client::builder()
+            .user_agent(MY_USER_AGENT)
+            .redirect(reqwest::redirect::Policy::limited(10))
+            .build()
+            .expect("failed to create reqwest CustomClient");
 
         let ratelimiter = |per_second| {
             LeakyBucket::builder()
@@ -81,7 +68,7 @@ impl CustomClient {
 
         let ratelimiters = [
             ratelimiter(2), // DiscordAttachment
-            ratelimiter(1), // DownloadOsu
+            ratelimiter(1), // DownloadOfficial
             ratelimiter(1), // DownloadChimu
             ratelimiter(1), // DownloadKitsu
             ratelimiter(1), // DownloadNerinyan
@@ -102,112 +89,37 @@ impl CustomClient {
     }
 
     async fn make_get_request(&self, url: impl AsRef<str>, site: Site) -> Result<Bytes> {
-        let mut url = url.as_ref().to_owned();
-        self.ratelimit(site).await;
-        let mut redirects = 0;
-
-        loop {
-            trace!("GET request to url {url}");
-            warn!("Sending GET request to: {url}");
-
-            let req = Request::builder()
-                .uri(&url)
-                .method(Method::GET)
-                .header(USER_AGENT, MY_USER_AGENT)
-                .body(Body::empty())
-                .context("failed to build GET request")?;
-
-            let response = self
-                .client
-                .request(req)
-                .await
-                .context("failed to receive GET response")?;
-
-            let status = response.status();
-            warn!("Response status: {status} for url: {url}");
-
-            if status.is_redirection() {
-                redirects += 1;
-                ensure!(redirects < 10, "too many redirects for {url}");
-
-                let location = response
-                    .headers()
-                    .get(hyper::header::LOCATION)
-                    .context("redirect with no Location header")?
-                    .to_str()
-                    .context("Location header was not valid UTF-8")?
-                    .to_owned();
-
-                warn!("Redirect #{redirects} -> {location}");
-
-                url = if location.starts_with("http") {
-                    location
-                } else {
-                    format!(
-                        "https://{}{}",
-                        url.split('/').nth(2).unwrap_or(""),
-                        location
-                    )
-                };
-
-                continue;
-            }
-
-            let bytes = Self::error_for_status(response, &url).await?;
-            warn!(
-                "Got {} bytes from {url}, starts_with PK: {}",
-                bytes.len(),
-                bytes.starts_with(b"PK")
-            );
-
-            return Ok(bytes);
-        }
-    }
-
-    async fn make_post_request(
-        &self,
-        url: impl AsRef<str>,
-        site: Site,
-        form: Multipart,
-    ) -> Result<Bytes> {
         let url = url.as_ref();
-        trace!("POST request to url {url}");
-
-        let content_type = format!("multipart/form-data; boundary={}", form.boundary());
-        let form = form.finish();
-
-        let req = Request::builder()
-            .method(Method::POST)
-            .uri(url)
-            .header(USER_AGENT, MY_USER_AGENT)
-            .header(CONTENT_TYPE, content_type)
-            .header(CONTENT_LENGTH, form.len())
-            .body(Body::from(form))
-            .context("failed to build POST request")?;
-
         self.ratelimit(site).await;
+        trace!("GET request to url {url}");
+        warn!("Sending GET request to: {url}");
 
         let response = self
             .client
-            .request(req)
+            .get(url)
+            .send()
             .await
-            .context("failed to receive POST response")?;
+            .with_context(|| format!("failed to receive GET response from {url}"))?;
 
-        Self::error_for_status(response, url).await
-    }
-
-    async fn error_for_status(response: Response<Body>, url: &str) -> Result<Bytes> {
         let status = response.status();
+        warn!("Response status: {status} for url: {url}");
 
-        if status.is_client_error() || status.is_server_error() {
-            bail!("failed with status code {status} when requesting {url}")
-        } else {
-            let bytes = hyper::body::to_bytes(response.into_body())
-                .await
-                .context("failed to extract response bytes")?;
-
-            Ok(bytes)
+        if !status.is_success() {
+            bail!("failed with status code {status} when requesting {url}");
         }
+
+        let bytes = response
+            .bytes()
+            .await
+            .with_context(|| format!("failed to extract response bytes from {url}"))?;
+
+        warn!(
+            "Got {} bytes from {url}, starts_with PK: {}",
+            bytes.len(),
+            bytes.starts_with(b"PK")
+        );
+
+        Ok(bytes)
     }
 
     pub async fn get_raw_replay(&self, score_id: u64) -> eyre::Result<Vec<u8>> {
@@ -287,31 +199,23 @@ impl CustomClient {
 
     pub async fn download_official_mapset(&self, mapset_id: u32, osu_token: &str) -> Result<Bytes> {
         let url = format!("https://osu.ppy.sh/beatmapsets/{}/download", mapset_id);
-        self.ratelimit(Site::DownloadCatboy).await;
-
-        let req = hyper::Request::builder()
-            .uri(&url)
-            .method(hyper::Method::GET)
-            .header(hyper::header::USER_AGENT, MY_USER_AGENT)
-            .header(
-                hyper::header::AUTHORIZATION,
-                format!("Bearer {}", osu_token),
-            )
-            .body(Body::empty())
-            .context("failed to build official download request")?;
+        self.ratelimit(Site::DownloadOfficial).await;
 
         let response = self
             .client
-            .request(req)
+            .get(&url)
+            .bearer_auth(osu_token)
+            .send()
             .await
-            .context("failed to receive official download response")?;
+            .with_context(|| format!("failed to receive official download response from {url}"))?;
 
         let status = response.status();
-        if status.is_client_error() || status.is_server_error() {
-            bail!("failed with status code {} when requesting {}", status, url);
+        if !status.is_success() {
+            bail!("failed with status code {status} when requesting {url}");
         }
 
-        let bytes = hyper::body::to_bytes(response.into_body())
+        let bytes = response
+            .bytes()
             .await
             .context("failed to extract official download response bytes")?;
 
@@ -322,6 +226,7 @@ impl CustomClient {
 
         Ok(bytes)
     }
+
     pub async fn get_discord_attachment(&self, attachment: &Attachment) -> Result<Bytes> {
         self.make_get_request(&attachment.url, Site::DiscordAttachment)
             .await
@@ -354,6 +259,7 @@ impl CustomClient {
         ensure!(bytes.starts_with(b"PK"), "nerinyan returned invalid data");
         Ok(bytes)
     }
+
     pub async fn download_catboy_mapset(&self, mapset_id: u32) -> Result<Bytes> {
         let url = format!("https://mirror.nekoha.moe/api4/download/{mapset_id}");
         let bytes = self.make_get_request(url, Site::DownloadCatboy).await?;
@@ -369,23 +275,58 @@ impl CustomClient {
         beatmap: &str,
         hash: &str,
     ) -> Result<UploadResponse> {
-        let form = Multipart::new()
-            .push_file("video", path)
-            .await
-            .context("failed to create multipart form")?
-            .push_text("title", title)
-            .push_text("author", author)
-            .push_text("secret", self.upload.secret)
-            .push_text("hash", hash)
-            .push_text("beatmap", beatmap);
+        let path = path.as_ref();
+        let extension = path.extension();
+        ensure!(
+            matches!(extension.and_then(OsStr::to_str), Some("mp4")),
+            "unexpected file extension {extension:?} while creating multipart, expected mp4",
+        );
 
-        let bytes = self
-            .make_post_request(self.upload.url, Site::ShishaMezo, form)
-            .await?;
+        let video_bytes = tokio::fs::read(path)
+            .await
+            .with_context(|| format!("failed to read video file at {path:?} for upload"))?;
+
+        let filename = path
+            .file_name()
+            .and_then(OsStr::to_str)
+            .unwrap_or("video.mp4")
+            .to_string();
+
+        let file_part = reqwest::multipart::Part::bytes(video_bytes)
+            .file_name(filename)
+            .mime_str("video/mp4")
+            .context("invalid mime type for video")?;
+
+        let form = reqwest::multipart::Form::new()
+            .part("video", file_part)
+            .text("title", title.to_string())
+            .text("author", author.to_string())
+            .text("secret", self.upload.secret.to_string())
+            .text("hash", hash.to_string())
+            .text("beatmap", beatmap.to_string());
+
+        self.ratelimit(Site::ShishaMezo).await;
+
+        let response = self
+            .client
+            .post(self.upload.url)
+            .multipart(form)
+            .send()
+            .await
+            .context("failed to receive POST response for video upload")?;
+
+        let status = response.status();
+        if !status.is_success() {
+            bail!("upload failed with status code {status}");
+        }
+
+        let bytes = response
+            .bytes()
+            .await
+            .context("failed to extract upload response bytes")?;
 
         serde_json::from_slice(&bytes).with_context(|| {
             let text = String::from_utf8_lossy(&bytes);
-
             format!("failed to deserialize upload response: {text}")
         })
     }

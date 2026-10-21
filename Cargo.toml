@@ -14,14 +14,10 @@ eyre = { version = "0.6" }
 flexmap = { git = "https://github.com/MaxOhn/flexmap" }
 flurry = { version = "0.4" }
 futures = { version = "0.3", default-features = false }
-http = { version = "0.2" }
-hyper = { version = "0.14", default-features = false }
-hyper-rustls = { version = "0.23", default-features = false, features = ["http1", "tls12", "tokio-runtime", "webpki-tokio"] }
 leaky-bucket-lite = { version = "0.5" }
 once_cell = { version = "1.0" }
 osu-db = { version = "0.3", default-features = false }
 radix_trie = { version = "0.2" }
-rand = { version = "0.8" }
 #rosu-v2 = { git = "https://github.com/MaxOhn/rosu-v2", rev = "996ec7c1db07e8bbcfaad07d555c9d56b763d414", default-features = false }
 #rosu-v2 = { git = "https://github.com/MaxOhn/rosu-v2", rev = "e3852e27285f8cec610417ba6f93e6f29915ee3b", default-features = false }
 rosu-v2 = { git = "https://github.com/MaxOhn/rosu-v2", branch = "main", default-features = false }
@@ -30,7 +26,7 @@ rosu-pp-2021 = { package = "rosu-pp", version = "1.1.0" }
 rosu-pp-2022 = { package = "rosu-pp", version = "0.9.5" }
 rosu-pp-2024 = { package = "rosu-pp", version = "2.0.0" }
 rosu-pp-2025 = { package = "rosu-pp", version = "3.0.0" }
-reqwest = { version = "0.11", features = ["json"] }
+reqwest = { version = "0.12", features = ["json", "multipart"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
 sqlx = { version = "0.8",  features = ["macros", "postgres", "runtime-tokio", "tls-rustls"]}
