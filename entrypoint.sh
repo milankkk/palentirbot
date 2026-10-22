@@ -39,17 +39,30 @@ if [ ! -f "${SETTINGS_FILE}" ]; then
     (
         cd "${DATA_DIR}"
         export LD_LIBRARY_PATH="${DATA_DIR}:${LD_LIBRARY_PATH:-}"
-        ./danser -noupdatecheck >/dev/null 2>&1 || true
+        xvfb-run -a -s "-screen 0 1920x1080x24" ./danser -noupdatecheck -settings=default >/dev/null 2>&1 || true
     )
     if [ -f "${SETTINGS_FILE}" ]; then
         sed -i 's|"OsuSongsDir":.*|"OsuSongsDir": "'"${DATA_DIR}"'/Songs",|' "${SETTINGS_FILE}" 2>/dev/null || true
         sed -i 's|"OsuSkinsDir":.*|"OsuSkinsDir": "'"${DATA_DIR}"'/Skins",|' "${SETTINGS_FILE}" 2>/dev/null || true
         sed -i 's|"OsuReplaysDir":.*|"OsuReplaysDir": "'"${DATA_DIR}"'/Replays",|' "${SETTINGS_FILE}" 2>/dev/null || true
+        sed -i 's|"OutputDir":.*|"OutputDir": "'"${DATA_DIR}"'/Replays",|' "${SETTINGS_FILE}" 2>/dev/null || true
     fi
     echo "[palentirbot] Default settings generated."
 fi
 
-# 3. Pre-populate credentials.json if osu! credentials are provided
+# Ensure OutputDir is always patched to Replays dir even if default.json pre-existed
+if [ -f "${SETTINGS_FILE}" ]; then
+    sed -i 's|"OutputDir":.*|"OutputDir": "'"${DATA_DIR}"'/Replays",|' "${SETTINGS_FILE}" 2>/dev/null || true
+fi
+
+# 3. Create default prompt.txt inside data directory if missing
+PROMPT_FILE="${DATA_DIR}/prompt.txt"
+if [ ! -f "${PROMPT_FILE}" ]; then
+    echo "[palentirbot] Creating default ${PROMPT_FILE}..."
+    printf "You are a helpful osu! Discord bot assistant.\nCurrent user: {username} ({user_id})\n" > "${PROMPT_FILE}"
+fi
+
+# 4. Pre-populate credentials.json if osu! credentials are provided
 CREDENTIALS_FILE="${DATA_DIR}/settings/credentials.json"
 if [ -n "${OSU_CLIENT_ID:-}" ] && [ -n "${OSU_CLIENT_SECRET:-}" ]; then
     if [ ! -f "${CREDENTIALS_FILE}" ] || [ ! -s "${CREDENTIALS_FILE}" ]; then

@@ -24,6 +24,7 @@ def _load_env_file():
 _load_env_file()
 
 app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024  # 500 MB upload limit
 
 # Linked defaults matching bot configuration
 UPLOAD_DIR = os.environ.get("UPLOAD_DIR", "replays")
@@ -43,11 +44,15 @@ def upload():
         return jsonify({"error": 400, "text": "Missing video file"}), 400
 
     f = request.files["video"]
+    if not f.filename.lower().endswith(".mp4"):
+        return jsonify({"error": 400, "text": "Only .mp4 video files are accepted"}), 400
+
     safe_name = secure_filename(f.filename) or "replay.mp4"
     filename = f"{uuid.uuid4()}_{safe_name}"
     f.save(os.path.join(UPLOAD_DIR, filename))
 
-    url = f"{BASE_URL}/{filename}"
+    watch_base = BASE_URL if BASE_URL.endswith("/watch") else f"{BASE_URL}/watch"
+    url = f"{watch_base}/{filename}"
     return jsonify({"error": 0, "text": url})
 
 if __name__ == "__main__":

@@ -27,14 +27,12 @@ services:
       OLLAMA_URL: http://ollama:11434
       DANSER_PATH: /app/data
       FOLDERS_PATH: /app/data
-      AI_SYSTEM_PROMPT: /app/prompt.txt
+      AI_SYSTEM_PROMPT: /app/data/prompt.txt
     volumes:
-      # Persistent bot data (Danser binaries, settings, Downloads, Replays, Skins, Songs)
+      # Persistent bot data (Danser binaries, settings, Downloads, Replays, Skins, Songs, prompt.txt)
       - ./data:/app/data
       # Bot logs
       - ./logs:/app/logs
-      # AI System Prompt file
-      - ./prompt.txt:/app/prompt.txt:ro
     # Optional: Uncomment the deploy block below if you have an NVIDIA GPU and
     # nvidia-container-toolkit installed for hardware-accelerated NVENC rendering in danser.
     # deploy:
@@ -70,10 +68,11 @@ services:
   # 3. Replay Upload Receiver (fileserver/upload.py)
   # ---------------------------------------------------------------------------
   fileserver:
-    image: python:3.12-slim
+    build:
+      context: ./fileserver
+      dockerfile: Dockerfile
     container_name: palentirbot-fileserver
     restart: unless-stopped
-    working_dir: /app
     environment:
       UPLOAD_DIR: /uploads
       # Linked automatically with bot service
@@ -81,11 +80,12 @@ services:
       UPLOAD_PORT: ${UPLOAD_PORT:-5555}
       BASE_URL: ${PUBLIC_REPLAY_BASE_URL:-http://localhost:${CADDY_HTTP_PORT:-8085}}
     volumes:
-      - ./fileserver:/app:ro
       - uploaded_replays:/uploads
-    command: >
-      sh -c "pip install --no-cache-dir flask gunicorn werkzeug &&
-             gunicorn -w 2 -b 0.0.0.0:${UPLOAD_PORT:-5555} --timeout 120 upload:app"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import urllib.request; urllib.request.urlopen(\"http://127.0.0.1:5555/\")' || exit 0"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
     expose:
       - "${UPLOAD_PORT:-5555}"
 

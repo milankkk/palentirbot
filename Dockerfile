@@ -65,8 +65,7 @@ RUN mkdir -p /app/data/Downloads \
              /app/data/Skins \
              /app/data/Songs \
              /app/data/settings \
-             /app/logs && \
-    printf "You are a helpful osu! Discord bot assistant.\nCurrent user: {username} ({user_id})\n" > /app/prompt.txt
+             /app/logs
 
 # Copy startup entrypoint
 COPY entrypoint.sh /app/entrypoint.sh
@@ -78,6 +77,6 @@ ENV LD_LIBRARY_PATH="/app/data:${LD_LIBRARY_PATH}"
 # Default paths
 ENV DANSER_PATH="/app/data" \
     FOLDERS_PATH="/app/data" \
-    AI_SYSTEM_PROMPT="/app/prompt.txt"
+    AI_SYSTEM_PROMPT="/app/data/prompt.txt"
 
 ENTRYPOINT ["/app/entrypoint.sh"]
