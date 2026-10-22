@@ -36,7 +36,11 @@ fn main() {
 }
 
 async fn async_main() -> Result<()> {
-    let _ = dotenvy::dotenv().expect("failed to parse .env file");
+    if let Err(err) = dotenvy::dotenv() {
+        if !matches!(err, dotenvy::Error::Io(ref io_err) if io_err.kind() == std::io::ErrorKind::NotFound) {
+            warn!("Failed to parse .env file: {err:?}");
+        }
+    }
     let _log_worker_guard = logging::init();
 
     BotConfig::init().context("failed to initialize config")?;

@@ -233,9 +233,14 @@ impl CustomClient {
             "unexpected file extension {extension:?} while creating multipart, expected mp4",
         );
 
-        let video_bytes = tokio::fs::read(path)
+        let file = tokio::fs::File::open(path)
             .await
-            .with_context(|| format!("failed to read video file at {path:?} for upload"))?;
+            .with_context(|| format!("failed to open video file at {path:?} for upload"))?;
+        let video_len = file
+            .metadata()
+            .await
+            .with_context(|| format!("failed to get metadata for video file at {path:?}"))?
+            .len();
 
         let filename = path
             .file_name()
@@ -243,8 +248,8 @@ impl CustomClient {
             .unwrap_or("video.mp4")
             .to_string();
 
-        let video_len = video_bytes.len();
-        let file_part = reqwest::multipart::Part::bytes(video_bytes)
+        let body = reqwest::Body::wrap_stream(tokio_util::io::ReaderStream::new(file));
+        let file_part = reqwest::multipart::Part::stream_with_length(body, video_len)
             .file_name(filename)
             .mime_str("video/mp4")
             .context("invalid mime type for video")?;

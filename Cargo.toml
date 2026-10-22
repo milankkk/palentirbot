@@ -25,12 +25,13 @@ rosu-pp-2021 = { package = "rosu-pp", version = "1.1.0" }
 rosu-pp-2022 = { package = "rosu-pp", version = "0.9.5" }
 rosu-pp-2024 = { package = "rosu-pp", version = "2.0.0" }
 rosu-pp-2025 = { package = "rosu-pp", version = "3.0.0" }
-reqwest = { version = "0.12", features = ["json", "multipart"] }
+reqwest = { version = "0.12", features = ["json", "multipart", "stream"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
 sqlx = { version = "0.8",  features = ["macros", "postgres", "runtime-tokio", "tls-rustls"]}
 time = { version = "0.3.14", features = ["macros", "parsing", "formatting"] }
 tokio = { version = "1.20", default-features = false, features = ["fs", "io-util", "macros", "process", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["io"] }
 tracing = { version = "0.1" }
 tracing-appender = { version = "0.2" }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt", "smallvec", "std", "time", "tracing-log"] }

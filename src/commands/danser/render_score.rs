@@ -10,7 +10,7 @@ use crate::{
     },
 };
 use command_macros::msg_command;
-use eyre::{Context as _, ContextCompat, Report, Result};
+use eyre::{Context as _, Report, Result};
 use osu_db::Replay;
 use rosu_v2::prelude::Score;
 use twilight_interactions::command::CommandInputData;
@@ -111,8 +111,55 @@ async fn find_score_to_render(
     }
 }
 
-#[msg_command(name = "Render score")]
+#[msg_command(name = "Render score", dm_permission = false)]
 async fn render_from_msg(ctx: Arc<Context>, mut command: InteractionCommand) -> Result<()> {
+    let guild_id = match command.guild_id {
+        Some(guild) => {
+            let (blacklisted, reason_opt) = match ctx.psql()._is_server_blacklisted(guild).await {
+                Ok(result) => result,
+                Err(err) => {
+                    tracing::warn!("{err:?}");
+                    command
+                        .error_callback(
+                            &ctx,
+                            "Failed to check server status, try again later.",
+                            false,
+                        )
+                        .await?;
+                    return Ok(());
+                }
+            };
+            if blacklisted {
+                let mut content = String::from("Seems like this server has been blacklisted.");
+                if let Some(reason) = reason_opt {
+                    use std::fmt::Write as _;
+                    let _ = write!(content, " {reason}");
+                }
+                command.error_callback(&ctx, content, false).await?;
+                return Ok(());
+            }
+
+            let is_allowed = ctx
+                .guild_settings(guild, |s| {
+                    s.input_channels.is_empty() || s.input_channels.contains(&command.channel_id)
+                })
+                .unwrap_or(true);
+
+            if !is_allowed {
+                let content = "This channel is not an allowed input channel for rendering.";
+                command.error_callback(&ctx, content, true).await?;
+                return Ok(());
+            }
+
+            guild
+        }
+        None => {
+            let content = "This command cannot be used in DMs.";
+            command.error_callback(&ctx, content, true).await?;
+            return Ok(());
+        }
+    };
+
     let input_data = command.input_data();
 
     let (user_id, beatmap_id, timestamp) = match parseembedinputdata(input_data) {
@@ -183,7 +230,7 @@ async fn render_from_msg(ctx: Arc<Context>, mut command: InteractionCommand) -> 
     let safe_user = sanitize_filename(osu_user);
     let safe_title = sanitize_filename(map_title);
     let safe_diff = sanitize_filename(diff_name);
-    path.push(format!("{safe_user} - {safe_title} [{safe_diff}].osr"));
+    path.push(format!("{}_{safe_user} - {safe_title} [{safe_diff}].osr", command.id));
 
     tokio::fs::write(&path, &replay_bytes).await.context("failed to write into replay file")?;
 
@@ -200,7 +247,6 @@ async fn render_from_msg(ctx: Arc<Context>, mut command: InteractionCommand) -> 
     let input_channel = command.channel_id;
     let user = command.user_id()?;
 
-    let guild_id = command.guild_id().context("expected guild id")?;
     let output_channel = ctx
         .guild_settings(guild_id, |server| server.output_channel)
         .flatten()
@@ -328,7 +374,7 @@ pub async fn render_score_from_embed(
     let safe_user = sanitize_filename(osu_user);
     let safe_title = sanitize_filename(map_title);
     let safe_diff = sanitize_filename(diff_name);
-    path.push(format!("{safe_user} - {safe_title} [{safe_diff}].osr"));
+    path.push(format!("{}_{}_{safe_user} - {safe_title} [{safe_diff}].osr", user, score_to_render.id));
 
     tokio::fs::write(&path, replay_bytes).await.context("failed to write replay file")?;
 

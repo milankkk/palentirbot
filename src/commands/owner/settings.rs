@@ -325,7 +325,7 @@ pub async fn handle_owner_settings_applyall(ctx: Arc<Context>, component: Intera
         }
         
         let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
-        if filename == "default.json" {
+        if filename == "default.json" || filename == "credentials.json" {
             continue;
         }
 

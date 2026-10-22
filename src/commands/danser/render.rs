@@ -147,7 +147,8 @@ pub async fn slash_render(ctx: Arc<Context>, mut command: InteractionCommand) ->
 
     let config = BotConfig::get();
     let mut replay_file = config.paths.downloads();
-    replay_file.push(attachment.filename);
+    let safe_filename = crate::commands::danser::render_score::sanitize_filename(&attachment.filename);
+    replay_file.push(format!("{}_{safe_filename}", command.id));
 
     let mut file = match File::create(&replay_file).await {
         Ok(file) => file,

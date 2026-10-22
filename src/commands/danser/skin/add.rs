@@ -20,6 +20,20 @@ use crate::{
 
 use super::SkinAdd;
 
+fn is_private_or_local_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || v4.is_documentation()
+        }
+        std::net::IpAddr::V6(v6) => v6.is_loopback() || v6.is_unspecified(),
+    }
+}
+
 pub async fn add(
     ctx: Arc<TwilightContext>,
     command: InteractionCommand,
@@ -54,6 +68,10 @@ pub async fn add(
                     return Ok(());
                 }
             };
+            let mut filename = crate::commands::danser::render_score::sanitize_filename(&filename);
+            if filename.is_empty() {
+                filename = "skin".to_string();
+            }
             let builder = MessageBuilder::new().embed("Downloading...");
             command.callback(&ctx, builder, false).await?;
             let bytes = match ctx.client().get_discord_attachment(&skin).await {
@@ -90,14 +108,17 @@ pub async fn add(
 
             if let Some(host) = parsed.host_str() {
                 let h = host.to_ascii_lowercase();
-                if h == "localhost"
-                    || h == "127.0.0.1"
-                    || h == "0.0.0.0"
-                    || h == "::1"
-                    || h.starts_with("192.168.")
-                    || h.starts_with("10.")
-                    || h.starts_with("172.")
-                {
+                let is_blocked = if h == "localhost" {
+                    true
+                } else if let Ok(ip) = h.parse::<std::net::IpAddr>() {
+                    is_private_or_local_ip(ip)
+                } else if let Ok(mut addrs) = tokio::net::lookup_host(format!("{h}:443")).await {
+                    addrs.any(|addr| is_private_or_local_ip(addr.ip()))
+                } else {
+                    false
+                };
+
+                if is_blocked {
                     command
                         .error_callback(
                             &ctx,
@@ -120,12 +141,20 @@ pub async fn add(
                 }
             };
 
-            let filename = url
+            let raw_filename = url
                 .split('/')
                 .last()
                 .unwrap_or("skin")
-                .trim_end_matches(".osk")
-                .to_string();
+                .trim_end_matches(".osk");
+            let decoded_filename = if let Some(pos) = raw_filename.find('?') {
+                &raw_filename[..pos]
+            } else {
+                raw_filename
+            };
+            let mut filename = crate::commands::danser::render_score::sanitize_filename(decoded_filename);
+            if filename.is_empty() {
+                filename = "skin".to_string();
+            }
 
             (bytes, filename)
         }

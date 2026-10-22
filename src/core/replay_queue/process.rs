@@ -834,16 +834,13 @@ async fn calc_single_latest_pp(
             cmd.arg("--goods").arg(replay.count_100.to_string());
             cmd.arg("--mehs").arg(replay.count_50.to_string());
             cmd.arg("--misses").arg("0");
-            if !is_lazer {
-                cmd.arg("-l").arg(replay.score.to_string());
-            }
         }
         SimulateMode::Actual => {
             cmd.arg("--combo").arg(replay.max_combo.to_string());
             cmd.arg("--goods").arg(replay.count_100.to_string());
             cmd.arg("--mehs").arg(replay.count_50.to_string());
             cmd.arg("--misses").arg(replay.count_miss.to_string());
-            if !is_lazer {
+            if !is_lazer && replay.score > 0 {
                 cmd.arg("-l").arg(replay.score.to_string());
             }
         }
@@ -1012,7 +1009,7 @@ async fn create_title(
         .combo(replay.max_combo as u32)
         .lazer(is_lazer);
 
-    if !is_lazer {
+    if !is_lazer && replay.score > 0 {
         perf = perf.legacy_total_score(replay.score);
     }
     let pp = perf.calculate().pp();
@@ -1023,7 +1020,7 @@ async fn create_title(
         .calculate()
         .pp();
 
-    let mut nochoke_perf = rosu_pp::Performance::new(diff_attrs)
+    let nochoke_perf = rosu_pp::Performance::new(diff_attrs)
         .mods(replay.mods as u32)
         .n300((replay.count_300 + replay.count_miss) as u32)
         .n100(replay.count_100 as u32)
@@ -1032,9 +1029,6 @@ async fn create_title(
         .combo(max_possible_combo)
         .lazer(is_lazer);
 
-    if !is_lazer {
-        nochoke_perf = nochoke_perf.legacy_total_score(replay.score);
-    }
     let nochoke_pp = nochoke_perf.calculate().pp();
 
     let pp_v4 = PpTriple {

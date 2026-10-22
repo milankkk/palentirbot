@@ -16,24 +16,6 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
         return;
     }
 
-    // ── Legacy OSR attachment forwarder ──────────────────────────────────────
-    if let Some(attachment) = msg.attachments.first() {
-        if matches!(attachment.filename.split('.').last(), Some("osr")) {
-            let valid = msg
-                .guild_id
-                .map(|gid| ctx.guild_settings(gid, |s| s.input_channels.contains(&msg.channel_id)));
-            match valid {
-                Some(Some(true)) => {}
-                _ => {
-                    let content = "Hey! Looks like you tried to send a replay \
-                        — use `/render` as we have fully migrated to slash commands.";
-                    let _ = msg.error(&ctx, content).await;
-                    return;
-                }
-            }
-        }
-    }
-
     // ── Resolve per-guild prefix ─────────────────────────────────────────────
     let prefix = msg
         .guild_id
@@ -181,7 +163,8 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
                 // Save to disk
                 let config = crate::core::BotConfig::get();
                 let mut replay_file = config.paths.downloads();
-                replay_file.push(&attachment.filename);
+                let safe_filename = crate::commands::danser::render_score::sanitize_filename(&attachment.filename);
+                replay_file.push(format!("{}_{safe_filename}", msg.id));
                 use tokio::io::AsyncWriteExt as _;
                 match tokio::fs::File::create(&replay_file).await {
                     Ok(mut f) => {
@@ -234,9 +217,8 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
 
                 if was_empty {
                     let ctx_clone = Arc::clone(&ctx);
-                    let out_channel = msg.channel_id; // Copy the ID to move into the task
                     tokio::spawn(async move {
-                        let _ = send_queue_status(ctx_clone, out_channel).await;
+                        let _ = send_queue_status(ctx_clone, output_channel).await;
                     });
                 }
             } else if let Some(replied) = msg.referenced_message.as_deref() {
@@ -254,6 +236,16 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
                                 "This channel is not an allowed input channel for rendering.",
                             )
                             .await;
+                        return;
+                    }
+
+                    if let Ok((true, reason)) = ctx.psql()._is_server_blacklisted(guild_id).await {
+                        let mut c = String::from("This server has been blacklisted.");
+                        if let Some(r) = reason {
+                            c.push(' ');
+                            c.push_str(&r);
+                        }
+                        let _ = msg.error(&ctx, c).await;
                         return;
                     }
                 }
