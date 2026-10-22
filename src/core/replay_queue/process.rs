@@ -414,8 +414,9 @@ async fn process_single_replay(
         .await
         .map(|m| m.len())
         .unwrap_or(0);
-    let wait_secs = calculate_warmup_delay_secs(file_size_bytes);
-    warn!("Wait time for dc cache: {}", wait_secs);
+    let upload_mbps = ctx.client().upload_speed_mbps();
+    let wait_secs = calculate_warmup_delay_secs(file_size_bytes, upload_mbps);
+    warn!("Wait time for dc cache: {}s (calculated at {:.1} Mbps)", wait_secs, upload_mbps);
 
     let mut remaining = wait_secs;
     while remaining > 0 {
@@ -1302,15 +1303,15 @@ async fn find_beatmap_osu_file(mapset_id: u32, map_id: u32, version: &str) -> Re
     eyre::bail!("no matching .osu file found in {items_dir:?} for map_id {map_id} ({version})")
 }
 
-fn calculate_warmup_delay_secs(file_size_bytes: u64) -> u64 {
-    const UPLOAD_MBPS: f64 = 70.0;
-    const EFFICIENCY: f64 = 0.9;
+fn calculate_warmup_delay_secs(file_size_bytes: u64, upload_mbps: f64) -> u64 {
+    const EFFICIENCY: f64 = 0.85;
     const FRACTION: f64 = 0.90;
-    const MIN_WAIT_SECS: f64 = 1.0;
-    const EXTRA_BUFFER_SECS: f64 = 5.0;
-    const MAX_WAIT_SECS: f64 = 45.0;
+    const MIN_WAIT_SECS: f64 = 2.0;
+    const EXTRA_BUFFER_SECS: f64 = 4.0;
+    const MAX_WAIT_SECS: f64 = 60.0;
 
-    let bytes_per_sec = (UPLOAD_MBPS * 1_000_000.0 / 8.0) * EFFICIENCY;
+    let effective_mbps = upload_mbps.max(1.0);
+    let bytes_per_sec = (effective_mbps * 1_000_000.0 / 8.0) * EFFICIENCY;
     let full_transfer_secs = file_size_bytes as f64 / bytes_per_sec;
     let wait_secs = (full_transfer_secs * FRACTION) + EXTRA_BUFFER_SECS;
 

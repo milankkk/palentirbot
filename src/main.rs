@@ -67,6 +67,11 @@ async fn async_main() -> Result<()> {
 
     ReplayQueue::process(Arc::clone(&ctx));
 
+    let ctx_bandwidth = Arc::clone(&ctx);
+    tokio::spawn(async move {
+        ctx_bandwidth.client().measure_bandwidth().await;
+    });
+
     tokio::select! {
         _ = event_loop(Arc::clone(&ctx), shards) => error!("Event loop ended"),
         res = signal::ctrl_c() => if let Err(err) = res.context("error while awaiting ctrl+c") {

@@ -1,4 +1,7 @@
+use std::ffi::OsStr;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+use tokio::time::Duration;
 
 use crate::core::BotConfig;
 use bytes::Bytes;
@@ -6,8 +9,6 @@ use eyre::{bail, ensure, Context as _, Result};
 use leaky_bucket_lite::LeakyBucket;
 use reqwest::Client;
 use serde::Deserialize;
-use std::ffi::OsStr;
-use tokio::time::Duration;
 use twilight_model::{
     channel::Attachment,
     id::{marker::UserMarker, Id},
@@ -30,6 +31,7 @@ pub struct CustomClient {
     client: Client,
     ratelimiters: [LeakyBucket; 6],
     upload: UploadData,
+    upload_speed_bits: AtomicU64,
 }
 
 struct UploadData {
@@ -73,11 +75,69 @@ impl CustomClient {
             ratelimiter(1), // ShishaMezo
         ];
 
+        let default_speed: f64 = std::env::var("UPLOAD_MBPS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(70.0);
+
         Self {
             client,
             ratelimiters,
             upload: UploadData::from(BotConfig::get()),
+            upload_speed_bits: AtomicU64::new(default_speed.to_bits()),
         }
+    }
+
+    pub fn upload_speed_mbps(&self) -> f64 {
+        f64::from_bits(self.upload_speed_bits.load(Ordering::Relaxed))
+    }
+
+    pub fn set_upload_speed_mbps(&self, mbps: f64) {
+        let clamped = mbps.clamp(1.0, 10000.0);
+        self.upload_speed_bits.store(clamped.to_bits(), Ordering::Relaxed);
+    }
+
+    pub fn update_upload_speed(&self, measured_mbps: f64) {
+        let current = self.upload_speed_mbps();
+        let updated = (current * 0.7) + (measured_mbps * 0.3);
+        self.set_upload_speed_mbps(updated);
+    }
+
+    pub async fn measure_bandwidth(&self) -> Option<f64> {
+        if let Ok(val) = std::env::var("UPLOAD_MBPS") {
+            if let Ok(fixed) = val.parse::<f64>() {
+                tracing::info!("Using manually configured UPLOAD_MBPS: {:.2} Mbps", fixed);
+                self.set_upload_speed_mbps(fixed);
+                return Some(fixed);
+            }
+        }
+
+        tracing::info!("Measuring outbound upload speed for Discord caching...");
+        const TEST_PAYLOAD_SIZE: usize = 2 * 1024 * 1024;
+        let payload = vec![0u8; TEST_PAYLOAD_SIZE];
+        let start = std::time::Instant::now();
+        let res = self
+            .client
+            .post("https://speed.cloudflare.com/__up")
+            .body(payload)
+            .timeout(Duration::from_secs(8))
+            .send()
+            .await;
+
+        match res {
+            Ok(r) if r.status().is_success() => {
+                let elapsed = start.elapsed().as_secs_f64();
+                if elapsed > 0.05 {
+                    let mbps = (TEST_PAYLOAD_SIZE as f64 * 8.0) / (elapsed * 1_000_000.0);
+                    tracing::info!("Measured outbound upload bandwidth: {:.2} Mbps", mbps);
+                    self.set_upload_speed_mbps(mbps);
+                    return Some(mbps);
+                }
+            }
+            Ok(r) => tracing::warn!("Speedtest endpoint returned HTTP status {}", r.status()),
+            Err(e) => tracing::warn!("Could not measure upload bandwidth against benchmark endpoint: {e}"),
+        }
+        None
     }
 
     async fn ratelimit(&self, site: Site) {
@@ -183,6 +243,7 @@ impl CustomClient {
             .unwrap_or("video.mp4")
             .to_string();
 
+        let video_len = video_bytes.len();
         let file_part = reqwest::multipart::Part::bytes(video_bytes)
             .file_name(filename)
             .mime_str("video/mp4")
@@ -198,6 +259,7 @@ impl CustomClient {
 
         self.ratelimit(Site::ShishaMezo).await;
 
+        let upload_start = std::time::Instant::now();
         let response = self
             .client
             .post(self.upload.url)
@@ -205,6 +267,19 @@ impl CustomClient {
             .send()
             .await
             .context("failed to receive POST response for video upload")?;
+        let upload_duration = upload_start.elapsed();
+
+        if !self.upload.url.contains("localhost")
+            && !self.upload.url.contains("127.0.0.1")
+            && !self.upload.url.contains("fileserver")
+        {
+            let elapsed = upload_duration.as_secs_f64();
+            if elapsed > 0.2 {
+                let mbps = (video_len as f64 * 8.0) / (elapsed * 1_000_000.0);
+                tracing::debug!("Measured remote upload throughput: {:.2} Mbps", mbps);
+                self.update_upload_speed(mbps);
+            }
+        }
 
         let status = response.status();
         if !status.is_success() {

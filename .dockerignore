@@ -1,0 +1,7 @@
+target
+data
+logs
+.git
+.env
+.env.*
+Caddyfile.example

@@ -1,0 +1,136 @@
+services:
+  # ---------------------------------------------------------------------------
+  # 1. Main Discord Bot + Danser Renderer
+  # ---------------------------------------------------------------------------
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: palentirbot
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      fileserver:
+        condition: service_started
+      ollama:
+        condition: service_started
+    env_file:
+      - .env
+    environment:
+      # Override host-specific URLs/paths for container networking
+      DATABASE_URL: postgres://${POSTGRES_USER:-palentirbot}:${POSTGRES_PASSWORD:-palentirbot_pass}@postgres:5432/${POSTGRES_DB:-palentirbot}
+      # Linked automatically with fileserver service
+      UPLOAD_URL: http://fileserver:${UPLOAD_PORT:-5555}/upload
+      UPLOAD_SECRET: ${UPLOAD_SECRET:-palentir_replay_secret_key}
+      UPLOAD_MBPS: ${UPLOAD_MBPS:-auto}
+      OLLAMA_URL: http://ollama:11434
+      DANSER_PATH: /app/data
+      FOLDERS_PATH: /app/data
+      AI_SYSTEM_PROMPT: /app/prompt.txt
+    volumes:
+      # Persistent bot data (Danser binaries, settings, Downloads, Replays, Skins, Songs)
+      - ./data:/app/data
+      # Bot logs
+      - ./logs:/app/logs
+      # AI System Prompt file
+      - ./prompt.txt:/app/prompt.txt:ro
+    # Optional: Uncomment the deploy block below if you have an NVIDIA GPU and
+    # nvidia-container-toolkit installed for hardware-accelerated NVENC rendering in danser.
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu, video, compute, utility]
+
+  # ---------------------------------------------------------------------------
+  # 2. PostgreSQL Database (Server & User Blacklists)
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: palentirbot-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-palentirbot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-palentirbot_pass}
+      POSTGRES_DB: ${POSTGRES_DB:-palentirbot}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Automatically run base schema migration on first startup
+      - ./migrations/20221130212623_base_schemas.up.sql:/docker-entrypoint-initdb.d/01-base_schemas.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-palentirbot} -d ${POSTGRES_DB:-palentirbot}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # 3. Replay Upload Receiver (fileserver/upload.py)
+  # ---------------------------------------------------------------------------
+  fileserver:
+    image: python:3.12-slim
+    container_name: palentirbot-fileserver
+    restart: unless-stopped
+    working_dir: /app
+    environment:
+      UPLOAD_DIR: /uploads
+      # Linked automatically with bot service
+      UPLOAD_SECRET: ${UPLOAD_SECRET:-palentir_replay_secret_key}
+      UPLOAD_PORT: ${UPLOAD_PORT:-5555}
+      BASE_URL: ${PUBLIC_REPLAY_BASE_URL:-http://localhost:${CADDY_HTTP_PORT:-8085}}
+    volumes:
+      - ./fileserver:/app:ro
+      - uploaded_replays:/uploads
+    command: >
+      sh -c "pip install --no-cache-dir flask gunicorn werkzeug &&
+             gunicorn -w 2 -b 0.0.0.0:${UPLOAD_PORT:-5555} --timeout 120 upload:app"
+    expose:
+      - "${UPLOAD_PORT:-5555}"
+
+  # ---------------------------------------------------------------------------
+  # 4. Caddy Web Server (Serves rendered MP4s to Discord embeds)
+  # ---------------------------------------------------------------------------
+  caddy:
+    image: caddy:2-alpine
+    container_name: palentirbot-caddy
+    restart: unless-stopped
+    ports:
+      # Port 8085 default prevents conflict with local services on 8080
+      - "${CADDY_HTTP_PORT:-8085}:80"
+    environment:
+      CADDY_SITE_ADDRESS: ${CADDY_SITE_ADDRESS:-:80}
+      UPLOAD_PORT: ${UPLOAD_PORT:-5555}
+    volumes:
+      - uploaded_replays:/srv/replays:ro
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+  # ---------------------------------------------------------------------------
+  # 5. Ollama (Local LLM backend for /ask, /aicontext, /aiclear)
+  # ---------------------------------------------------------------------------
+  ollama:
+    image: ollama/ollama:latest
+    container_name: palentirbot-ollama
+    restart: unless-stopped
+    volumes:
+      - ollama_data:/root/.ollama
+    expose:
+      - "11434"
+    # Optional: Uncomment to pass NVIDIA GPU to Ollama
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+volumes:
+  pgdata:
+  uploaded_replays:
+  caddy_data:
+  caddy_config:
+  ollama_data:

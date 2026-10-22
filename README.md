@@ -15,7 +15,59 @@ A modern revival of [shishabot](https://github.com/mezodev0/shishabot) using upd
 
 ## Setup & Installation
 
-Follow these instructions to host the bot yourself. First necessary instructions can be found in the [original shishabot repository](https://github.com/mezodev0/shishabot).
+You can run the bot using **Docker / Podman** (recommended for full orchestration including PostgreSQL, Caddy, Fileserver, and Ollama) or **Bare Metal**.
+
+---
+
+### Method A: Docker & Podman Compose (Recommended)
+
+The provided `docker-compose.yml` (and `podman-compose.yml`) orchestrates all required services:
+- **`bot`**: The Rust Discord bot + danser-go + ffmpeg + xvfb (for headless rendering).
+- **`postgres`**: PostgreSQL 16 with automatic schema initialization from migrations.
+- **`fileserver`**: Lightweight upload receiver for rendered replay MP4s.
+- **`caddy`**: Reverse proxy and static file server serving Discord-compatible video embeds and player.
+- **`ollama`**: Local LLM backend for `/ask`, `/aicontext`, and `/aiclear`.
+
+#### 1. Configure `.env`
+Copy the template and fill in your Discord & osu! API keys and hosting URL:
+```bash
+cp .env.example .env
+```
+> **Note:** You do not need to configure PostgreSQL or the upload server—they are pre-configured with secure linked defaults out of the box.
+
+#### 2. Danser Setup
+**Automatic:** If `./data/` does not yet contain Danser, the container automatically downloads the latest release, configures the headless CLI binary, and generates default settings on first startup.
+
+*(Optional)* You can also run the bootstrap script manually:
+```bash
+./scripts/setup_danser.sh ./data
+```
+
+#### 3. Start the Stack
+
+**With Docker Compose:**
+```bash
+docker compose up -d --build
+```
+
+**With Podman:**
+```bash
+podman compose up -d --build
+```
+
+#### 4. (Optional) Pull an Ollama model
+If you plan to use AI features with local Ollama:
+```bash
+docker exec -it palentirbot-ollama ollama pull huihui_ai/qwen3-abliterated:4b
+# or with podman:
+podman exec -it palentirbot-ollama ollama pull huihui_ai/qwen3-abliterated:4b
+```
+
+---
+
+### Method B: Manual / Bare Metal Installation
+
+Follow these instructions to host the bot directly on your host machine:
 
 ### 1. Clone the Repository
 ```bash
