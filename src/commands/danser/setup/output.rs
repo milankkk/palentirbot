@@ -22,7 +22,7 @@ pub async fn output(
         let guild_id = command.guild_id.unwrap();
         let SetupOutput { channel } = args;
 
-        let upsert_res = ctx.upsert_guild_settings(guild_id, |s| s.output_channel = Some(channel));
+        let upsert_res = ctx.upsert_guild_settings(guild_id, |s| s.output_channel = channel);
 
         if let Err(err) = upsert_res {
             let content = "Failed to update server settings";
@@ -31,7 +31,10 @@ pub async fn output(
             return Err(err);
         }
 
-        let content = format!("Successfully specified <#{channel}> as output");
+        let content = match channel {
+            Some(ch) => format!("Successfully specified <#{ch}> as output"),
+            None => "Successfully reset output channel. Replays will now be sent in the channel where they are requested.".to_owned(),
+        };
         let builder = MessageBuilder::new().embed(content);
         command.callback(&ctx, builder, false).await?;
     } else {

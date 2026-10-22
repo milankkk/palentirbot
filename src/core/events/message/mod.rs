@@ -123,11 +123,8 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
                     }
                 }
 
-                // Resolve output channel
-                let output_channel = msg
-                    .guild_id
-                    .and_then(|gid| ctx.guild_settings(gid, |server| server.output_channel).flatten())
-                    .unwrap_or(msg.channel_id);
+                // Always respond in the channel where the message was sent
+                let output_channel = msg.channel_id;
 
                 // Parse optional args: start=MM:SS end=MM:SS pitch=1.5
                 let mut start_secs: u32 = 0;
@@ -261,10 +258,8 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
                     }
                 }
 
-                let output_channel = msg
-                    .guild_id
-                    .and_then(|gid| ctx.guild_settings(gid, |server| server.output_channel).flatten())
-                    .unwrap_or(msg.channel_id);
+                // Always respond in the channel where the message was sent
+                let output_channel = msg.channel_id;
 
                 let was_empty = ctx.replay_queue.queue.lock().await.is_empty();
 

@@ -57,10 +57,10 @@ pub enum InputAction {
 
 #[derive(CommandModel, CreateCommand)]
 #[command(name = "output")]
-/// Configure the the channel in which the replay will be sent
+/// Configure the channel in which the replay will be sent (omit to reset)
 pub struct SetupOutput {
-    /// The channel you want as the output channel
-    channel: Id<ChannelMarker>,
+    /// The channel you want as the output channel (leave empty to reset to requesting channel)
+    pub channel: Option<Id<ChannelMarker>>,
 }
 
 #[derive(CommandModel, CreateCommand)]
