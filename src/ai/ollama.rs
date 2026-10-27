@@ -13,7 +13,7 @@ use super::search::{
 };
 use super::{AiMessage, AiMode};
 
-pub const DEFAULT_MODEL: &str = "hf.co/Abiray/Qwen3.5-9B-abliterated-GGUF:Q4_K_M";
+pub const DEFAULT_MODEL: &str = "huihui_ai/deepseek-r1-abliterated:8b-0528-qwen3";
 pub const DEFAULT_NUM_CTX: u32 = 40_960;
 pub const DEFAULT_REPEAT_PENALTY: f32 = 1.15;
 pub const DEFAULT_REPEAT_LAST_N: i32 = 256;

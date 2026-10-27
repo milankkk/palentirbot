@@ -141,22 +141,47 @@ impl SearxClient {
     }
 }
 
-/// Check if an IP address is private, loopback, link-local, unspecified, broadcast, or documentation.
+/// Check if an IPv4 address is private, loopback, link-local, unspecified, broadcast, documentation, or reserved.
+pub fn is_private_or_local_ip_v4(v4: std::net::Ipv4Addr) -> bool {
+    let octets = v4.octets();
+    v4.is_loopback()
+        || v4.is_private()
+        || v4.is_link_local()
+        || v4.is_unspecified()
+        || v4.is_broadcast()
+        || v4.is_documentation()
+        // 0.0.0.0/8 (Current network)
+        || octets[0] == 0
+        // 100.64.0.0/10 (Carrier-Grade NAT / Shared address space)
+        || (octets[0] == 100 && (octets[1] & 0xc0) == 64)
+        // 192.0.0.0/24 (IETF Protocol Assignments)
+        || (octets[0] == 192 && octets[1] == 0 && octets[2] == 0)
+        // 198.18.0.0/15 (Network benchmark testing)
+        || (octets[0] == 198 && (octets[1] & 0xfe) == 18)
+        // 240.0.0.0/4 (Reserved for future use)
+        || (octets[0] >= 240)
+}
+
+/// Check if an IP address is private, loopback, link-local, unspecified, broadcast, documentation, or reserved.
 pub fn is_private_or_local_ip(ip: std::net::IpAddr) -> bool {
     match ip {
-        std::net::IpAddr::V4(v4) => {
-            v4.is_loopback()
-                || v4.is_private()
-                || v4.is_link_local()
-                || v4.is_unspecified()
-                || v4.is_broadcast()
-                || v4.is_documentation()
+        std::net::IpAddr::V4(v4) => is_private_or_local_ip_v4(v4),
+        std::net::IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || v6.is_unspecified()
+                // IPv4-mapped IPv6 (::ffff:x.x.x.x)
+                || v6.to_ipv4_mapped().map(is_private_or_local_ip_v4).unwrap_or(false)
+                // IPv6 Unique Local Address (ULA) fc00::/7 (fc00:: to fdff::)
+                || (v6.segments()[0] & 0xfe00) == 0xfc00
+                // IPv6 Link-Local Unicast fe80::/10
+                || (v6.segments()[0] & 0xffc0) == 0xfe80
+                // IPv6 Documentation 2001:db8::/32
+                || (v6.segments()[0] == 0x2001 && v6.segments()[1] == 0x0db8)
         }
-        std::net::IpAddr::V6(v6) => v6.is_loopback() || v6.is_unspecified(),
     }
 }
 
-/// Validate a URL against SSRF attacks (rejecting non-http/https, localhost, and private/local IPs).
+/// Validate a URL against SSRF attacks (rejecting non-http/https, localhost, and private/local IPs/domains).
 pub async fn validate_url_for_ssrf(url_str: &str) -> Result<reqwest::Url> {
     let raw = url_str
         .trim()
@@ -178,22 +203,39 @@ pub async fn validate_url_for_ssrf(url_str: &str) -> Result<reqwest::Url> {
         .ok_or_else(|| eyre::eyre!("URL has no host"))?;
     let host_lower = host_str.to_ascii_lowercase();
 
-    if host_lower == "localhost" {
-        eyre::bail!("Localhost is not allowed");
+    // Block localhost and common local/internal domain extensions
+    if host_lower == "localhost"
+        || host_lower.ends_with(".localhost")
+        || host_lower.ends_with(".local")
+        || host_lower.ends_with(".internal")
+        || host_lower.ends_with(".lan")
+        || host_lower.ends_with(".home")
+        || host_lower.ends_with(".localdomain")
+        || host_lower.ends_with(".corp")
+        || host_lower.ends_with(".onion")
+    {
+        eyre::bail!("Local and internal hostnames are not allowed");
     }
 
     if let Ok(ip) = host_lower.parse::<std::net::IpAddr>() {
         if is_private_or_local_ip(ip) {
-            eyre::bail!("Private or local IP addresses are not allowed");
+            eyre::bail!("Private or local IP addresses are not allowed: {ip}");
         }
     } else {
         let port = parsed.port_or_known_default().unwrap_or(80);
-        if let Ok(addrs) = tokio::net::lookup_host(format!("{host_lower}:{port}")).await {
-            for addr in addrs {
-                if is_private_or_local_ip(addr.ip()) {
-                    eyre::bail!("Host resolves to private or local IP address");
-                }
+        let addrs = tokio::net::lookup_host(format!("{host_lower}:{port}"))
+            .await
+            .context("failed to resolve host for security check")?;
+
+        let mut has_addrs = false;
+        for addr in addrs {
+            has_addrs = true;
+            if is_private_or_local_ip(addr.ip()) {
+                eyre::bail!("Host resolves to a private or local IP address: {}", addr.ip());
             }
+        }
+        if !has_addrs {
+            eyre::bail!("Host did not resolve to any IP address");
         }
     }
 
@@ -820,18 +862,62 @@ mod tests {
         assert!(is_private_or_local_ip(IpAddr::V4(Ipv4Addr::new(172, 16, 0, 1))));
         assert!(is_private_or_local_ip(IpAddr::V4(Ipv4Addr::new(169, 254, 1, 1))));
         assert!(is_private_or_local_ip(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0))));
+        // CGNAT (100.64.0.0/10)
+        assert!(is_private_or_local_ip(IpAddr::V4(Ipv4Addr::new(100, 64, 0, 1))));
+        assert!(is_private_or_local_ip(IpAddr::V4(Ipv4Addr::new(100, 127, 255, 254))));
+        // IETF protocol assignments (192.0.0.0/24)
+        assert!(is_private_or_local_ip(IpAddr::V4(Ipv4Addr::new(192, 0, 0, 1))));
+        // Network benchmark (198.18.0.0/15)
+        assert!(is_private_or_local_ip(IpAddr::V4(Ipv4Addr::new(198, 18, 0, 1))));
+        assert!(is_private_or_local_ip(IpAddr::V4(Ipv4Addr::new(198, 19, 255, 254))));
+        // Reserved (240.0.0.0/4)
+        assert!(is_private_or_local_ip(IpAddr::V4(Ipv4Addr::new(240, 0, 0, 1))));
+
         assert!(is_private_or_local_ip(IpAddr::V6(Ipv6Addr::LOCALHOST)));
         assert!(is_private_or_local_ip(IpAddr::V6(Ipv6Addr::UNSPECIFIED)));
+
+        // IPv6 ULA (fc00::/7)
+        let ula: Ipv6Addr = "fc00::1".parse().unwrap();
+        assert!(is_private_or_local_ip(IpAddr::V6(ula)));
+        let ula2: Ipv6Addr = "fd12:3456:789a::1".parse().unwrap();
+        assert!(is_private_or_local_ip(IpAddr::V6(ula2)));
+
+        // IPv6 Link-Local (fe80::/10)
+        let link_local: Ipv6Addr = "fe80::1".parse().unwrap();
+        assert!(is_private_or_local_ip(IpAddr::V6(link_local)));
+
+        // IPv6 Documentation (2001:db8::/32)
+        let doc: Ipv6Addr = "2001:db8::1".parse().unwrap();
+        assert!(is_private_or_local_ip(IpAddr::V6(doc)));
+
+        // IPv4-mapped IPv6
+        let mapped_loopback: Ipv6Addr = "::ffff:127.0.0.1".parse().unwrap();
+        assert!(is_private_or_local_ip(IpAddr::V6(mapped_loopback)));
+        let mapped_private: Ipv6Addr = "::ffff:192.168.1.1".parse().unwrap();
+        assert!(is_private_or_local_ip(IpAddr::V6(mapped_private)));
+        let mapped_public: Ipv6Addr = "::ffff:8.8.8.8".parse().unwrap();
+        assert!(!is_private_or_local_ip(IpAddr::V6(mapped_public)));
 
         // Public IP should not be rejected
         assert!(!is_private_or_local_ip(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))));
         assert!(!is_private_or_local_ip(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))));
+        let public_v6: Ipv6Addr = "2606:4700:4700::1111".parse().unwrap();
+        assert!(!is_private_or_local_ip(IpAddr::V6(public_v6)));
     }
 
     #[tokio::test]
     async fn test_validate_url_ssrf() {
         assert!(validate_url_for_ssrf("http://127.0.0.1/test").await.is_err());
         assert!(validate_url_for_ssrf("http://localhost:8080/evil").await.is_err());
+        assert!(validate_url_for_ssrf("http://router.local/admin").await.is_err());
+        assert!(validate_url_for_ssrf("http://internal.lan/").await.is_err());
+        assert!(validate_url_for_ssrf("http://service.internal/").await.is_err());
+        assert!(validate_url_for_ssrf("http://myhost.home/").await.is_err());
+        assert!(validate_url_for_ssrf("http://server.localdomain/").await.is_err());
+        assert!(validate_url_for_ssrf("http://100.64.0.1:8080/").await.is_err());
+        assert!(validate_url_for_ssrf("http://[fe80::1]/").await.is_err());
+        assert!(validate_url_for_ssrf("http://[fc00::1]/").await.is_err());
+        assert!(validate_url_for_ssrf("http://[::ffff:127.0.0.1]/").await.is_err());
         assert!(validate_url_for_ssrf("file:///etc/passwd").await.is_err());
         assert!(validate_url_for_ssrf("ftp://example.com/test").await.is_err());
         assert!(validate_url_for_ssrf("duckduckgo.com").await.is_ok());
