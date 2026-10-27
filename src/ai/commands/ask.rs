@@ -24,10 +24,6 @@ use crate::{
     },
 };
 
-/// Default number of previous Discord messages sent to the AI (kept focused to prevent context pollution).
-const DEFAULT_HISTORY_LIMIT: u16 = 15;
-/// Hard ceiling for history messages.
-const MAX_HISTORY_LIMIT: u16 = 30;
 /// Maximum number of characters taken from a single historical message.
 const HISTORY_MESSAGE_CHAR_LIMIT: usize = 1_500;
 /// Keep some room below Discord's 2,000-character message limit.
@@ -323,20 +319,6 @@ pub async fn handle_prefix_ask(
         .map(|r| Some(r.author.id) == bot_id)
         .unwrap_or(false);
 
-    if let Some(ref replied) = msg.referenced_message {
-        if !is_reply_to_ai {
-            let ref_author = sanitize_llm_text(&replied.author.name);
-            let ref_content = sanitize_llm_text(&truncate_history_message(&replied.content));
-            if !ref_content.is_empty() {
-                if question.is_empty() {
-                    question = format!("What do you think about what {ref_author} said: \"{ref_content}\"?");
-                } else {
-                    question = format!("(In reply to {ref_author}: \"{ref_content}\")\n{question}");
-                }
-            }
-        }
-    }
-
     if question.is_empty() {
         if is_reply_to_ai {
             question = "What do you think about what you said?".to_string();
@@ -462,9 +444,9 @@ pub async fn execute_ai_question(
     channel_id: Id<ChannelMarker>,
     guild_id: Option<Id<GuildMarker>>,
     _user_id: Id<UserMarker>,
-    username: &str,
+    _username: &str,
     question: &str,
-    exclude_message_id: Option<Id<MessageMarker>>,
+    _exclude_message_id: Option<Id<MessageMarker>>,
     referenced_msg: Option<&Message>,
     mode: AiMode,
     status_sender: mpsc::Sender<AiStatusUpdate>,
@@ -476,89 +458,33 @@ pub async fn execute_ai_question(
         .current_user(|user| user.id)
         .expect("missing CurrentUser in cache");
 
-    let history = get_history(ctx, channel_id, guild_id, exclude_message_id).await?;
-
-    let server_name = guild_id
-        .and_then(|gid| ctx.cache.guild(gid, |g| g.name().to_string()).ok())
-        .unwrap_or_else(|| "Direct Message".to_string());
-
-    let channel_name = ctx
-        .cache
-        .channel(channel_id, |c| c.name.clone())
-        .ok()
-        .flatten()
-        .unwrap_or_else(|| "chat".to_string());
-
-    let location_header = format!(
-        "[Discord Context: Server: \"{server_name}\" | Channel: \"#{channel_name}\"]\nMaintain conversation context strictly within this server and channel."
-    );
-
     let raw_prompt = ai.get_prompt().await;
     let system_prompt = match mode {
         AiMode::Fast => format!(
-            "{raw_prompt}\n\n{location_header}\n\n[Mode: Fast Mode]\nBe direct and decisive. If external facts or news are needed, immediately emit <search>exact user keywords</search> without hesitation."
+            "{raw_prompt}\n\n[Mode: Fast Mode]\nBe direct, concise, and to the point. Reflect the user's question directly. If external facts or news are needed, immediately emit <search>exact user keywords</search> without hesitation."
         ),
         AiMode::Thinking => format!(
-            "{raw_prompt}\n\n{location_header}\n\n[Mode: Thinking Mode]\nReason thoroughly and critically inside your thoughts. Doubt your memory, search with exact user keywords, verify facts, close with </think>, and formulate your grounded response."
+            "{raw_prompt}\n\n[Mode: Thinking Mode]\nReason thoroughly and critically inside your thoughts. Doubt your memory, search with exact user keywords, verify facts, close with </think>, and formulate your grounded response."
         ),
     };
 
-    let clean_username = sanitize_llm_text(username);
     let clean_question = sanitize_llm_text(question);
 
-    let current_user_msg = format!("{clean_username}: {clean_question}");
+    let is_reply_to_ai = referenced_msg.map(|r| r.author.id == bot_id).unwrap_or(false);
 
-    let messages = if let Some(replied) = referenced_msg {
-        if replied.author.id == bot_id {
-            let mut raw_ai_text = replied.content.clone();
-            if raw_ai_text.trim().is_empty() {
-                for embed in &replied.embeds {
-                    if let Some(ref desc) = embed.description {
-                        raw_ai_text.push_str(desc);
-                        raw_ai_text.push(' ');
-                    }
-                    if let Some(ref title) = embed.title {
-                        raw_ai_text.push_str(title);
-                        raw_ai_text.push(' ');
-                    }
-                }
-            }
-            let ai_content = sanitize_llm_text(&clean_ai_response(&truncate_history_message(&raw_ai_text)));
-
-            let history_before_ai = if let Some(idx) = history.iter().position(|m| m.id == replied.id) {
-                history[..idx].to_vec()
-            } else {
-                history.into_iter().filter(|m| m.id != replied.id).collect()
-            };
-
-            let mut history_messages = convert_history(history_before_ai, bot_id);
-
-            if !ai_content.is_empty() {
-                history_messages.push(AiMessage::assistant(ai_content));
-            }
-
-            let mut msgs = Vec::with_capacity(history_messages.len() + 2);
-            msgs.push(AiMessage::system(system_prompt));
-            msgs.extend(history_messages);
-            msgs.push(AiMessage::user(format!(
-                "{clean_username} (in reply to your statement above): {clean_question}"
-            )));
-            msgs
-        } else {
-            let history_messages = convert_history(history, bot_id);
-            let mut msgs = Vec::with_capacity(history_messages.len() + 2);
-            msgs.push(AiMessage::system(system_prompt));
-            msgs.extend(history_messages);
-            msgs.push(AiMessage::user(current_user_msg));
-            msgs
-        }
-    } else {
-        let history_messages = convert_history(history, bot_id);
-        let mut msgs = Vec::with_capacity(history_messages.len() + 2);
+    let messages = if is_reply_to_ai {
+        let replied = referenced_msg.unwrap();
+        let chain = build_ai_reply_chain(ctx, channel_id, guild_id, bot_id, replied).await;
+        let mut msgs = Vec::with_capacity(chain.len() + 2);
         msgs.push(AiMessage::system(system_prompt));
-        msgs.extend(history_messages);
-        msgs.push(AiMessage::user(current_user_msg));
+        msgs.extend(chain);
+        msgs.push(AiMessage::user(clean_question));
         msgs
+    } else {
+        vec![
+            AiMessage::system(system_prompt),
+            AiMessage::user(clean_question),
+        ]
     };
 
     let safesearch_level = crate::ai::safesearch_level_for_guild(ctx, guild_id);
@@ -587,106 +513,102 @@ pub async fn execute_ai_question(
     Ok((answer, gen_res.attachment))
 }
 
-async fn get_history(
+/// Recursively builds the conversation chain for a reply to an AI message.
+/// Traces backwards up to 6 messages (3 round-trips) in the reply thread.
+async fn build_ai_reply_chain(
     ctx: &Context,
     channel_id: Id<ChannelMarker>,
     guild_id: Option<Id<GuildMarker>>,
-    exclude_message_id: Option<Id<MessageMarker>>,
-) -> Result<Vec<Message>> {
-    let limit = std::env::var("AI_HISTORY_MESSAGES")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(DEFAULT_HISTORY_LIMIT)
-        .min(MAX_HISTORY_LIMIT);
+    bot_id: Id<UserMarker>,
+    initial_replied: &Message,
+) -> Vec<AiMessage> {
+    let cutoff = if let Some(ai) = ctx.ai() {
+        ai.get_cutoff(channel_id, guild_id).await
+    } else {
+        None
+    };
 
-    let response = ctx
-        .http
-        .channel_messages(channel_id)
-        .limit(limit)
-        .await?;
+    let mut chain: Vec<AiMessage> = Vec::new();
+    let mut current_msg: Option<Message> = Some(initial_replied.clone());
+    let mut depth = 0;
+    const MAX_DEPTH: usize = 6;
 
-    let mut messages: Vec<Message> = response.model().await?;
-
-    if let Some(exclude_id) = exclude_message_id {
-        messages.retain(|msg| msg.id != exclude_id);
-    }
-
-    if let Some(ai) = ctx.ai() {
-        if let Some(cutoff) = ai.get_cutoff(channel_id, guild_id).await {
-            messages.retain(|msg| msg.timestamp.as_secs() > cutoff);
+    while let Some(msg) = current_msg {
+        if depth >= MAX_DEPTH {
+            break;
         }
+        depth += 1;
+
+        if let Some(c) = cutoff {
+            if msg.timestamp.as_secs() <= c {
+                break;
+            }
+        }
+
+        if msg.author.id == bot_id {
+            let mut raw_text = msg.content.clone();
+            if raw_text.trim().is_empty() {
+                for embed in &msg.embeds {
+                    if let Some(ref desc) = embed.description {
+                        raw_text.push_str(desc);
+                        raw_text.push(' ');
+                    }
+                    if let Some(ref title) = embed.title {
+                        raw_text.push_str(title);
+                        raw_text.push(' ');
+                    }
+                }
+            }
+            let ai_content = sanitize_llm_text(&clean_ai_response(&truncate_history_message(&raw_text)));
+            if !ai_content.is_empty() && !is_transient_status(&ai_content) {
+                chain.push(AiMessage::assistant(ai_content));
+            }
+        } else {
+            let user_content = sanitize_llm_text(&strip_command_prefix(&truncate_history_message(&msg.content)));
+            if !user_content.is_empty() && !is_non_ai_command(&msg.content) {
+                chain.push(AiMessage::user(user_content));
+            }
+        }
+
+        let parent_msg = if let Some(ref parent) = msg.referenced_message {
+            Some((**parent).clone())
+        } else if let Some(parent_id) = msg.reference.as_ref().and_then(|r| r.message_id) {
+            match ctx.http.message(channel_id, parent_id).await {
+                Ok(resp) => resp.model().await.ok(),
+                Err(_) => None,
+            }
+        } else {
+            None
+        };
+
+        current_msg = parent_msg;
     }
 
-    messages.reverse();
-    Ok(messages)
+    chain.reverse();
+    chain
 }
 
-fn convert_history(history: Vec<Message>, bot_id: Id<UserMarker>) -> Vec<AiMessage> {
-    let mut raw_messages: Vec<AiMessage> = Vec::with_capacity(history.len());
-
-    for message in history {
-        if message.content.trim().is_empty() {
-            continue;
-        }
-
-        if message.author.bot && message.author.id != bot_id {
-            continue;
-        }
-
-        let content = sanitize_llm_text(&truncate_history_message(&message.content));
-
-        if message.author.id == bot_id {
-            // Filter out system placeholders, status updates, and danser replay announcements
-            if content.starts_with("⏳ Waiting in AI queue")
-                || content.starts_with("⏳ Thinking")
-                || content.starts_with("💭 Thinking")
-                || content.starts_with("🧠 **Thinking")
-                || content.starts_with("🌐 Thinking")
-                || content.starts_with("🌐 Browsing")
-                || content.starts_with("🖼️ Thinking")
-                || content.starts_with("✍️ Thinking")
-                || content.starts_with("⚡ Generating")
-                || content.starts_with("💭 Generating")
-                || content.starts_with("⚠️ ")
-                || content.starts_with("🧹 ")
-                || content.starts_with("🏓 Pong")
-                || content.starts_with("*(blinks blankly")
-                || content.starts_with("Something went wrong while asking the AI")
-                || content.contains("replays.insertdomainname.be")
-                || content.contains("Finished rendering replay")
-                || content.contains("Started replay processing")
-            {
-                continue;
-            }
-            raw_messages.push(AiMessage::assistant(content));
-        } else {
-            // Ignore non-AI commands to prevent polluting the conversation with danser/utility spam
-            let trimmed = content.trim();
-            if is_non_ai_command(trimmed) {
-                continue;
-            }
-
-            let author_name = sanitize_llm_text(&message.author.name);
-            let cleaned = strip_command_prefix(&content);
-            if !cleaned.is_empty() {
-                raw_messages.push(AiMessage::user(format!("{author_name}: {cleaned}")));
-            }
-        }
-    }
-
-    let mut coalesced: Vec<AiMessage> = Vec::with_capacity(raw_messages.len());
-    for msg in raw_messages {
-        if let Some(last) = coalesced.last_mut() {
-            if last.role == msg.role {
-                last.content.push('\n');
-                last.content.push_str(&msg.content);
-                continue;
-            }
-        }
-        coalesced.push(msg);
-    }
-
-    coalesced
+fn is_transient_status(content: &str) -> bool {
+    content.starts_with("⏳ Waiting in AI queue")
+        || content.starts_with("⏳ Thinking")
+        || content.starts_with("💭 Thinking")
+        || content.starts_with("🧠 **Thinking")
+        || content.starts_with("🌐 Searching")
+        || content.starts_with("🌐 Thinking")
+        || content.starts_with("🌐 Browsing")
+        || content.starts_with("🖼️ Thinking")
+        || content.starts_with("🖼️ Downloading")
+        || content.starts_with("✍️ Thinking")
+        || content.starts_with("⚡ Generating")
+        || content.starts_with("💭 Generating")
+        || content.starts_with("⚠️ ")
+        || content.starts_with("🧹 ")
+        || content.starts_with("🏓 Pong")
+        || content.starts_with("*(blinks blankly")
+        || content.starts_with("Something went wrong while asking the AI")
+        || content.contains("replays.insertdomainname.be")
+        || content.contains("Finished rendering replay")
+        || content.contains("Started replay processing")
 }
 
 fn is_non_ai_command(content: &str) -> bool {
@@ -917,6 +839,16 @@ mod tests {
         assert!(!is_non_ai_command("!ask what is osu?"));
         assert!(!is_non_ai_command("!fast hello"));
         assert!(!is_non_ai_command("can you render this?"));
+    }
+
+    #[test]
+    fn test_is_transient_status() {
+        assert!(is_transient_status("⏳ Thinking (Loading model into memory...)"));
+        assert!(is_transient_status("🧠 **Thinking...** (elapsed: 3s)\n> *reasoning*"));
+        assert!(is_transient_status("🌐 Searching web (DuckDuckGo)..."));
+        assert!(is_transient_status("⚡ Generating response..."));
+        assert!(is_transient_status("*(blinks blankly... no thoughts head empty)*"));
+        assert!(!is_transient_status("osu! was created in 2007 by peppy."));
     }
 
     #[test]
