@@ -449,9 +449,6 @@ impl OllamaClient {
         F: FnMut(AiStatusUpdate) + Send,
     {
         let mut conversation = initial_messages.to_vec();
-        if mode == AiMode::Fast {
-            conversation.push(AiMessage::assistant("</think>"));
-        }
 
         let mut candidate_media_urls: Vec<String> = Vec::new();
         let mut search_rounds = 0;
@@ -497,9 +494,6 @@ impl OllamaClient {
                             conversation.push(AiMessage::user(format!(
                                 "[System Search Results]:\n{search_results_text}\nNow continue thinking and respond to the user based on these search results."
                             )));
-                            if mode == AiMode::Fast {
-                                conversation.push(AiMessage::assistant("</think>"));
-                            }
                             continue;
                         }
                     }
@@ -543,9 +537,6 @@ impl OllamaClient {
                     conversation.push(AiMessage::user(format!(
                         "[System Search Results]:\n{search_results_text}\nNow continue thinking and respond to the user based on these search results."
                     )));
-                    if mode == AiMode::Fast {
-                        conversation.push(AiMessage::assistant("</think>"));
-                    }
                 }
             }
         };
@@ -678,9 +669,7 @@ impl OllamaClient {
 
     /// Non-streaming fast ask fallback (Fast mode).
     pub async fn ask_fast(&self, channel_id: Id<ChannelMarker>, messages: &[AiMessage]) -> Result<String> {
-        let mut msgs = messages.to_vec();
-        msgs.push(AiMessage::assistant("</think>"));
-        match self.ask_stream(channel_id, &msgs, false, AiMode::Fast, |_| {}).await? {
+        match self.ask_stream(channel_id, messages, false, AiMode::Fast, |_| {}).await? {
             StreamResult::Completed(s) => Ok(s),
             StreamResult::SearchIntercepted {
                 partial_thinking,

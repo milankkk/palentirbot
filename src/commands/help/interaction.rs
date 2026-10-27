@@ -36,10 +36,32 @@ pub async fn slash_help(ctx: Arc<Context>, command: InteractionCommand) -> Resul
         which allows you render osu! replays and upload them"
     );
 
+    let prefix = command
+        .guild_id
+        .and_then(|gid| ctx.guild_settings(gid, |s| s.effective_prefix().to_owned()))
+        .unwrap_or_else(|| "!".to_owned());
+
+    let prefix_commands = EmbedField {
+        inline: false,
+        name: format!("Prefix Commands (prefix: `{prefix}`)"),
+        value: format!(
+            "• `{prefix}ask <question>` — AI with deep reasoning (`{prefix}ai`)\n\
+             • `{prefix}a <question>` — Fast AI response without reasoning (`{prefix}fast`)\n\
+             • `{prefix}aicontext` — View AI context & token usage (`{prefix}context`, `{prefix}aic`)\n\
+             • `{prefix}render` — Render replay (`.osr` attachment or reply to score)\n\
+             • `{prefix}queue` — View render queue\n\
+             • `{prefix}ping` — Check bot latency\n\
+             • `{prefix}skinlist` — List available skins (`{prefix}skins`)\n\
+             • `{prefix}invite` — Bot invite link\n\
+             • `{prefix}help` — Show prefix command help\n\n\
+             *Server admins can change prefix with `/setup setprefix`.*"
+        ),
+    };
+
     let view_replays = EmbedField {
         inline: false,
         name: "Do you want to view your replays?".to_owned(),
-        value: format!("find link for it, website is 💩"),
+        value: "find link for it, website is 💩".to_owned(),
     };
 
     let join_server = EmbedField {
@@ -76,7 +98,15 @@ pub async fn slash_help(ctx: Arc<Context>, command: InteractionCommand) -> Resul
         value: format!("The source code can be found over at [Github]({SHISHABOT_GITHUB})"),
     };
 
-    let fields = vec![view_replays, join_server, invite, servers, boot_up, github];
+    let fields = vec![
+        prefix_commands,
+        view_replays,
+        join_server,
+        invite,
+        servers,
+        boot_up,
+        github,
+    ];
 
     let embed = EmbedBuilder::new().description(description).fields(fields);
 

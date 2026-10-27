@@ -728,7 +728,21 @@ pub fn clean_ai_response(content: &str) -> String {
 
     // Strip search and attach tool tags
     let no_tools = strip_tool_tags(cleaned);
-    let final_text = no_tools.trim();
+    let mut final_text = no_tools.trim();
+
+    // Strip any leaked prompt meta-commentary lines
+    let filtered_lines: Vec<&str> = final_text
+        .lines()
+        .filter(|line| {
+            let lower = line.trim().to_ascii_lowercase();
+            !lower.starts_with("focus rule")
+                && !lower.starts_with("system prompt")
+                && !lower.starts_with("rule activated")
+                && !lower.starts_with("critical focus")
+        })
+        .collect();
+    let cleaned_lines = filtered_lines.join("\n");
+    final_text = cleaned_lines.trim();
 
     if final_text.is_empty() {
         if let Some(thought) = unclosed_thought {

@@ -105,7 +105,7 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
         // ── render ────────────────────────────────────────────────────────────
         "render" => {
             if let Some(attachment) = msg.attachments.first() {
-                if !matches!(attachment.filename.split('.').last(), Some("osr")) {
+                if !matches!(attachment.filename.split('.').next_back(), Some("osr")) {
                     let _ = msg
                         .error(&ctx, "The attachment must be a `.osr` file!")
                         .await;
@@ -363,12 +363,13 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
 
             let description = format!(
                 "**Prefix commands** (current prefix: `{p}`)\n\n\
-                 `{p}ask <question>` — Ask the AI a question (aliases: `{p}ai`, `{p}a`)\n\
+                 `{p}ask <question>` — Ask the AI with deep reasoning (aliases: `{p}ai`)\n\
+                 `{p}a <question>` — Fast AI response without reasoning (aliases: `{p}fast`)\n\
                  `{p}aicontext` — Show context window usage & engine stats (aliases: `{p}context`, `{p}aic`)\n\
                  `{p}ping` — Check latency\n\
                  `{p}render` — Render a replay (attach `.osr`). Args: `start=MM:SS` `end=MM:SS` `pitch=<float>`\n\
                  `{p}queue` — Show the render queue\n\
-                 `{p}skinlist` — List available skins\n\
+                 `{p}skinlist` — List available skins (aliases: `{p}skins`)\n\
                  `{p}invite` — Bot invite link\n\
                  `{p}help` — Show this message\n\n\
                  Slash commands are also available — type `/` to browse them.\n\
