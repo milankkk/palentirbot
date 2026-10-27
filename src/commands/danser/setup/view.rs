@@ -32,7 +32,15 @@ pub async fn view(ctx: Arc<Context>, command: InteractionCommand) -> Result<()> 
         .flatten()
         .map_or_else(|| "None".to_owned(), |channel| format!("<#{channel}>"));
 
-    let content = format!("Input channels: {input_channels}\nOutput channel: {output_channel}");
+    let (ai_enabled, ai_safesearch) = ctx
+        .guild_settings(guild_id, |s| (s.ai_enabled, s.ai_safesearch))
+        .unwrap_or((false, true));
+
+    let content = format!(
+        "Input channels: {input_channels}\nOutput channel: {output_channel}\nAI module: {}\nSafeSearch: {}",
+        if ai_enabled { "Enabled" } else { "Disabled" },
+        if ai_safesearch { "Enabled (Moderate)" } else { "Disabled (Off)" }
+    );
     let builder = MessageBuilder::new().embed(content);
     command.callback(&ctx, builder, false).await?;
 

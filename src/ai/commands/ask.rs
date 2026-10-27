@@ -1,18 +1,23 @@
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use command_macros::SlashCommand;
 use eyre::Result;
+use tokio::sync::mpsc;
 use twilight_interactions::command::{CommandModel, CreateCommand};
 use twilight_model::{
     channel::Message,
     id::{
-        marker::{ChannelMarker, MessageMarker, UserMarker},
+        marker::{ChannelMarker, GuildMarker, MessageMarker, UserMarker},
         Id,
     },
 };
 
 use crate::{
-    core::{ai::AiMessage, Context},
+    ai::{
+        ollama::AiStatusUpdate, search::strip_tool_tags, AiMessage,
+    },
+    core::Context,
     util::{
         builder::MessageBuilder, interaction::InteractionCommand, Authored, ChannelExt,
         InteractionCommandExt, MessageExt,
@@ -22,11 +27,7 @@ use crate::{
 /// Maximum number of previous Discord messages sent to the AI.
 const HISTORY_LIMIT: u16 = 100;
 /// Maximum number of characters taken from a single historical message.
-///
-/// This prevents a handful of enormous Discord messages from consuming the
-/// model's entire context window.
 const HISTORY_MESSAGE_CHAR_LIMIT: usize = 1_500;
-
 /// Keep some room below Discord's 2,000-character message limit.
 const DISCORD_RESPONSE_CHAR_LIMIT: usize = 1_900;
 
@@ -39,17 +40,144 @@ pub struct Ask {
     question: String,
 }
 
+pub struct MessageStatusUpdater {
+    ctx: Arc<Context>,
+    target: StatusTarget,
+    last_update: Instant,
+    last_rendered: String,
+}
+
+enum StatusTarget {
+    Interaction(Box<InteractionCommand>),
+    Message(Id<MessageMarker>, Id<ChannelMarker>),
+}
+
+impl MessageStatusUpdater {
+    pub fn new_interaction(ctx: Arc<Context>, cmd: InteractionCommand) -> Self {
+        Self {
+            ctx,
+            target: StatusTarget::Interaction(Box::new(cmd)),
+            last_update: Instant::now() - Duration::from_secs(10),
+            last_rendered: String::new(),
+        }
+    }
+
+    pub fn new_message(ctx: Arc<Context>, msg_id: Id<MessageMarker>, channel_id: Id<ChannelMarker>) -> Self {
+        Self {
+            ctx,
+            target: StatusTarget::Message(msg_id, channel_id),
+            last_update: Instant::now() - Duration::from_secs(10),
+            last_rendered: String::new(),
+        }
+    }
+
+    pub async fn update_status(&mut self, status: AiStatusUpdate, force: bool) {
+        let text = match status {
+            AiStatusUpdate::LoadingModel => {
+                "⏳ Thinking (Loading model into memory & reading context...)".to_string()
+            }
+            AiStatusUpdate::Reasoning {
+                elapsed_secs,
+                thought_snippet,
+            } => {
+                format!("🧠 **Thinking...** (elapsed: {elapsed_secs}s)\n> *{thought_snippet}*")
+            }
+            AiStatusUpdate::WritingResponse => "✍️ Thinking (Writing response...)".to_string(),
+            AiStatusUpdate::Searching {
+                query,
+                category,
+                safesearch_on,
+            } => {
+                let safe_str = if safesearch_on { "ON" } else { "OFF" };
+                format!("🌐 Thinking (Searching {category} for \"{query}\" • SafeSearch: {safe_str})...")
+            }
+            AiStatusUpdate::DownloadingMedia => {
+                "🖼️ Thinking (Downloading media attachment...)".to_string()
+            }
+        };
+
+        if !force {
+            if self.last_update.elapsed() < Duration::from_millis(2000) {
+                return;
+            }
+            if self.last_rendered == text {
+                return;
+            }
+        }
+
+        self.last_update = Instant::now();
+        self.last_rendered = text.clone();
+
+        let builder = MessageBuilder::new().content(text);
+        match &self.target {
+            StatusTarget::Interaction(cmd) => {
+                let _ = cmd.update(&self.ctx, &builder).await;
+            }
+            StatusTarget::Message(msg_id, ch_id) => {
+                let _ = (*msg_id, *ch_id).update(&self.ctx, &builder).await;
+            }
+        }
+    }
+
+    pub async fn finish(
+        &self,
+        content: String,
+        attachment: Option<(String, Vec<u8>)>,
+    ) -> Result<()> {
+        let mut builder = MessageBuilder::new().content(content);
+        if let Some((name, bytes)) = attachment {
+            builder = builder.attachment(name, bytes);
+        }
+
+        match &self.target {
+            StatusTarget::Interaction(cmd) => {
+                cmd.update(&self.ctx, &builder).await?;
+            }
+            StatusTarget::Message(msg_id, ch_id) => {
+                (*msg_id, *ch_id).update(&self.ctx, &builder).await?;
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn error(&self, err_msg: &str) -> Result<()> {
+        let builder = MessageBuilder::new().content(err_msg);
+        match &self.target {
+            StatusTarget::Interaction(cmd) => {
+                cmd.update(&self.ctx, &builder).await?;
+            }
+            StatusTarget::Message(msg_id, ch_id) => {
+                (*msg_id, *ch_id).update(&self.ctx, &builder).await?;
+            }
+        }
+        Ok(())
+    }
+}
+
 async fn slash_ask(ctx: Arc<Context>, mut command: InteractionCommand) -> Result<()> {
-    // Parse the slash command.
+    if !crate::ai::is_enabled_for_guild(&ctx, command.guild_id) {
+        command
+            .error_callback(&ctx, crate::ai::AI_DISABLED_REPLY, true)
+            .await?;
+        return Ok(());
+    }
+
+    let ai = match ctx.ai() {
+        Some(ai) => ai,
+        None => {
+            command
+                .error_callback(&ctx, "AI module is disabled.", true)
+                .await?;
+            return Ok(());
+        }
+    };
+
     let Ask { question } = Ask::from_interaction(command.input_data())?;
 
-    // AI generation can take a while, especially when running locally.
-    //
-    // Defer immediately so Discord doesn't consider the interaction timed out.
     command.defer(&ctx, false).await?;
 
     // Enter the fair FIFO AI queue to avoid overloading the backend
-    let ticket = match ctx.ai().queue().enter().await {
+    let ticket = match ai.queue().enter().await {
         Ok(ticket) => ticket,
         Err(len) => {
             let content = format!(
@@ -68,47 +196,61 @@ async fn slash_ask(ctx: Arc<Context>, mut command: InteractionCommand) -> Result
         let _ = command.update(&ctx, &builder).await;
     }
 
-    // Wait until it is this request's turn
     let _permit = ticket.wait().await;
 
-    if position > 0 {
-        let builder = MessageBuilder::new().content("💭 Generating response...");
-        let _ = command.update(&ctx, &builder).await;
-    }
+    let (user_id, user_name) = {
+        let user = command.user()?;
+        (user.id, user.name.clone())
+    };
+    let channel_id = command.channel_id;
+    let guild_id = command.guild_id;
 
-    // Get the person currently talking to the AI.
-    let user = command.user()?;
+    let updater = MessageStatusUpdater::new_interaction(Arc::clone(&ctx), command);
+    let (tx, mut rx) = mpsc::channel::<AiStatusUpdate>(64);
 
-    let answer = match execute_ai_question(
+    let updater_handle = tokio::spawn(async move {
+        let mut u = updater;
+        while let Some(status) = rx.recv().await {
+            let force = matches!(
+                status,
+                AiStatusUpdate::LoadingModel
+                    | AiStatusUpdate::Searching { .. }
+                    | AiStatusUpdate::DownloadingMedia
+            );
+            u.update_status(status, force).await;
+        }
+        u
+    });
+
+    let exec_res = execute_ai_question(
         &ctx,
-        command.channel_id,
-        user.id,
-        &user.name,
+        channel_id,
+        guild_id,
+        user_id,
+        &user_name,
         &question,
         None,
         None,
+        tx,
     )
-    .await
-    {
-        Ok(answer) => answer,
+    .await;
+
+    let updater = updater_handle.await.unwrap_or_else(|_| {
+        MessageStatusUpdater::new_message(Arc::clone(&ctx), Id::new(1), channel_id)
+    });
+
+    match exec_res {
+        Ok((answer, attachment)) => {
+            updater.finish(answer, attachment).await?;
+        }
         Err(err) => {
-            tracing::error!(
-                ?err,
-                user_id = %user.id,
-                "AI request failed"
-            );
-
-            let builder = MessageBuilder::new()
-                .content("Something went wrong while asking the AI. Please try again later.");
-
-            command.update(&ctx, &builder).await?;
-
+            tracing::error!(?err, %user_id, "AI slash request failed");
+            let _ = updater
+                .error("Something went wrong while asking the AI. Please try again later.")
+                .await;
             return Err(err.wrap_err("AI request failed"));
         }
-    };
-
-    let builder = MessageBuilder::new().content(answer);
-    command.update(&ctx, &builder).await?;
+    }
 
     Ok(())
 }
@@ -120,6 +262,16 @@ pub async fn handle_prefix_ask(
     args_str: &str,
     prefix: &str,
 ) {
+    if !crate::ai::is_enabled_for_guild(&ctx, msg.guild_id) {
+        let _ = msg.error(&ctx, crate::ai::AI_DISABLED_REPLY).await;
+        return;
+    }
+
+    let ai = match ctx.ai() {
+        Some(ai) => ai,
+        None => return,
+    };
+
     let mut question = args_str.trim().to_string();
 
     let bot_id = ctx.cache.current_user(|u| u.id).ok();
@@ -129,7 +281,6 @@ pub async fn handle_prefix_ask(
         .map(|r| Some(r.author.id) == bot_id)
         .unwrap_or(false);
 
-    // If the message is a reply to another human message (not the AI), include that as context
     if let Some(ref replied) = msg.referenced_message {
         if !is_reply_to_ai {
             let ref_author = sanitize_llm_text(&replied.author.name);
@@ -158,8 +309,8 @@ pub async fn handle_prefix_ask(
         }
     }
 
-    // Enter the fair FIFO AI queue to avoid overloading the backend
-    let ticket = match ctx.ai().queue().enter().await {
+    // Enter fair FIFO AI queue
+    let ticket = match ai.queue().enter().await {
         Ok(ticket) => ticket,
         Err(len) => {
             let content = format!(
@@ -174,7 +325,7 @@ pub async fn handle_prefix_ask(
     let initial_content = if position > 0 {
         format!("⏳ Waiting in AI queue (position #{position})...")
     } else {
-        "💭 Thinking...".to_string()
+        "⏳ Thinking (Loading model into memory & reading context...)".to_string()
     };
 
     let placeholder = msg
@@ -188,100 +339,98 @@ pub async fn handle_prefix_ask(
         .await
         .ok();
 
-    // Wait until it is this request's turn
     let _permit = ticket.wait().await;
 
-    if position > 0 {
-        if let Some(ref ph) = placeholder {
-            let _ = ph
-                .update(&ctx, &MessageBuilder::new().content("💭 Thinking..."))
-                .await;
+    let placeholder_msg = match placeholder {
+        Some(p) => p,
+        None => {
+            let _ = msg.error(&ctx, "Failed to send initial thinking placeholder.").await;
+            return;
         }
-    }
+    };
 
     let _ = ctx.http.create_typing_trigger(msg.channel_id).await;
 
-    let result = execute_ai_question(
+    let updater = MessageStatusUpdater::new_message(Arc::clone(&ctx), placeholder_msg.id, placeholder_msg.channel_id);
+    let (tx, mut rx) = mpsc::channel::<AiStatusUpdate>(64);
+
+    let updater_handle = tokio::spawn(async move {
+        let mut u = updater;
+        while let Some(status) = rx.recv().await {
+            let force = matches!(
+                status,
+                AiStatusUpdate::LoadingModel
+                    | AiStatusUpdate::Searching { .. }
+                    | AiStatusUpdate::DownloadingMedia
+            );
+            u.update_status(status, force).await;
+        }
+        u
+    });
+
+    let exec_res = execute_ai_question(
         &ctx,
         msg.channel_id,
+        msg.guild_id,
         msg.author.id,
         &msg.author.name,
         &question,
         Some(msg.id),
         msg.referenced_message.as_deref(),
+        tx,
     )
     .await;
 
-    match result {
-        Ok(answer) => {
-            if let Some(ref ph) = placeholder {
-                if let Err(err) = ph
-                    .update(&ctx, &MessageBuilder::new().content(answer.clone()))
-                    .await
-                {
-                    tracing::warn!(?err, "failed to update placeholder message, sending new message");
-                    let _ = msg
-                        .channel_id
-                        .create_message(
-                            &ctx,
-                            &MessageBuilder::new().content(answer).reply(msg.id),
-                        )
-                        .await;
+    let updater = updater_handle.await.unwrap_or_else(|_| {
+        MessageStatusUpdater::new_message(Arc::clone(&ctx), placeholder_msg.id, placeholder_msg.channel_id)
+    });
+
+    match exec_res {
+        Ok((answer, attachment)) => {
+            if let Err(e) = updater.finish(answer.clone(), attachment.clone()).await {
+                tracing::warn!(?e, "failed to update placeholder, sending fresh message");
+                let mut b = MessageBuilder::new().content(answer).reply(msg.id);
+                if let Some((name, bytes)) = attachment {
+                    b = b.attachment(name, bytes);
                 }
-            } else {
-                let _ = msg
-                    .channel_id
-                    .create_message(
-                        &ctx,
-                        &MessageBuilder::new().content(answer).reply(msg.id),
-                    )
-                    .await;
+                let _ = msg.channel_id.create_message(&ctx, &b).await;
             }
         }
         Err(err) => {
             tracing::error!(?err, user_id = %msg.author.id, "prefix AI request failed");
             let error_content = "Something went wrong while asking the AI. Please try again later.";
-            if let Some(ref ph) = placeholder {
-                let _ = ph
-                    .update(&ctx, &MessageBuilder::new().content(error_content))
-                    .await;
-            } else {
-                let _ = msg.error(&ctx, error_content).await;
-            }
+            let _ = updater.error(error_content).await;
         }
     }
 }
 
 /// Core function to formulate messages and query the AI backend.
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_ai_question(
     ctx: &Context,
     channel_id: Id<ChannelMarker>,
+    guild_id: Option<Id<GuildMarker>>,
     user_id: Id<UserMarker>,
     username: &str,
     question: &str,
     exclude_message_id: Option<Id<MessageMarker>>,
     referenced_msg: Option<&Message>,
-) -> Result<String> {
-    // Get our own Discord user ID.
-    //
-    // We need this so previous responses from this bot can be sent to the
-    // model with role="assistant" instead of pretending another user wrote
-    // them.
+    status_sender: mpsc::Sender<AiStatusUpdate>,
+) -> Result<(String, Option<(String, Vec<u8>)>)> {
+    let ai = ctx.ai().ok_or_else(|| eyre::eyre!("AI is not initialized"))?;
+
     let bot_id = ctx
         .cache
         .current_user(|user| user.id)
         .expect("missing CurrentUser in cache");
 
-    // Get the last N messages from this channel, filtered by context cutoff.
     let history = get_history(ctx, channel_id, exclude_message_id).await?;
 
-    // Get the cached system prompt template from AiClient.
-    let system_prompt_template = ctx.ai().get_prompt().await;
+    let system_prompt_template = ai.get_prompt().await;
 
     let clean_username = sanitize_llm_text(username);
     let clean_question = sanitize_llm_text(question);
 
-    // Explicitly tell the model who is currently speaking.
     let mut system_prompt = system_prompt_template
         .replace("{username}", &clean_username)
         .replace("{user_id}", &user_id.to_string());
@@ -292,7 +441,6 @@ pub async fn execute_ai_question(
 
     let messages = if let Some(replied) = referenced_msg {
         if replied.author.id == bot_id {
-            // User is directly replying to a message sent by the AI!
             let mut raw_ai_text = replied.content.clone();
             if raw_ai_text.trim().is_empty() {
                 for embed in &replied.embeds {
@@ -308,7 +456,6 @@ pub async fn execute_ai_question(
             }
             let ai_content = sanitize_llm_text(&clean_ai_response(&truncate_history_message(&raw_ai_text)));
 
-            // Focus context: Take messages up to the replied AI message, excluding intervening chatter
             let history_before_ai = if let Some(idx) = history.iter().position(|m| m.id == replied.id) {
                 history[..idx].to_vec()
             } else {
@@ -317,7 +464,6 @@ pub async fn execute_ai_question(
 
             let mut history_messages = convert_history(history_before_ai, bot_id);
 
-            // Put the exact AI message being replied to as the immediate prior assistant turn
             if !ai_content.is_empty() {
                 history_messages.push(AiMessage::assistant(ai_content));
             }
@@ -332,7 +478,6 @@ pub async fn execute_ai_question(
             msgs.push(AiMessage::user(current_user_msg));
             msgs
         } else {
-            // Replying to another user
             let history_messages = convert_history(history, bot_id);
             let mut msgs = Vec::with_capacity(history_messages.len() + 2);
             msgs.push(AiMessage::system(system_prompt));
@@ -341,7 +486,6 @@ pub async fn execute_ai_question(
             msgs
         }
     } else {
-        // Standalone question
         let history_messages = convert_history(history, bot_id);
         let mut msgs = Vec::with_capacity(history_messages.len() + 2);
         msgs.push(AiMessage::system(system_prompt));
@@ -350,29 +494,31 @@ pub async fn execute_ai_question(
         msgs
     };
 
-    // Ask whichever AI backend is configured in AiClient.
-    let answer = ctx.ai().ask(channel_id, &messages).await?;
+    let safesearch_level = crate::ai::safesearch_level_for_guild(ctx, guild_id);
 
-    // Remove role prefixes that some local models generate.
-    let answer = clean_ai_response(&answer);
+    let gen_res = ai
+        .ollama()
+        .ask_orchestrated(
+            ai.search(),
+            channel_id,
+            &messages,
+            safesearch_level,
+            move |status| {
+                let _ = status_sender.try_send(status);
+            },
+        )
+        .await?;
 
-    // Truncate if exceeding Discord limit.
-    let mut answer = truncate_discord_response(&answer);
+    let cleaned = clean_ai_response(&gen_res.content);
+    let mut answer = truncate_discord_response(&cleaned);
 
     if answer.is_empty() {
         answer = "*(blinks blankly... no thoughts head empty)*".to_owned();
     }
 
-    Ok(answer)
+    Ok((answer, gen_res.attachment))
 }
 
-/// Retrieve the previous Discord messages for the AI's conversation context.
-///
-/// Discord returns channel history newest -> oldest, while an LLM should
-/// receive conversation history oldest -> newest, so the vector is reversed.
-///
-/// Messages created before the channel's context cutoff (set by `/aiclear`)
-/// are excluded.
 async fn get_history(
     ctx: &Context,
     channel_id: Id<ChannelMarker>,
@@ -391,48 +537,28 @@ async fn get_history(
 
     let mut messages: Vec<Message> = response.model().await?;
 
-    // Filter out the excluded message (such as the prefix command itself) if provided
     if let Some(exclude_id) = exclude_message_id {
         messages.retain(|msg| msg.id != exclude_id);
     }
 
-    // Filter out messages before the context cutoff, if one exists.
-    if let Some(cutoff) = ctx.ai().get_cutoff(channel_id).await {
-        messages.retain(|msg| msg.timestamp.as_secs() > cutoff);
+    if let Some(ai) = ctx.ai() {
+        if let Some(cutoff) = ai.get_cutoff(channel_id).await {
+            messages.retain(|msg| msg.timestamp.as_secs() > cutoff);
+        }
     }
 
-    // Discord returns newest -> oldest.
-    // Give the AI chronological history.
     messages.reverse();
-
     Ok(messages)
 }
 
-/// Convert normal Discord messages into messages suitable for the AI.
-///
-/// Human messages become:
-///
-///     role: user
-///     Alice (Discord ID 123): hello
-///
-/// Previous messages written by this bot become:
-///
-///     role: assistant
-///     Hello! How can I help?
-///
-/// Messages from unrelated bots are ignored.
-/// Consecutive messages with the same role are coalesced to enforce
-/// strict alternating user <-> assistant dialogue expected by LLM chat templates.
 fn convert_history(history: Vec<Message>, bot_id: Id<UserMarker>) -> Vec<AiMessage> {
     let mut raw_messages: Vec<AiMessage> = Vec::with_capacity(history.len());
 
     for message in history {
-        // Ignore messages without textual content.
         if message.content.trim().is_empty() {
             continue;
         }
 
-        // Ignore messages from unrelated bots.
         if message.author.bot && message.author.id != bot_id {
             continue;
         }
@@ -440,9 +566,13 @@ fn convert_history(history: Vec<Message>, bot_id: Id<UserMarker>) -> Vec<AiMessa
         let content = sanitize_llm_text(&truncate_history_message(&message.content));
 
         if message.author.id == bot_id {
-            // Filter out non-conversational bot messages (status, queue notices, clear confirmations)
             if content.starts_with("⏳ Waiting in AI queue")
+                || content.starts_with("⏳ Thinking")
                 || content.starts_with("💭 Thinking")
+                || content.starts_with("🧠 **Thinking")
+                || content.starts_with("🌐 Thinking")
+                || content.starts_with("🖼️ Thinking")
+                || content.starts_with("✍️ Thinking")
                 || content.starts_with("💭 Generating")
                 || content.starts_with("⚠️ ")
                 || content.starts_with("🧹 ")
@@ -452,10 +582,8 @@ fn convert_history(history: Vec<Message>, bot_id: Id<UserMarker>) -> Vec<AiMessa
             {
                 continue;
             }
-            // Previous AI response.
             raw_messages.push(AiMessage::assistant(content));
         } else {
-            // Human Discord message.
             let author_name = sanitize_llm_text(&message.author.name);
             let cleaned = strip_command_prefix(&content);
             if !cleaned.is_empty() {
@@ -467,8 +595,6 @@ fn convert_history(history: Vec<Message>, bot_id: Id<UserMarker>) -> Vec<AiMessa
         }
     }
 
-    // Coalesce consecutive messages of the same role so the model receives
-    // a clean, strictly alternating dialogue without repeated role headers.
     let mut coalesced: Vec<AiMessage> = Vec::with_capacity(raw_messages.len());
     for msg in raw_messages {
         if let Some(last) = coalesced.last_mut() {
@@ -484,8 +610,6 @@ fn convert_history(history: Vec<Message>, bot_id: Id<UserMarker>) -> Vec<AiMessa
     coalesced
 }
 
-/// Strip leading command prefix (e.g. `!ask `, `!ai `, `/ask `) from historical user messages
-/// so historical conversation text reads naturally for the model.
 fn strip_command_prefix(content: &str) -> &str {
     let trimmed = content.trim();
     for prefix in &[
@@ -499,14 +623,10 @@ fn strip_command_prefix(content: &str) -> &str {
     trimmed
 }
 
-/// Limit how much of an individual historical Discord message is supplied to
-/// the model.
 fn truncate_history_message(content: &str) -> String {
     truncate_chars(content, HISTORY_MESSAGE_CHAR_LIMIT)
 }
 
-/// Sanitize text for LLM prompts by stripping null bytes, invalid control characters,
-/// and prompt template delimiters that could confuse ChatML / LLM tokenizer.
 fn sanitize_llm_text(text: &str) -> String {
     text.chars()
         .filter(|&c| c == '\n' || c == '\r' || c == '\t' || !c.is_control())
@@ -516,8 +636,9 @@ fn sanitize_llm_text(text: &str) -> String {
         .replace("<|endoftext|>", "")
 }
 
-fn clean_ai_response(content: &str) -> String {
+pub fn clean_ai_response(content: &str) -> String {
     let mut text = content.trim().to_owned();
+    let mut unclosed_thought: Option<String> = None;
 
     // Repeatedly strip all complete <think>...</think> blocks
     while let Some(start) = text.find("<think>") {
@@ -525,8 +646,9 @@ fn clean_ai_response(content: &str) -> String {
             let end_idx = start + end + "</think>".len();
             text.drain(start..end_idx);
         } else {
-            // Unclosed <think> block (e.g. model was cut off mid-thought):
-            // Strip from <think> to the end
+            // Unclosed <think> block (e.g. model hit max tokens mid-thought):
+            let thought_content = text[start + "<think>".len()..].trim().to_string();
+            unclosed_thought = Some(thought_content);
             text.truncate(start);
             break;
         }
@@ -538,7 +660,7 @@ fn clean_ai_response(content: &str) -> String {
         text.drain(..end_idx);
     }
 
-    let mut content = text.trim();
+    let mut cleaned = text.trim();
 
     // Strip ChatML / role delimiters and artifacts
     for prefix in &[
@@ -553,22 +675,41 @@ fn clean_ai_response(content: &str) -> String {
         "bot:",
         "Bot:",
     ] {
-        while let Some(rest) = content.strip_prefix(prefix) {
-            content = rest.trim();
+        while let Some(rest) = cleaned.strip_prefix(prefix) {
+            cleaned = rest.trim();
         }
     }
 
     for suffix in &["<|im_end|>", "<|endoftext|>"] {
-        while let Some(rest) = content.strip_suffix(suffix) {
-            content = rest.trim();
+        while let Some(rest) = cleaned.strip_suffix(suffix) {
+            cleaned = rest.trim();
         }
     }
 
-    format_server_emojis(content)
+    // Strip search and attach tool tags
+    let no_tools = strip_tool_tags(cleaned);
+    let final_text = no_tools.trim();
+
+    if final_text.is_empty() {
+        if let Some(thought) = unclosed_thought {
+            if !thought.is_empty() {
+                let partial = if thought.chars().count() > 1500 {
+                    let skip = thought.chars().count() - 1500;
+                    thought.chars().skip(skip).collect::<String>()
+                } else {
+                    thought
+                };
+                return format!(
+                    "⚠️ *(Reached max token limit while reasoning—partial thought)*:\n{}",
+                    format_server_emojis(partial.trim())
+                );
+            }
+        }
+    }
+
+    format_server_emojis(final_text)
 }
 
-/// Format custom server emoji shortcodes (like `:skullcamel:`) into Discord's `<:name:id>`
-/// emoji format if not already formatted.
 fn format_server_emojis(content: &str) -> String {
     let custom_tag = std::env::var("EMOJI_SKULLCAMEL")
         .unwrap_or_else(|_| "<:skullcamel:1523112299617845348>".to_owned());
@@ -578,7 +719,6 @@ fn format_server_emojis(content: &str) -> String {
     let mut remaining = content;
 
     while let Some(pos) = remaining.to_ascii_lowercase().find(SKULLCAMEL_SHORTCODE) {
-        // If already part of <:skullcamel:...>, leave as is
         let is_custom_tag = pos > 0 && remaining.as_bytes()[pos - 1] == b'<';
         if is_custom_tag {
             result.push_str(&remaining[..pos + SKULLCAMEL_SHORTCODE.len()]);
@@ -593,32 +733,21 @@ fn format_server_emojis(content: &str) -> String {
     result
 }
 
-/// Limit the initial AI response so it fits safely inside one Discord message.
-///
-/// Later you can replace this with response chunking and send multiple
-/// follow-up messages instead.
 fn truncate_discord_response(content: &str) -> String {
     if content.chars().count() <= DISCORD_RESPONSE_CHAR_LIMIT {
         return content.to_owned();
     }
 
     let mut truncated = truncate_chars(content, DISCORD_RESPONSE_CHAR_LIMIT);
-
     truncated.push_str("\n\n[response truncated]");
-
     truncated
 }
 
-/// UTF-8 safe character truncation using char_indices.
-///
-/// Ensures slicing always occurs on a valid UTF-8 character boundary.
 fn truncate_chars(content: &str, max_chars: usize) -> String {
-    let mut count = 0;
-    for (idx, _) in content.char_indices() {
+    for (count, (idx, _)) in content.char_indices().enumerate() {
         if count == max_chars {
             return content[..idx].to_owned();
         }
-        count += 1;
     }
 
     content.to_owned()
@@ -650,13 +779,22 @@ mod tests {
         assert_eq!(clean_ai_response(response), "Hello! How can I help?");
 
         let unclosed = "<think>I am still thinking and got cut off";
-        assert_eq!(clean_ai_response(unclosed), "");
+        assert_eq!(
+            clean_ai_response(unclosed),
+            "⚠️ *(Reached max token limit while reasoning—partial thought)*:\nI am still thinking and got cut off"
+        );
 
         let prefix = "Assistant: Here is the answer.";
         assert_eq!(clean_ai_response(prefix), "Here is the answer.");
 
         let chatml = "<|im_start|>assistant\n42<|im_end|>";
         assert_eq!(clean_ai_response(chatml), "42");
+    }
+
+    #[test]
+    fn test_clean_ai_response_with_tools() {
+        let with_tools = "<think>Searching...</think>Here is the info: <search>osu news</search> Peppy said hi! <attach>https://example.com/a.png</attach>";
+        assert_eq!(clean_ai_response(with_tools), "Here is the info:  Peppy said hi!");
     }
 
     #[test]
@@ -681,14 +819,5 @@ mod tests {
             format_server_emojis("Case insensitive :SkullCamel:"),
             "Case insensitive <:skullcamel:1523112299617845348>"
         );
-    }
-
-    #[test]
-    fn test_message_builder_reply() {
-        use twilight_model::id::Id;
-        let msg_id = Id::new(123456789);
-        let builder = MessageBuilder::new().content("hello").reply(msg_id);
-        assert_eq!(builder.reply, Some(msg_id));
-        assert_eq!(builder.content.as_deref(), Some("hello"));
     }
 }

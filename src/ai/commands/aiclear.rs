@@ -31,6 +31,23 @@ pub struct AiClear {
 }
 
 async fn slash_aiclear(ctx: Arc<Context>, mut command: InteractionCommand) -> Result<()> {
+    if !crate::ai::is_enabled_for_guild(&ctx, command.guild_id) {
+        command
+            .error_callback(&ctx, crate::ai::AI_DISABLED_REPLY, true)
+            .await?;
+        return Ok(());
+    }
+
+    let ai = match ctx.ai() {
+        Some(ai) => ai,
+        None => {
+            command
+                .error_callback(&ctx, "AI module is disabled.", true)
+                .await?;
+            return Ok(());
+        }
+    };
+
     let AiClear { action } = AiClear::from_interaction(command.input_data())?;
     let channel_id = command.channel_id;
 
@@ -46,7 +63,7 @@ async fn slash_aiclear(ctx: Arc<Context>, mut command: InteractionCommand) -> Re
 
     if do_context {
         // Set context cutoff for this channel so older messages are ignored
-        ctx.ai().clear_context(channel_id).await;
+        ai.clear_context(channel_id).await;
     }
 
     let mut response = String::new();
@@ -56,7 +73,7 @@ async fn slash_aiclear(ctx: Arc<Context>, mut command: InteractionCommand) -> Re
     }
 
     if do_prompt {
-        match ctx.ai().reload_prompt().await {
+        match ai.reload_prompt().await {
             Ok(()) => {
                 response.push_str("🔄 System prompt successfully reloaded from file.");
             }
@@ -67,7 +84,7 @@ async fn slash_aiclear(ctx: Arc<Context>, mut command: InteractionCommand) -> Re
         }
     }
 
-    let queued = ctx.ai().queue_len().await;
+    let queued = ai.queue_len().await;
     if queued > 0 {
         response.push_str(&format!("\nℹ️ Note: {queued} request(s) currently in the AI queue."));
     }

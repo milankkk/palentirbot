@@ -35,8 +35,12 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
         Some(rest) => rest.trim_start(),
         None => {
             if is_reply_to_bot && !msg.content.trim().is_empty() {
+                // Unprefixed reply to the bot: silently return if AI is disabled
+                if !crate::ai::is_enabled_for_guild(&ctx, msg.guild_id) {
+                    return;
+                }
                 // Direct response to the AI without command prefix
-                crate::commands::utility::handle_prefix_ask(ctx, &msg, &msg.content, &prefix).await;
+                crate::ai::commands::handle_prefix_ask(ctx, &msg, &msg.content, &prefix).await;
             }
             return;
         }
@@ -52,13 +56,21 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
     match cmd_name.as_str() {
         // ── ask / ai ──────────────────────────────────────────────────────────
         "ask" | "ai" | "a" => {
-            crate::commands::utility::handle_prefix_ask(ctx, &msg, args_str, &prefix).await;
+            if !crate::ai::is_enabled_for_guild(&ctx, msg.guild_id) {
+                let _ = msg.error(&ctx, crate::ai::AI_DISABLED_REPLY).await;
+                return;
+            }
+            crate::ai::commands::handle_prefix_ask(ctx, &msg, args_str, &prefix).await;
         }
 
         // ── aicontext / context ───────────────────────────────────────────────
         "aicontext" | "context" | "aic" => {
+            if !crate::ai::is_enabled_for_guild(&ctx, msg.guild_id) {
+                let _ = msg.error(&ctx, crate::ai::AI_DISABLED_REPLY).await;
+                return;
+            }
             use crate::util::builder::MessageBuilder;
-            let embed = crate::commands::utility::create_context_embed(&ctx, msg.channel_id).await;
+            let embed = crate::ai::commands::create_context_embed(&ctx, msg.channel_id).await;
             let _ = msg
                 .channel_id
                 .create_message(&ctx, &MessageBuilder::new().embed(embed))

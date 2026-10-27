@@ -29,6 +29,9 @@ impl MessageExt for (Id<MessageMarker>, Id<ChannelMarker>) {
         if let Some(ref components) = builder.components {
             req = req.components(Some(components));
         }
+        if let Some(ref attachment) = builder.attachment {
+            req = req.attachments(slice::from_ref(attachment));
+        }
 
         Ok(req.await?.model().await?)
     }

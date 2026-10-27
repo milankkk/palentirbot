@@ -6,7 +6,10 @@ use once_cell::sync::OnceCell;
 use radix_trie::{Trie, TrieCommon};
 use twilight_interactions::command::CreateCommand;
 
-use crate::commands::{danser::*, owner::*, utility::*};
+use crate::{
+    ai::commands::*,
+    commands::{danser::*, owner::*, utility::*},
+};
 
 pub use self::command::{Command, MessageCommand, SlashCommand};
 use crate::commands::help::{Help, HELP_SLASH};

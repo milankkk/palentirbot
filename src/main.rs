@@ -6,6 +6,7 @@ extern crate eyre;
 #[macro_use]
 extern crate tracing;
 
+pub mod ai;
 mod commands;
 mod core;
 mod custom_client;
@@ -49,7 +50,10 @@ async fn async_main() -> Result<()> {
 
     let ctx = Arc::new(ctx);
 
-    let slash_commands = Commands::get().collect(Command::create);
+    let mut slash_commands = Commands::get().collect(Command::create);
+    if ctx.ai().is_none() {
+        slash_commands.retain(|cmd| !matches!(cmd.name.as_str(), "ask" | "aiclear" | "aicontext"));
+    }
     info!("Setting {} slash commands...", slash_commands.len());
 
     if cfg!(debug_assertions) {

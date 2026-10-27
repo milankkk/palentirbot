@@ -3,13 +3,19 @@ use std::collections::HashMap;
 use eyre::{Context as _, Result};
 use serde::Serialize;
 use tokio::sync::RwLock;
-use twilight_model::id::{marker::ChannelMarker, Id};
+use twilight_model::id::{
+    marker::{ChannelMarker, GuildMarker},
+    Id,
+};
 
-mod ollama;
-mod queue;
+pub mod commands;
+pub mod ollama;
+pub mod queue;
+pub mod search;
 
-pub use ollama::{LastGenerationStats, OllamaClient};
+pub use ollama::{GenerationResult, LastGenerationStats, OllamaClient};
 pub use queue::{AiQueue, DEFAULT_MAX_AI_QUEUE_SIZE};
+pub use search::SearxClient;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct AiMessage {
@@ -40,10 +46,72 @@ impl AiMessage {
     }
 }
 
+pub const AI_DISABLED_REPLY: &str =
+    "ℹ️ The AI module is disabled in this server. An administrator can enable it with `/setup ai enabled:True`.";
+
+/// Checks if AI is globally enabled via the `AI_ENABLED` environment variable (defaults to false).
+pub fn is_globally_enabled() -> bool {
+    std::env::var("AI_ENABLED")
+        .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+        .unwrap_or(false)
+}
+
+/// Checks if AI is active and permitted for this guild (or DM).
+pub fn is_enabled_for_guild(ctx: &crate::core::Context, guild_id: Option<Id<GuildMarker>>) -> bool {
+    if ctx.ai().is_none() {
+        return false;
+    }
+    match guild_id {
+        Some(gid) => ctx.guild_settings(gid, |s| s.ai_enabled).unwrap_or(false),
+        None => true, // Enabled in DMs if AI is globally enabled
+    }
+}
+
+/// Determines the effective SafeSearch level:
+/// - 0: Off (if AI_SAFESEARCH=0 or server ai_safesearch=false)
+/// - 1: Moderate (default)
+/// - 2: Strict (if AI_SAFESEARCH=2 and server ai_safesearch=true)
+pub fn safesearch_level_for_guild(
+    ctx: &crate::core::Context,
+    guild_id: Option<Id<GuildMarker>>,
+) -> u8 {
+    let env_level: u8 = std::env::var("AI_SAFESEARCH")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1);
+
+    if env_level == 0 {
+        return 0;
+    }
+
+    if let Some(gid) = guild_id {
+        let server_safesearch = ctx.guild_settings(gid, |s| s.ai_safesearch).unwrap_or(true);
+        if !server_safesearch {
+            return 0;
+        }
+    }
+
+    env_level
+}
+
 const SYSTEM_PROMPT_ENV: &str = "AI_SYSTEM_PROMPT";
+
+pub const SEARCH_SYSTEM_PROMPT: &str = r#"
+
+SEARCH & MEDIA RETRIEVAL INSTRUCTIONS:
+You have access to real-time search and media retrieval tools using XML tags:
+- To search the web for facts, current events, osu! news, or links: write `<search>your query</search>`.
+- To search for pictures when the user asks for an image/picture or when a visual diagram/photo directly answers the request: write `<search_image>image query</search_image>`.
+- To search for audio or music files/sounds: write `<search_audio>audio query</search_audio>`.
+- To attach an image, audio, or video file to your final message: write `<attach>direct_media_url</attach>`. Supported extensions: .jpg, .png, .webp, .gif, .mp3, .ogg, .wav, .mp4.
+
+STRICT RULES:
+1. Do NOT search for or attach images/audio/links on normal conversational messages. ONLY use search tags when the user explicitly asks for an image, picture, audio, link, or current real-time information, or when visual/audio media is necessary to fulfill their request.
+2. If you output a search tag, wait for the search results before presenting your final answer."#;
 
 pub struct AiClient {
     ollama: OllamaClient,
+    search: SearxClient,
     queue: AiQueue,
     /// The cached raw prompt template (with `{username}` / `{user_id}` placeholders).
     cached_prompt: RwLock<String>,
@@ -66,6 +134,7 @@ impl AiClient {
 
         Self {
             ollama: OllamaClient::new(),
+            search: SearxClient::new(),
             queue: AiQueue::new(max_queue_size),
             cached_prompt: RwLock::new(prompt),
             context_cutoffs: RwLock::new(HashMap::new()),
@@ -75,6 +144,16 @@ impl AiClient {
     /// Access the FIFO queue controlling generation concurrency.
     pub fn queue(&self) -> &AiQueue {
         &self.queue
+    }
+
+    /// Access SearXNG search client.
+    pub fn search(&self) -> &SearxClient {
+        &self.search
+    }
+
+    /// Access Ollama client.
+    pub fn ollama(&self) -> &OllamaClient {
+        &self.ollama
     }
 
     /// Total number of AI requests currently executing or waiting in line.
@@ -106,9 +185,14 @@ impl AiClient {
         self.ollama.num_predict()
     }
 
-    /// Return the cached system-prompt template.
+    /// Return the cached system-prompt template (with search instructions appended if SearXNG is enabled).
     pub async fn get_prompt(&self) -> String {
-        self.cached_prompt.read().await.clone()
+        let base = self.cached_prompt.read().await.clone();
+        if self.search.is_enabled() {
+            format!("{base}\n{SEARCH_SYSTEM_PROMPT}")
+        } else {
+            base
+        }
     }
 
     /// Re-read the prompt from disk (or inline env var) and update the cache.

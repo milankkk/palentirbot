@@ -29,6 +29,13 @@ use crate::{
 pub struct AiContext;
 
 async fn slash_aicontext(ctx: Arc<Context>, command: InteractionCommand) -> Result<()> {
+    if !crate::ai::is_enabled_for_guild(&ctx, command.guild_id) {
+        command
+            .error_callback(&ctx, crate::ai::AI_DISABLED_REPLY, true)
+            .await?;
+        return Ok(());
+    }
+
     let embed = create_context_embed(&ctx, command.channel_id).await;
     let builder = MessageBuilder::new().embed(embed);
     command.callback(&ctx, builder, true).await?;
@@ -38,13 +45,24 @@ async fn slash_aicontext(ctx: Arc<Context>, command: InteractionCommand) -> Resu
 
 /// Build the rich context breakdown embed for both slash and prefix commands.
 pub async fn create_context_embed(ctx: &Context, channel_id: Id<ChannelMarker>) -> Embed {
+    let ai = match ctx.ai() {
+        Some(ai) => ai,
+        None => {
+            return EmbedBuilder::new()
+                .title("🤖 AI Context Window Breakdown")
+                .description("The AI module is currently disabled.")
+                .color(0x00A8FC)
+                .build();
+        }
+    };
+
     let bot_id = ctx
         .cache
         .current_user(|user| user.id)
         .expect("missing CurrentUser in cache");
 
     // 1. System prompt metrics
-    let prompt = ctx.ai().get_prompt().await;
+    let prompt = ai.get_prompt().await;
     let prompt_chars = prompt.chars().count();
     let prompt_bytes = prompt.len();
     // In English & slang text with Qwen tokenizer, 1 token is ~3.8 characters
@@ -70,7 +88,7 @@ pub async fn create_context_embed(ctx: &Context, channel_id: Id<ChannelMarker>) 
 
     // 3. Overall window metrics
     let total_used_tokens = prompt_tokens + history_tokens;
-    let max_window = (ctx.ai().num_ctx() as usize).max(1);
+    let max_window = (ai.num_ctx() as usize).max(1);
     let free_tokens = max_window.saturating_sub(total_used_tokens);
     let used_percent = ((total_used_tokens as f64 / max_window as f64) * 100.0).clamp(0.0, 100.0);
     let free_percent = (100.0 - used_percent).max(0.0);
@@ -78,17 +96,17 @@ pub async fn create_context_embed(ctx: &Context, channel_id: Id<ChannelMarker>) 
     let progress_bar = make_progress_bar(total_used_tokens, max_window, 16);
 
     // 4. Last actual generation stats from Ollama (if available)
-    let last_stats = ctx.ai().last_stats(channel_id).await;
+    let last_stats = ai.last_stats(channel_id).await;
 
     // 5. Hardware & queue info
-    let queue_len = ctx.ai().queue_len().await;
+    let queue_len = ai.queue_len().await;
     let queue_status = if queue_len == 0 {
         "Idle (0 waiting)".to_string()
     } else {
         format!("{queue_len} active/queued")
     };
 
-    let model_name = ctx.ai().model_name();
+    let model_name = ai.model_name();
 
     let mut fields = Vec::with_capacity(5);
 
@@ -135,15 +153,20 @@ pub async fn create_context_embed(ctx: &Context, channel_id: Id<ChannelMarker>) 
             inline: false,
             name: "⚡ Last Generation (Engine Verified)".to_string(),
             value: format!(
-                "**Evaluated:** `{}` prompt tokens • **Generated:** `{}` tokens in `{:.2}s` (`{speed}`)",
+                "• **Evaluated:** `{}` prompt tokens\n\
+                 • **Reasoning:** `{}` thinking tokens\n\
+                 • **Generated:** `{}` tokens in `{:.2}s` (`{speed}`)\n\
+                 • **Load Duration:** `{:.2}s`",
                 format_num(stats.prompt_tokens),
+                format_num(stats.thinking_tokens),
                 format_num(stats.response_tokens),
                 stats.eval_duration_ms as f64 / 1000.0,
+                stats.load_duration_ms as f64 / 1000.0,
             ),
         });
     }
 
-    let num_predict = ctx.ai().num_predict();
+    let num_predict = ai.num_predict();
 
     fields.push(EmbedField {
         inline: false,
@@ -178,7 +201,7 @@ fn format_num(n: usize) -> String {
     let mut result = String::new();
     let chars: Vec<char> = s.chars().collect();
     for (i, c) in chars.iter().enumerate() {
-        if i > 0 && (chars.len() - i) % 3 == 0 {
+        if i > 0 && (chars.len() - i).is_multiple_of(3) {
             result.push(',');
         }
         result.push(*c);
@@ -206,8 +229,10 @@ async fn fetch_channel_history(ctx: &Context, channel_id: Id<ChannelMarker>) -> 
     let response = ctx.http.channel_messages(channel_id).limit(limit).await?;
     let mut messages: Vec<Message> = response.model().await?;
 
-    if let Some(cutoff) = ctx.ai().get_cutoff(channel_id).await {
-        messages.retain(|msg| msg.timestamp.as_secs() > cutoff);
+    if let Some(ai) = ctx.ai() {
+        if let Some(cutoff) = ai.get_cutoff(channel_id).await {
+            messages.retain(|msg| msg.timestamp.as_secs() > cutoff);
+        }
     }
 
     Ok(messages)

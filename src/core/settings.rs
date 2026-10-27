@@ -17,11 +17,32 @@ pub struct RootSettings {
     pub servers: Servers,
 }
 
-#[derive(Clone, Debug, Default)]
+#[inline]
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Server {
     pub input_channels: HashSet<Id<ChannelMarker>, IntBuildHasher>,
     pub output_channel: Option<Id<ChannelMarker>>,
     pub prefix: Option<String>,
+    #[serde(default)]
+    pub ai_enabled: bool,
+    #[serde(default = "default_true")]
+    pub ai_safesearch: bool,
+}
+
+impl Default for Server {
+    fn default() -> Self {
+        Self {
+            input_channels: HashSet::default(),
+            output_channel: None,
+            prefix: None,
+            ai_enabled: false,
+            ai_safesearch: true,
+        }
+    }
 }
 
 impl Server {
@@ -58,6 +79,10 @@ mod servers {
         output_channel: Option<Id<ChannelMarker>>,
         #[serde(default)]
         prefix: Option<String>,
+        #[serde(default)]
+        pub ai_enabled: bool,
+        #[serde(default = "super::default_true")]
+        pub ai_safesearch: bool,
     }
 
     struct ServersVisitor;
@@ -82,12 +107,16 @@ mod servers {
                         input_channels,
                         output_channel,
                         prefix,
+                        ai_enabled,
+                        ai_safesearch,
                     } = raw;
 
                     let server = Server {
                         input_channels,
                         output_channel,
                         prefix,
+                        ai_enabled,
+                        ai_safesearch,
                     };
 
                     guard.insert(server_id, server);
@@ -109,12 +138,14 @@ mod servers {
 
     impl Serialize for BorrowedRawServer<'_> {
         fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-            let mut raw = s.serialize_struct("RawServer", 3)?;
+            let mut raw = s.serialize_struct("RawServer", 5)?;
 
             raw.serialize_field("server_id", &self.server_id)?;
             raw.serialize_field("input_channels", &self.server.input_channels)?;
             raw.serialize_field("output_channel", &self.server.output_channel)?;
             raw.serialize_field("prefix", &self.server.prefix)?;
+            raw.serialize_field("ai_enabled", &self.server.ai_enabled)?;
+            raw.serialize_field("ai_safesearch", &self.server.ai_safesearch)?;
             raw.end()
         }
     }

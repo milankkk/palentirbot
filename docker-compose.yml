@@ -25,6 +25,7 @@ services:
       UPLOAD_SECRET: ${UPLOAD_SECRET:-palentir_replay_secret_key}
       UPLOAD_MBPS: ${UPLOAD_MBPS:-auto}
       OLLAMA_URL: http://ollama:11434
+      SEARXNG_URL: http://searxng:8080
       DANSER_PATH: /app/data
       FOLDERS_PATH: /app/data
       AI_SYSTEM_PROMPT: /app/data/prompt.txt
@@ -127,6 +128,24 @@ services:
     #         - driver: nvidia
     #           count: all
     #           capabilities: [gpu]
+
+  # ---------------------------------------------------------------------------
+  # 6. SearXNG Search Engine (for /ask web, image, and media search)
+  # ---------------------------------------------------------------------------
+  searxng:
+    image: searxng/searxng:latest
+    container_name: palentirbot-searxng
+    restart: unless-stopped
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:8080/
+      - UWSGI_WORKERS=2
+      - UWSGI_THREADS=4
+    volumes:
+      - ./searxng:/etc/searxng:rw
+    expose:
+      - "8080"
+    ports:
+      - "${SEARXNG_PORT:-8080}:8080"
 
 volumes:
   pgdata:

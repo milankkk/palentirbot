@@ -10,8 +10,9 @@ use crate::{
     Context,
 };
 
-use self::{input::*, output::*, view::*};
+use self::{ai::*, input::*, output::*, view::*};
 
+mod ai;
 mod input;
 mod output;
 mod setprefix;
@@ -30,6 +31,8 @@ pub enum Setup {
     Output(SetupOutput),
     #[command(name = "setprefix")]
     SetPrefix(SetupSetPrefix),
+    #[command(name = "ai")]
+    Ai(SetupAi),
 }
 
 #[derive(CommandModel, CreateCommand)]
@@ -71,11 +74,22 @@ pub struct SetupSetPrefix {
     pub prefix: String,
 }
 
+#[derive(CommandModel, CreateCommand)]
+#[command(name = "ai")]
+/// Configure the AI module and SafeSearch settings for this server
+pub struct SetupAi {
+    /// Enable or disable the AI module in this server
+    pub enabled: Option<bool>,
+    /// Enable or disable SafeSearch (Moderate/Strict) for AI searches (bot owner only)
+    pub safesearch: Option<bool>,
+}
+
 async fn slash_setup(ctx: Arc<Context>, mut command: InteractionCommand) -> Result<()> {
     match Setup::from_interaction(command.input_data())? {
         Setup::Input(args) => input(ctx, command, args).await,
         Setup::Output(args) => output(ctx, command, args).await,
         Setup::View(_) => view(ctx, command).await,
         Setup::SetPrefix(args) => setprefix::set_prefix(ctx, command, args).await,
+        Setup::Ai(args) => ai(ctx, command, args).await,
     }
 }

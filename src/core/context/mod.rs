@@ -1,4 +1,4 @@
-use crate::core::ai::AiClient;
+use crate::ai::AiClient;
 use eyre::{Result, WrapErr};
 use flexmap::tokio::TokioMutexMap;
 use rosu_v2::Osu;
@@ -39,7 +39,7 @@ pub struct Context {
     skin_list: Arc<Mutex<SkinList>>,
     application_id: Id<ApplicationMarker>,
     clients: Clients,
-    ai: AiClient,
+    ai: Option<AiClient>,
 }
 
 impl Context {
@@ -63,8 +63,8 @@ impl Context {
         self.skin_list.lock().unwrap()
     }
 
-    pub fn ai(&self) -> &AiClient {
-        &self.ai
+    pub fn ai(&self) -> Option<&AiClient> {
+        self.ai.as_ref()
     }
 
     pub async fn new() -> Result<(Self, Vec<Shard>)> {
@@ -119,6 +119,12 @@ impl Context {
 
         let paginations = TokioMutexMap::with_shard_amount_and_hasher(16, IntBuildHasher);
 
+        let ai = if crate::ai::is_globally_enabled() {
+            Some(AiClient::new().await)
+        } else {
+            None
+        };
+
         let ctx = Self {
             cache,
             http,
@@ -131,7 +137,7 @@ impl Context {
             stats,
             replay_queue: ReplayQueue::new(),
             skin_list: Arc::new(Mutex::default()),
-            ai: AiClient::new().await,
+            ai,
         };
 
         Ok((ctx, shards))
