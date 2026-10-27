@@ -21,6 +21,7 @@ pub struct AiQueueTicket {
     inner: Arc<Mutex<AiQueueInner>>,
     receiver: Option<oneshot::Receiver<()>>,
     position: usize,
+    active_runner: bool,
 }
 
 pub struct AiQueuePermit {
@@ -57,6 +58,7 @@ impl AiQueue {
                 inner: Arc::clone(&self.inner),
                 receiver: None,
                 position: 0,
+                active_runner: true,
             })
         } else {
             let (tx, rx) = oneshot::channel();
@@ -66,6 +68,7 @@ impl AiQueue {
                 inner: Arc::clone(&self.inner),
                 receiver: Some(rx),
                 position,
+                active_runner: false,
             })
         }
     }
@@ -95,12 +98,30 @@ impl AiQueueTicket {
 
     /// Wait in strict FIFO order until it is this request's turn.
     pub async fn wait(mut self) -> AiQueuePermit {
+        self.active_runner = false; // Transferred to permit
         if let Some(rx) = self.receiver.take() {
             let _ = rx.await;
         }
 
         AiQueuePermit {
             inner: Arc::clone(&self.inner),
+        }
+    }
+}
+
+impl Drop for AiQueueTicket {
+    fn drop(&mut self) {
+        if self.active_runner {
+            let inner_clone = Arc::clone(&self.inner);
+            tokio::spawn(async move {
+                let mut inner = inner_clone.lock().await;
+                while let Some(tx) = inner.waiters.pop_front() {
+                    if tx.send(()).is_ok() {
+                        return; // Next waiter activated
+                    }
+                }
+                inner.running = false;
+            });
         }
     }
 }

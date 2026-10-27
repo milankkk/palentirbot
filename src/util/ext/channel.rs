@@ -35,6 +35,9 @@ impl ChannelExt for Id<ChannelMarker> {
         if let Some(ref attachment) = builder.attachment {
             req = req.attachments(slice::from_ref(attachment));
         }
+        if let Some(reply_id) = builder.reply {
+            req = req.reply(reply_id);
+        }
 
         Ok(req.await?.model().await?)
     }

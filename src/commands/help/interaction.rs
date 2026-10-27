@@ -9,7 +9,7 @@ use crate::{
     core::Context,
     util::{
         builder::{EmbedBuilder, MessageBuilder},
-        constants::{INVITE_LINK, SHISHABOT_DISCORD, SHISHABOT_GITHUB},
+        constants::{SHISHABOT_DISCORD, SHISHABOT_GITHUB},
         datetime::how_long_ago_dynamic,
         interaction::InteractionCommand,
         numbers::with_comma_int,
@@ -48,10 +48,12 @@ pub async fn slash_help(ctx: Arc<Context>, command: InteractionCommand) -> Resul
         value: format!("Feel free to join the [discord server]({SHISHABOT_DISCORD})"),
     };
 
+    let invite_url = format!("https://discord.com/oauth2/authorize?client_id={id}&permissions=4503599627388928&integration_type=0&scope=bot+applications.commands");
+
     let invite = EmbedField {
         inline: false,
         name: "Want to invite the bot to your server?".to_owned(),
-        value: format!("Try using this [**invite link**]({INVITE_LINK})"),
+        value: format!("Try using this [**invite link**]({invite_url})"),
     };
 
     let servers = EmbedField {

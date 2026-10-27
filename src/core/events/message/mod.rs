@@ -22,9 +22,24 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
         .and_then(|gid| ctx.guild_settings(gid, |s| s.effective_prefix().to_owned()))
         .unwrap_or_else(|| DEFAULT_PREFIX.to_owned());
 
+    let bot_id = ctx.cache.current_user(|u| u.id).ok();
+
+    // Check if the message is a direct reply to a message sent by the bot
+    let is_reply_to_bot = msg
+        .referenced_message
+        .as_deref()
+        .map(|replied| Some(replied.author.id) == bot_id)
+        .unwrap_or(false);
+
     let content = match msg.content.strip_prefix(prefix.as_str()) {
         Some(rest) => rest.trim_start(),
-        None => return,
+        None => {
+            if is_reply_to_bot && !msg.content.trim().is_empty() {
+                // Direct response to the AI without command prefix
+                crate::commands::utility::handle_prefix_ask(ctx, &msg, &msg.content, &prefix).await;
+            }
+            return;
+        }
     };
     if content.is_empty() {
         return;
@@ -354,8 +369,14 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
                 builder::{EmbedBuilder, MessageBuilder},
                 constants::INVITE_LINK,
             };
+            let invite_url = ctx
+                .cache
+                .current_user(|u| {
+                    format!("https://discord.com/oauth2/authorize?client_id={}&permissions=4503599627388928&integration_type=0&scope=bot+applications.commands", u.id)
+                })
+                .unwrap_or_else(|_| INVITE_LINK.to_string());
             let embed = EmbedBuilder::new()
-                .description(INVITE_LINK)
+                .description(invite_url)
                 .title("Invite me to your server!")
                 .build();
             let _ = msg

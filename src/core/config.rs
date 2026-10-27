@@ -38,6 +38,10 @@ impl Paths {
         &self.danser
     }
 
+    pub fn folders(&self) -> &PathBuf {
+        &self.folders
+    }
+
     pub fn downloads(&self) -> PathBuf {
         let mut path = self.folders.clone();
         path.push("Downloads");

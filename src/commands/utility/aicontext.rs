@@ -143,15 +143,18 @@ pub async fn create_context_embed(ctx: &Context, channel_id: Id<ChannelMarker>) 
         });
     }
 
+    let num_predict = ctx.ai().num_predict();
+
     fields.push(EmbedField {
         inline: false,
         name: "🧠 Model & Memory Allocation".to_string(),
         value: format!(
             "• **Model:** `{model_name}`\n\
-             • **Total Context:** `{}` tokens\n\
+             • **Total Context:** `{}` tokens (max `{}` predicted)\n\
              • **Memory:** GPU VRAM (weights & active cache) + System RAM (context overflow)\n\
              • **Queue Status:** {queue_status}",
-            format_num(max_window)
+            format_num(max_window),
+            format_num(num_predict as usize)
         ),
     });
 
@@ -196,7 +199,11 @@ fn make_progress_bar(used: usize, total: usize, width: usize) -> String {
 }
 
 async fn fetch_channel_history(ctx: &Context, channel_id: Id<ChannelMarker>) -> Result<Vec<Message>> {
-    let response = ctx.http.channel_messages(channel_id).limit(20).await?;
+    let limit = std::env::var("AI_HISTORY_MESSAGES")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(100);
+    let response = ctx.http.channel_messages(channel_id).limit(limit).await?;
     let mut messages: Vec<Message> = response.model().await?;
 
     if let Some(cutoff) = ctx.ai().get_cutoff(channel_id).await {

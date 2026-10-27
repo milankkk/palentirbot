@@ -2,7 +2,7 @@ use std::borrow::Cow;
 
 use twilight_model::{
     channel::message::component::Component, channel::message::embed::Embed,
-    http::attachment::Attachment,
+    http::attachment::Attachment, id::{marker::MessageMarker, Id},
 };
 
 use super::EmbedBuilder;
@@ -13,6 +13,7 @@ pub struct MessageBuilder<'c> {
     pub embed: Option<Embed>,
     pub attachment: Option<Attachment>,
     pub components: Option<Vec<Component>>,
+    pub reply: Option<Id<MessageMarker>>,
 }
 
 impl<'c> MessageBuilder<'c> {
@@ -40,6 +41,12 @@ impl<'c> MessageBuilder<'c> {
 
     pub fn components(mut self, components: Vec<Component>) -> Self {
         self.components = Some(components);
+
+        self
+    }
+
+    pub fn reply(mut self, message_id: Id<MessageMarker>) -> Self {
+        self.reply = Some(message_id);
 
         self
     }

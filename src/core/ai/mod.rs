@@ -101,6 +101,11 @@ impl AiClient {
         self.ollama.num_ctx()
     }
 
+    /// Maximum generated tokens limit configured for Ollama.
+    pub fn num_predict(&self) -> i32 {
+        self.ollama.num_predict()
+    }
+
     /// Return the cached system-prompt template.
     pub async fn get_prompt(&self) -> String {
         self.cached_prompt.read().await.clone()
@@ -128,14 +133,18 @@ impl AiClient {
     }
 
     /// Read the prompt from disk or env var.
+    ///
+    /// Uses lossy UTF-8 decoding to handle any non-UTF-8 characters in the prompt
+    /// file without panicking or failing on startup.
     async fn load_prompt_from_disk() -> Result<String> {
         let source = std::env::var(SYSTEM_PROMPT_ENV)
             .unwrap_or_else(|_| "prompt.txt".to_owned());
 
         if source.ends_with(".txt") {
-            tokio::fs::read_to_string(&source)
+            let bytes = tokio::fs::read(&source)
                 .await
-                .with_context(|| format!("failed to read prompt file `{source}`"))
+                .with_context(|| format!("failed to read prompt file `{source}`"))?;
+            Ok(String::from_utf8_lossy(&bytes).into_owned())
         } else {
             Ok(source)
         }

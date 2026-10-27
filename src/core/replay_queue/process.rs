@@ -926,20 +926,43 @@ async fn calc_latest_pp(
     max_combo: u32,
     is_lazer: bool,
 ) -> Option<PpTriple> {
-    let dotnet_path = std::env::var("DOTNET_PATH")
-        .unwrap_or_else(|_| "/home/serverx/.dotnet/dotnet".to_string());
+    let dotnet_path = std::env::var("DOTNET_PATH").unwrap_or_else(|_| {
+        if let Ok(output) = std::process::Command::new("dotnet").arg("--version").output() {
+            if output.status.success() {
+                return "dotnet".to_string();
+            }
+        }
+        if let Ok(home) = std::env::var("HOME") {
+            let user_dotnet = std::path::PathBuf::from(home).join(".dotnet/dotnet");
+            if user_dotnet.exists() {
+                return user_dotnet.to_string_lossy().into_owned();
+            }
+        }
+        for p in &["/usr/bin/dotnet", "/usr/local/bin/dotnet", "/app/dotnet/dotnet"] {
+            if std::path::Path::new(p).exists() {
+                return p.to_string();
+            }
+        }
+        "dotnet".to_string()
+    });
     let perf_calc_path = std::env::var("PERF_CALC_PATH").unwrap_or_else(|_| {
-        let net10 = "/home/serverx/Documents/osudcbots/palentirbot/data/osu-tools/PerformanceCalculator/bin/Release/net10.0/PerformanceCalculator.dll";
-        if std::path::Path::new(net10).exists() {
-            net10.to_string()
+        let base = crate::core::BotConfig::get().paths.folders();
+        let net10 = base.join("osu-tools/PerformanceCalculator/bin/Release/net10.0/PerformanceCalculator.dll");
+        if net10.exists() {
+            net10.to_string_lossy().into_owned()
         } else {
-            "/home/serverx/Documents/osudcbots/palentirbot/data/osu-tools/PerformanceCalculator/bin/Release/net8.0/PerformanceCalculator.dll".to_string()
+            let net8 = base.join("osu-tools/PerformanceCalculator/bin/Release/net8.0/PerformanceCalculator.dll");
+            net8.to_string_lossy().into_owned()
         }
     });
 
-    if !std::path::Path::new(&dotnet_path).exists()
-        || !std::path::Path::new(&perf_calc_path).exists()
-    {
+    let dotnet_exists = if dotnet_path == "dotnet" {
+        true
+    } else {
+        std::path::Path::new(&dotnet_path).exists()
+    };
+
+    if !dotnet_exists || !std::path::Path::new(&perf_calc_path).exists() {
         return None;
     }
 
