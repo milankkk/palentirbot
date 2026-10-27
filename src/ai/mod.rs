@@ -128,6 +128,9 @@ pub struct AiClient {
     /// this instant are excluded from the AI's conversation history, effectively
     /// "clearing" the context for that channel.
     context_cutoffs: RwLock<HashMap<Id<ChannelMarker>, i64>>,
+    /// Per-server cutoff timestamps (unix seconds). Messages created at or before
+    /// this instant are excluded from the AI's conversation history across the entire guild.
+    server_context_cutoffs: RwLock<HashMap<Id<GuildMarker>, i64>>,
 }
 
 impl AiClient {
@@ -147,6 +150,7 @@ impl AiClient {
             queue: AiQueue::new(max_queue_size),
             cached_prompt: RwLock::new(prompt),
             context_cutoffs: RwLock::new(HashMap::new()),
+            server_context_cutoffs: RwLock::new(HashMap::new()),
         }
     }
 
@@ -194,10 +198,10 @@ impl AiClient {
         self.ollama.num_predict()
     }
 
-    /// Return the cached system-prompt template (with search instructions appended if SearXNG is enabled).
+    /// Return the cached system-prompt template (with search instructions appended only if not already present).
     pub async fn get_prompt(&self) -> String {
         let base = self.cached_prompt.read().await.clone();
-        if self.search.is_enabled() {
+        if self.search.is_enabled() && !base.contains("<search>") {
             format!("{base}\n{SEARCH_SYSTEM_PROMPT}")
         } else {
             base
@@ -220,9 +224,28 @@ impl AiClient {
             .insert(channel_id, now);
     }
 
-    /// Return the cutoff timestamp for a channel, if any.
-    pub async fn get_cutoff(&self, channel_id: Id<ChannelMarker>) -> Option<i64> {
-        self.context_cutoffs.read().await.get(&channel_id).copied()
+    /// Mark a cutoff for an entire server — messages older than or equal to `now` in this guild will be ignored.
+    pub async fn clear_server_context(&self, guild_id: Id<GuildMarker>) {
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
+        self.server_context_cutoffs
+            .write()
+            .await
+            .insert(guild_id, now);
+    }
+
+    /// Return the effective cutoff timestamp for a channel/guild, if any.
+    pub async fn get_cutoff(&self, channel_id: Id<ChannelMarker>, guild_id: Option<Id<GuildMarker>>) -> Option<i64> {
+        let channel_cutoff = self.context_cutoffs.read().await.get(&channel_id).copied();
+        let server_cutoff = match guild_id {
+            Some(gid) => self.server_context_cutoffs.read().await.get(&gid).copied(),
+            None => None,
+        };
+        match (channel_cutoff, server_cutoff) {
+            (Some(c), Some(s)) => Some(c.max(s)),
+            (Some(c), None) => Some(c),
+            (None, Some(s)) => Some(s),
+            (None, None) => None,
+        }
     }
 
     /// Read the prompt from disk or env var.

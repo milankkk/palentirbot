@@ -21,6 +21,14 @@ pub enum AiClearAction {
     PromptOnly,
 }
 
+#[derive(Copy, Clone, CommandOption, CreateOption, Eq, PartialEq)]
+pub enum AiClearScope {
+    #[option(name = "This channel only", value = "channel")]
+    Channel,
+    #[option(name = "Entire server", value = "server")]
+    Server,
+}
+
 #[derive(CommandModel, CreateCommand, SlashCommand)]
 #[command(name = "aiclear")]
 #[flags(AUTHORITY, SKIP_DEFER)]
@@ -28,6 +36,8 @@ pub enum AiClearAction {
 pub struct AiClear {
     /// What action to perform (defaults to clearing context and reloading prompt)
     action: Option<AiClearAction>,
+    /// Clear context for this channel only or the whole server (defaults to this channel)
+    scope: Option<AiClearScope>,
 }
 
 async fn slash_aiclear(ctx: Arc<Context>, mut command: InteractionCommand) -> Result<()> {
@@ -48,8 +58,11 @@ async fn slash_aiclear(ctx: Arc<Context>, mut command: InteractionCommand) -> Re
         }
     };
 
-    let AiClear { action } = AiClear::from_interaction(command.input_data())?;
+    let AiClear { action, scope } = AiClear::from_interaction(command.input_data())?;
     let channel_id = command.channel_id;
+    let guild_id = command.guild_id;
+
+    let is_server_scope = scope == Some(AiClearScope::Server) && guild_id.is_some();
 
     let do_context = match action {
         None | Some(AiClearAction::Both) | Some(AiClearAction::ContextOnly) => true,
@@ -62,14 +75,23 @@ async fn slash_aiclear(ctx: Arc<Context>, mut command: InteractionCommand) -> Re
     };
 
     if do_context {
-        // Set context cutoff for this channel so older messages are ignored
-        ai.clear_context(channel_id).await;
+        if is_server_scope {
+            if let Some(gid) = guild_id {
+                ai.clear_server_context(gid).await;
+            }
+        } else {
+            ai.clear_context(channel_id).await;
+        }
     }
 
     let mut response = String::new();
 
     if do_context {
-        response.push_str("🧹 AI conversation context cleared for this channel.\n");
+        if is_server_scope {
+            response.push_str("🧹 AI conversation context cleared for the entire server.\n");
+        } else {
+            response.push_str("🧹 AI conversation context cleared for this channel.\n");
+        }
     }
 
     if do_prompt {

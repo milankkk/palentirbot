@@ -24,8 +24,10 @@ use crate::{
     },
 };
 
-/// Maximum number of previous Discord messages sent to the AI.
-const HISTORY_LIMIT: u16 = 100;
+/// Default number of previous Discord messages sent to the AI (kept focused to prevent context pollution).
+const DEFAULT_HISTORY_LIMIT: u16 = 15;
+/// Hard ceiling for history messages.
+const MAX_HISTORY_LIMIT: u16 = 30;
 /// Maximum number of characters taken from a single historical message.
 const HISTORY_MESSAGE_CHAR_LIMIT: usize = 1_500;
 /// Keep some room below Discord's 2,000-character message limit.
@@ -474,15 +476,30 @@ pub async fn execute_ai_question(
         .current_user(|user| user.id)
         .expect("missing CurrentUser in cache");
 
-    let history = get_history(ctx, channel_id, exclude_message_id).await?;
+    let history = get_history(ctx, channel_id, guild_id, exclude_message_id).await?;
+
+    let server_name = guild_id
+        .and_then(|gid| ctx.cache.guild(gid, |g| g.name().to_string()).ok())
+        .unwrap_or_else(|| "Direct Message".to_string());
+
+    let channel_name = ctx
+        .cache
+        .channel(channel_id, |c| c.name.clone())
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "chat".to_string());
+
+    let location_header = format!(
+        "[Discord Context: Server: \"{server_name}\" | Channel: \"#{channel_name}\"]\nMaintain conversation context strictly within this server and channel."
+    );
 
     let raw_prompt = ai.get_prompt().await;
     let system_prompt = match mode {
         AiMode::Fast => format!(
-            "{raw_prompt}\n\n[Operating Mode: Fast Mode]\nProvide a direct, snappy response. Do not use deep internal reasoning."
+            "{raw_prompt}\n\n{location_header}\n\n[Mode: Fast Mode]\nBe direct and concise. You may use <search> or <browse> if you need external facts."
         ),
         AiMode::Thinking => format!(
-            "{raw_prompt}\n\n[Operating Mode: Thinking Mode]\nReason carefully through the request before formulating your response."
+            "{raw_prompt}\n\n{location_header}\n\n[Mode: Thinking Mode]\nCarefully reason through the question in your thoughts before closing with </think> and writing your concise response for the user."
         ),
     };
 
@@ -573,12 +590,14 @@ pub async fn execute_ai_question(
 async fn get_history(
     ctx: &Context,
     channel_id: Id<ChannelMarker>,
+    guild_id: Option<Id<GuildMarker>>,
     exclude_message_id: Option<Id<MessageMarker>>,
 ) -> Result<Vec<Message>> {
     let limit = std::env::var("AI_HISTORY_MESSAGES")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(HISTORY_LIMIT);
+        .unwrap_or(DEFAULT_HISTORY_LIMIT)
+        .min(MAX_HISTORY_LIMIT);
 
     let response = ctx
         .http
@@ -593,7 +612,7 @@ async fn get_history(
     }
 
     if let Some(ai) = ctx.ai() {
-        if let Some(cutoff) = ai.get_cutoff(channel_id).await {
+        if let Some(cutoff) = ai.get_cutoff(channel_id, guild_id).await {
             messages.retain(|msg| msg.timestamp.as_secs() > cutoff);
         }
     }
@@ -617,24 +636,36 @@ fn convert_history(history: Vec<Message>, bot_id: Id<UserMarker>) -> Vec<AiMessa
         let content = sanitize_llm_text(&truncate_history_message(&message.content));
 
         if message.author.id == bot_id {
+            // Filter out system placeholders, status updates, and danser replay announcements
             if content.starts_with("⏳ Waiting in AI queue")
                 || content.starts_with("⏳ Thinking")
                 || content.starts_with("💭 Thinking")
                 || content.starts_with("🧠 **Thinking")
                 || content.starts_with("🌐 Thinking")
+                || content.starts_with("🌐 Browsing")
                 || content.starts_with("🖼️ Thinking")
                 || content.starts_with("✍️ Thinking")
+                || content.starts_with("⚡ Generating")
                 || content.starts_with("💭 Generating")
                 || content.starts_with("⚠️ ")
                 || content.starts_with("🧹 ")
                 || content.starts_with("🏓 Pong")
                 || content.starts_with("*(blinks blankly")
                 || content.starts_with("Something went wrong while asking the AI")
+                || content.contains("replays.insertdomainname.be")
+                || content.contains("Finished rendering replay")
+                || content.contains("Started replay processing")
             {
                 continue;
             }
             raw_messages.push(AiMessage::assistant(content));
         } else {
+            // Ignore non-AI commands to prevent polluting the conversation with danser/utility spam
+            let trimmed = content.trim();
+            if is_non_ai_command(trimmed) {
+                continue;
+            }
+
             let author_name = sanitize_llm_text(&message.author.name);
             let cleaned = strip_command_prefix(&content);
             if !cleaned.is_empty() {
@@ -658,11 +689,24 @@ fn convert_history(history: Vec<Message>, bot_id: Id<UserMarker>) -> Vec<AiMessa
     coalesced
 }
 
+fn is_non_ai_command(content: &str) -> bool {
+    let lower = content.to_ascii_lowercase();
+    for prefix in &[
+        "!render", "!r ", "/render", "!queue", "!q ", "!skin", "!danser",
+        "!settings", "!setup", "!ping", "!help", "!np", "!replay",
+    ] {
+        if lower.starts_with(prefix) {
+            return true;
+        }
+    }
+    false
+}
+
 fn strip_command_prefix(content: &str) -> &str {
     let trimmed = content.trim();
     for prefix in &[
         "!ask ", "!ask", "!ai ", "!ai", "!a ", "!a",
-        "/ask ", "/ask", "!render ", "!render", "!queue", "!ping"
+        "!fast ", "!fast", "/ask ", "/ask", "/fast ", "/fast",
     ] {
         if let Some(rest) = trimmed.strip_prefix(prefix) {
             return rest.trim_start();
@@ -754,17 +798,15 @@ pub fn clean_ai_response(content: &str) -> String {
 
     if final_text.is_empty() {
         if let Some(thought) = unclosed_thought {
-            if !thought.is_empty() {
-                let partial = if thought.chars().count() > 1500 {
-                    let skip = thought.chars().count() - 1500;
-                    thought.chars().skip(skip).collect::<String>()
+            let trimmed = thought.trim();
+            if !trimmed.is_empty() {
+                let partial = if trimmed.chars().count() > 1500 {
+                    let skip = trimmed.chars().count() - 1500;
+                    trimmed.chars().skip(skip).collect::<String>()
                 } else {
-                    thought
+                    trimmed.to_string()
                 };
-                return format!(
-                    "⚠️ *(Reached max token limit while reasoning—partial thought)*:\n{}",
-                    format_server_emojis(partial.trim())
-                );
+                return format_server_emojis(partial.trim());
             }
         }
     }
@@ -843,7 +885,7 @@ mod tests {
         let unclosed = "<think>I am still thinking and got cut off";
         assert_eq!(
             clean_ai_response(unclosed),
-            "⚠️ *(Reached max token limit while reasoning—partial thought)*:\nI am still thinking and got cut off"
+            "I am still thinking and got cut off"
         );
 
         let prefix = "Assistant: Here is the answer.";
@@ -865,6 +907,16 @@ mod tests {
         assert_eq!(strip_command_prefix("!ai tell me a joke"), "tell me a joke");
         assert_eq!(strip_command_prefix("/ask who made you"), "who made you");
         assert_eq!(strip_command_prefix("hello world"), "hello world");
+    }
+
+    #[test]
+    fn test_is_non_ai_command() {
+        assert!(is_non_ai_command("!render https://example.com/replay.osr"));
+        assert!(is_non_ai_command("!queue"));
+        assert!(is_non_ai_command("!skin"));
+        assert!(!is_non_ai_command("!ask what is osu?"));
+        assert!(!is_non_ai_command("!fast hello"));
+        assert!(!is_non_ai_command("can you render this?"));
     }
 
     #[test]

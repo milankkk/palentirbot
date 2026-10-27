@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 use twilight_model::id::{marker::ChannelMarker, Id};
 
 use super::search::{
-    download_media, extract_attach_tags, extract_search_tags, find_closed_search_tag, AiSearchTag,
-    SearxClient,
+    download_media, extract_attach_tags, extract_search_tags, fetch_webpage_clean_text,
+    find_closed_search_tag, AiSearchTag, SearxClient,
 };
 use super::{AiMessage, AiMode};
 
@@ -468,7 +468,8 @@ impl OllamaClient {
                         if let Some(first_tag) = fallback_tags.into_iter().next() {
                             search_rounds += 1;
                             let (category_label, query, search_category) = match &first_tag {
-                                AiSearchTag::Web(q) => ("web", q.clone(), "general"),
+                                AiSearchTag::Web(q) => ("web (DuckDuckGo)", q.clone(), "general"),
+                                AiSearchTag::Browse(u) => ("webpage", u.clone(), "browse"),
                                 AiSearchTag::Image(q) => ("images", q.clone(), "images"),
                                 AiSearchTag::Audio(q) => ("audio/media", q.clone(), "music,files,videos"),
                             };
@@ -479,20 +480,37 @@ impl OllamaClient {
                                 safesearch_on: safesearch_level > 0,
                             });
 
-                            let search_results_text = self
-                                .execute_search_and_collect(
-                                    searx,
-                                    &first_tag,
-                                    &query,
-                                    search_category,
-                                    safesearch_level,
-                                    &mut candidate_media_urls,
-                                )
-                                .await;
+                            let search_results_text = match &first_tag {
+                                AiSearchTag::Browse(url) => {
+                                    match fetch_webpage_clean_text(searx.client(), url).await {
+                                        Ok(content) => {
+                                            format!(
+                                                "\n[Webpage Content for \"{url}\"]:\n{content}\n\n[Instructions]: Synthesize this content to answer the user's question accurately in character.\n"
+                                            )
+                                        }
+                                        Err(e) => {
+                                            format!(
+                                                "\n[Webpage Content for \"{url}\"]: Could not load page ({e}). Use your current knowledge or other search results.\n"
+                                            )
+                                        }
+                                    }
+                                }
+                                _ => {
+                                    self.execute_search_and_collect(
+                                        searx,
+                                        &first_tag,
+                                        &query,
+                                        search_category,
+                                        safesearch_level,
+                                        &mut candidate_media_urls,
+                                    )
+                                    .await
+                                }
+                            };
 
                             conversation.push(AiMessage::assistant(full_text));
                             conversation.push(AiMessage::user(format!(
-                                "{search_results_text}\nNow continue thinking and respond to the user based on these search results."
+                                "{search_results_text}\nNow continue thinking, close with </think> when done, and respond to the user based on these search results."
                             )));
                             continue;
                         }
@@ -501,13 +519,14 @@ impl OllamaClient {
                 }
                 StreamResult::SearchIntercepted {
                     tag,
+                    partial_thinking,
                     partial_content,
-                    ..
                 } => {
                     search_rounds += 1;
 
                     let (category_label, query, search_category) = match &tag {
-                        AiSearchTag::Web(q) => ("web", q.clone(), "general"),
+                        AiSearchTag::Web(q) => ("web (DuckDuckGo)", q.clone(), "general"),
+                        AiSearchTag::Browse(u) => ("webpage", u.clone(), "browse"),
                         AiSearchTag::Image(q) => ("images", q.clone(), "images"),
                         AiSearchTag::Audio(q) => ("audio/media", q.clone(), "music,files,videos"),
                     };
@@ -518,31 +537,55 @@ impl OllamaClient {
                         safesearch_on: safesearch_level > 0,
                     });
 
-                    let search_results_text = self
-                        .execute_search_and_collect(
-                            searx,
-                            &tag,
-                            &query,
-                            search_category,
-                            safesearch_level,
-                            &mut candidate_media_urls,
-                        )
-                        .await;
+                    let search_results_text = match &tag {
+                        AiSearchTag::Browse(url) => {
+                            match fetch_webpage_clean_text(searx.client(), url).await {
+                                Ok(content) => {
+                                    format!(
+                                        "\n[Webpage Content for \"{url}\"]:\n{content}\n\n[Instructions]: Synthesize this content to answer the user's question accurately in character.\n"
+                                    )
+                                }
+                                Err(e) => {
+                                    format!(
+                                        "\n[Webpage Content for \"{url}\"]: Could not load page ({e}). Use your current knowledge or other search results.\n"
+                                    )
+                                }
+                            }
+                        }
+                        _ => {
+                            self.execute_search_and_collect(
+                                searx,
+                                &tag,
+                                &query,
+                                search_category,
+                                safesearch_level,
+                                &mut candidate_media_urls,
+                            )
+                            .await
+                        }
+                    };
 
                     let tag_str = match &tag {
                         AiSearchTag::Web(q) => format!("<search>{q}</search>"),
+                        AiSearchTag::Browse(u) => format!("<browse>{u}</browse>"),
                         AiSearchTag::Image(q) => format!("<search_image>{q}</search_image>"),
                         AiSearchTag::Audio(q) => format!("<search_audio>{q}</search_audio>"),
                     };
                     let assistant_msg = if !partial_content.trim().is_empty() {
-                        format!("{}\n{tag_str}", partial_content.trim())
+                        if !partial_thinking.trim().is_empty() {
+                            format!("<think>\n{}\n</think>\n{}\n{}", partial_thinking.trim(), partial_content.trim(), tag_str)
+                        } else {
+                            format!("{}\n{}", partial_content.trim(), tag_str)
+                        }
+                    } else if !partial_thinking.trim().is_empty() {
+                        format!("<think>\n{}\n</think>\n{}", partial_thinking.trim(), tag_str)
                     } else {
                         tag_str
                     };
                     conversation.push(AiMessage::assistant(assistant_msg));
 
                     conversation.push(AiMessage::user(format!(
-                        "{search_results_text}\nNow continue thinking and respond to the user based on these search results."
+                        "{search_results_text}\nNow continue thinking, close with </think> when done, and respond to the user based on these search results."
                     )));
                 }
             }
@@ -695,6 +738,7 @@ impl OllamaClient {
                         );
                     }
                 }
+                AiSearchTag::Browse(_) => {}
             },
             Err(e) => {
                 tracing::warn!(?e, %query, "SearXNG search failed");
@@ -738,16 +782,21 @@ impl OllamaClient {
 
 /// Format partial thinking and content into a single string.
 pub fn format_partial_output(thinking: &str, content: &str) -> String {
-    if content.is_empty() {
-        if thinking.is_empty() {
+    let trimmed_content = content.trim();
+    let trimmed_thinking = thinking.trim();
+
+    if trimmed_content.is_empty() {
+        if trimmed_thinking.is_empty() {
             String::new()
         } else {
-            format!("<think>{}</think>", thinking)
+            // Model generated thoughts but stopped before outputting content.
+            // Salvage the thinking output so it isn't completely stripped!
+            trimmed_thinking.to_string()
         }
-    } else if !thinking.is_empty() && !content.contains("<think>") {
-        format!("<think>{}</think>{}", thinking, content)
+    } else if !trimmed_thinking.is_empty() && !trimmed_content.contains("<think>") {
+        format!("<think>{trimmed_thinking}</think>\n{trimmed_content}")
     } else {
-        content.to_string()
+        trimmed_content.to_string()
     }
 }
 
@@ -787,5 +836,13 @@ mod tests {
         assert_eq!(chunk.message.as_ref().unwrap().content, "hello");
         assert_eq!(chunk.message.as_ref().unwrap().thinking.as_deref(), Some("reasoning..."));
         assert!(!chunk.done);
+    }
+
+    #[test]
+    fn test_format_partial_output() {
+        assert_eq!(format_partial_output("thinking", "content"), "<think>thinking</think>\ncontent");
+        assert_eq!(format_partial_output("only thoughts", ""), "only thoughts");
+        assert_eq!(format_partial_output("", "only content"), "only content");
+        assert_eq!(format_partial_output("", ""), "");
     }
 }

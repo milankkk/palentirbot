@@ -10,7 +10,10 @@ use twilight_model::{
             Message,
         },
     },
-    id::{marker::ChannelMarker, Id},
+    id::{
+        marker::{ChannelMarker, GuildMarker},
+        Id,
+    },
 };
 
 use crate::{
@@ -36,7 +39,7 @@ async fn slash_aicontext(ctx: Arc<Context>, command: InteractionCommand) -> Resu
         return Ok(());
     }
 
-    let embed = create_context_embed(&ctx, command.channel_id).await;
+    let embed = create_context_embed(&ctx, command.channel_id, command.guild_id).await;
     let builder = MessageBuilder::new().embed(embed);
     command.callback(&ctx, builder, true).await?;
 
@@ -44,7 +47,11 @@ async fn slash_aicontext(ctx: Arc<Context>, command: InteractionCommand) -> Resu
 }
 
 /// Build the rich context breakdown embed for both slash and prefix commands.
-pub async fn create_context_embed(ctx: &Context, channel_id: Id<ChannelMarker>) -> Embed {
+pub async fn create_context_embed(
+    ctx: &Context,
+    channel_id: Id<ChannelMarker>,
+    guild_id: Option<Id<GuildMarker>>,
+) -> Embed {
     let ai = match ctx.ai() {
         Some(ai) => ai,
         None => {
@@ -69,7 +76,7 @@ pub async fn create_context_embed(ctx: &Context, channel_id: Id<ChannelMarker>) 
     let prompt_tokens = (prompt_chars as f64 / 3.8).round() as usize;
 
     // 2. Channel conversation history metrics
-    let history = fetch_channel_history(ctx, channel_id).await.unwrap_or_default();
+    let history = fetch_channel_history(ctx, channel_id, guild_id).await.unwrap_or_default();
     let total_messages = history.len();
     let mut user_messages = 0;
     let mut bot_messages = 0;
@@ -221,16 +228,20 @@ fn make_progress_bar(used: usize, total: usize, width: usize) -> String {
     format!("[{}{}] {:.1}%", "█".repeat(filled), "░".repeat(empty), percent)
 }
 
-async fn fetch_channel_history(ctx: &Context, channel_id: Id<ChannelMarker>) -> Result<Vec<Message>> {
+async fn fetch_channel_history(
+    ctx: &Context,
+    channel_id: Id<ChannelMarker>,
+    guild_id: Option<Id<GuildMarker>>,
+) -> Result<Vec<Message>> {
     let limit = std::env::var("AI_HISTORY_MESSAGES")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(100);
+        .unwrap_or(15);
     let response = ctx.http.channel_messages(channel_id).limit(limit).await?;
     let mut messages: Vec<Message> = response.model().await?;
 
     if let Some(ai) = ctx.ai() {
-        if let Some(cutoff) = ai.get_cutoff(channel_id).await {
+        if let Some(cutoff) = ai.get_cutoff(channel_id, guild_id).await {
             messages.retain(|msg| msg.timestamp.as_secs() > cutoff);
         }
     }

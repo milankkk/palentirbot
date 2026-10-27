@@ -26,6 +26,7 @@ pub struct SearxResponse {
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum AiSearchTag {
     Web(String),
+    Browse(String),
     Image(String),
     Audio(String),
 }
@@ -60,19 +61,60 @@ impl Default for SearxClient {
 
 impl SearxClient {
     pub fn is_enabled(&self) -> bool {
-        self.base_url.is_some()
+        true
+    }
+
+    pub fn client(&self) -> &Client {
+        &self.client
     }
 
     pub fn base_url(&self) -> Option<&str> {
         self.base_url.as_deref()
     }
 
-    /// Query SearXNG for results across categories (`general`, `images`, `music,files,videos`).
+    /// Direct DuckDuckGo HTML search for fast, reliable web results without CAPTCHA.
+    pub async fn search_duckduckgo(&self, query: &str) -> Result<Vec<SearxResultItem>> {
+        let url = "https://html.duckduckgo.com/html/";
+        let res = self
+            .client
+            .post(url)
+            .header(reqwest::header::USER_AGENT, "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36")
+            .header(reqwest::header::ACCEPT, "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+            .header(reqwest::header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .header(reqwest::header::REFERER, "https://html.duckduckgo.com/")
+            .form(&[("q", query), ("b", "")])
+            .send()
+            .await
+            .context("failed to query DuckDuckGo")?;
+
+        let status = res.status();
+        if !status.is_success() {
+            eyre::bail!("DuckDuckGo returned HTTP {status}");
+        }
+
+        let body = res.text().await.context("failed to read DuckDuckGo response")?;
+        let results = parse_duckduckgo_html(&body);
+        Ok(results)
+    }
+
+    /// Query web search (DuckDuckGo first, with SearXNG fallback) or SearXNG media categories (`images`, `music,files,videos`).
     pub async fn search(&self, query: &str, category: &str, safesearch: u8) -> Result<Vec<SearxResultItem>> {
-        let base_url = self
-            .base_url
-            .as_deref()
-            .ok_or_else(|| eyre::eyre!("SearXNG is not configured (SEARXNG_URL is empty)"))?;
+        if category == "general" {
+            match self.search_duckduckgo(query).await {
+                Ok(results) if !results.is_empty() => return Ok(results),
+                Ok(_) => {
+                    tracing::debug!(query, "DuckDuckGo returned 0 results, attempting SearXNG fallback");
+                }
+                Err(err) => {
+                    tracing::debug!(?err, query, "DuckDuckGo search error, attempting SearXNG fallback");
+                }
+            }
+        }
+
+        let base_url = match self.base_url.as_deref() {
+            Some(u) => u,
+            None => eyre::bail!("SearXNG is not configured (SEARXNG_URL is empty)"),
+        };
 
         let url = format!("{base_url}/search");
         let res = self
@@ -116,7 +158,16 @@ pub fn is_private_or_local_ip(ip: std::net::IpAddr) -> bool {
 
 /// Validate a URL against SSRF attacks (rejecting non-http/https, localhost, and private/local IPs).
 pub async fn validate_url_for_ssrf(url_str: &str) -> Result<reqwest::Url> {
-    let parsed = reqwest::Url::parse(url_str).context("invalid URL")?;
+    let raw = url_str
+        .trim()
+        .trim_matches(|c| c == '"' || c == '\'' || c == '`' || c == '<' || c == '>')
+        .trim();
+    let url_to_parse = if !raw.contains("://") {
+        format!("https://{raw}")
+    } else {
+        raw.to_string()
+    };
+    let parsed = reqwest::Url::parse(&url_to_parse).context("invalid URL")?;
     let scheme = parsed.scheme();
     if scheme != "http" && scheme != "https" {
         eyre::bail!("URL scheme must be http or https");
@@ -147,6 +198,210 @@ pub async fn validate_url_for_ssrf(url_str: &str) -> Result<reqwest::Url> {
     }
 
     Ok(parsed)
+}
+
+/// Decode common HTML entities into readable text characters.
+pub fn decode_html_entities(input: &str) -> String {
+    input
+        .replace("&amp;", "&")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&apos;", "'")
+        .replace("&#x27;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&nbsp;", " ")
+        .replace("&#160;", " ")
+        .replace("&#8211;", "–")
+        .replace("&#8212;", "—")
+        .replace("&#8216;", "‘")
+        .replace("&#8217;", "’")
+        .replace("&#8220;", "“")
+        .replace("&#8221;", "”")
+}
+
+/// Strip all HTML `<...>` tags and decode HTML entities.
+pub fn strip_html_tags(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut inside = false;
+    for c in input.chars() {
+        if c == '<' {
+            inside = true;
+        } else if c == '>' {
+            inside = false;
+        } else if !inside {
+            output.push(c);
+        }
+    }
+    decode_html_entities(&output)
+}
+
+/// Parse DuckDuckGo HTML search results into structured items.
+pub fn parse_duckduckgo_html(html: &str) -> Vec<SearxResultItem> {
+    let mut results = Vec::new();
+    let mut remaining = html;
+
+    while let Some(pos) = remaining.find("class=\"result__title\"") {
+        let block = &remaining[pos..];
+        let next_pos = block["class=\"result__title\"".len()..].find("class=\"result__title\"");
+        let chunk = match next_pos {
+            Some(n) => &block[..n + "class=\"result__title\"".len()],
+            None => block,
+        };
+
+        let mut title = None;
+        let mut url = None;
+        let mut snippet = None;
+
+        // Find <a class="result__a" href="...">Title</a>
+        if let Some(a_pos) = chunk.find("class=\"result__a\"") {
+            let a_start = &chunk[..a_pos];
+            if let Some(tag_open) = a_start.rfind("<a ") {
+                let a_tag_full = &chunk[tag_open..];
+                if let Some(href_pos) = a_tag_full.find("href=\"") {
+                    let href_start = &a_tag_full[href_pos + 6..];
+                    if let Some(href_end) = href_start.find('"') {
+                        let extracted_url = &href_start[..href_end];
+                        if extracted_url.starts_with("http") {
+                            url = Some(decode_html_entities(extracted_url));
+                        }
+                    }
+                }
+                if let Some(content_start) = a_tag_full.find('>') {
+                    let tag_inner = &a_tag_full[content_start + 1..];
+                    if let Some(content_end) = tag_inner.find("</a>") {
+                        let raw_title = &tag_inner[..content_end];
+                        let clean = strip_html_tags(raw_title).trim().to_string();
+                        if !clean.is_empty() {
+                            title = Some(clean);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Find <a class="result__snippet" ...>Snippet</a>
+        if let Some(s_pos) = chunk.find("class=\"result__snippet\"") {
+            let s_tag = &chunk[s_pos..];
+            if let Some(content_start) = s_tag.find('>') {
+                let tag_inner = &s_tag[content_start + 1..];
+                if let Some(content_end) = tag_inner.find("</a>") {
+                    let raw_snippet = &tag_inner[..content_end];
+                    let clean = strip_html_tags(raw_snippet).trim().to_string();
+                    if !clean.is_empty() {
+                        snippet = Some(clean);
+                    }
+                }
+            }
+        }
+
+        if let (Some(u), Some(t)) = (url, title) {
+            results.push(SearxResultItem {
+                title: Some(t),
+                url: Some(u),
+                content: snippet,
+                ..Default::default()
+            });
+        }
+
+        remaining = match next_pos {
+            Some(n) => &block[n + "class=\"result__title\"".len()..],
+            None => break,
+        };
+    }
+
+    results
+}
+
+/// Fetch a webpage and extract clean, readable text (up to 3,500 characters).
+pub async fn fetch_webpage_clean_text(client: &Client, url_str: &str) -> Result<String> {
+    let validated = validate_url_for_ssrf(url_str).await?;
+
+    let res = client
+        .get(validated.as_str())
+        .header(reqwest::header::USER_AGENT, "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36")
+        .header(reqwest::header::ACCEPT, "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8")
+        .header(reqwest::header::ACCEPT_LANGUAGE, "en-US,en;q=0.9")
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await
+        .context("failed to request webpage")?;
+
+    let status = res.status();
+    if !status.is_success() {
+        eyre::bail!("Webpage returned HTTP {status}");
+    }
+
+    let bytes = res.bytes().await.context("failed to read webpage bytes")?;
+    let raw_html = String::from_utf8_lossy(&bytes[..bytes.len().min(5 * 1024 * 1024)]);
+
+    let clean = extract_article_text(&raw_html);
+    if clean.is_empty() {
+        eyre::bail!("No readable text found on webpage");
+    }
+
+    let truncated: String = clean.chars().take(3500).collect();
+    Ok(truncated)
+}
+
+/// Clean HTML markup into human-readable article text.
+pub fn extract_article_text(html: &str) -> String {
+    let mut text = html.to_string();
+
+    // Strip scripts, styles, noscript, nav, footer, header
+    for tag in &["script", "style", "noscript", "nav", "footer", "header"] {
+        let open_pattern = format!("<{tag}");
+        let close_pattern = format!("</{tag}>");
+        while let Some(start) = text.to_ascii_lowercase().find(&open_pattern) {
+            if let Some(end) = text[start..].to_ascii_lowercase().find(&close_pattern) {
+                let end_idx = start + end + close_pattern.len();
+                text.drain(start..end_idx);
+            } else {
+                break;
+            }
+        }
+    }
+
+    // Replace line-break tags with newlines
+    let mut with_breaks = String::with_capacity(text.len());
+    let mut remaining = text.as_str();
+
+    while let Some(open) = remaining.find('<') {
+        with_breaks.push_str(&remaining[..open]);
+        let after_open = &remaining[open..];
+        if let Some(close) = after_open.find('>') {
+            let tag_content = &after_open[1..close].to_ascii_lowercase();
+            if tag_content.starts_with("br")
+                || tag_content.starts_with("/p")
+                || tag_content.starts_with("/div")
+                || tag_content.starts_with("/li")
+                || tag_content.starts_with("/h1")
+                || tag_content.starts_with("/h2")
+                || tag_content.starts_with("/h3")
+                || tag_content.starts_with("/h4")
+                || tag_content.starts_with("p")
+                || tag_content.starts_with("div")
+            {
+                with_breaks.push('\n');
+            }
+            remaining = &after_open[close + 1..];
+        } else {
+            break;
+        }
+    }
+    with_breaks.push_str(remaining);
+
+    // Decode entities and collapse lines
+    let decoded = decode_html_entities(&with_breaks);
+    let mut lines = Vec::new();
+    for line in decoded.lines() {
+        let collapsed: String = line.split_whitespace().collect::<Vec<_>>().join(" ");
+        if collapsed.len() > 1 {
+            lines.push(collapsed);
+        }
+    }
+
+    lines.join("\n")
 }
 
 const MAX_MEDIA_SIZE: usize = 15 * 1024 * 1024; // 15 MB
@@ -280,9 +535,8 @@ pub fn infer_media_extension(content_type: &str, bytes: &[u8], path: &str) -> Op
     None
 }
 
-/// Find the first closed search tag (`<search>...</search>`, `<search_image>...</search_image>`,
-/// or `<search_audio>...</search_audio>`) in text. Also handles `</search>` closing variant
-/// and `<web_search>`, `<image_search>`, `<audio_search>` aliases.
+/// Find the first closed search tag (`<search>...</search>`, `<browse>...</browse>`,
+/// `<search_image>...</search_image>`, or `<search_audio>...</search_audio>`) in text.
 pub fn find_closed_search_tag(text: &str) -> Option<AiSearchTag> {
     let mut remaining = text;
 
@@ -294,6 +548,17 @@ pub fn find_closed_search_tag(text: &str) -> Option<AiSearchTag> {
                 let query = rest[..close_idx].trim().to_string();
                 if !query.is_empty() {
                     return Some(AiSearchTag::Web(query));
+                }
+            }
+        } else if let Some(rest) = after_open.strip_prefix("<browse>").or_else(|| after_open.strip_prefix("<fetch>")) {
+            if let Some(close_idx) = rest.find("</browse>").or_else(|| rest.find("</fetch>")).or_else(|| rest.find("</search>")) {
+                let url = rest[..close_idx]
+                    .trim()
+                    .trim_matches(|c| c == '"' || c == '\'' || c == '`' || c == '<' || c == '>')
+                    .trim()
+                    .to_string();
+                if !url.is_empty() {
+                    return Some(AiSearchTag::Browse(url));
                 }
             }
         } else if let Some(rest) = after_open.strip_prefix("<search_image>").or_else(|| after_open.strip_prefix("<image_search>")) {
@@ -318,7 +583,7 @@ pub fn find_closed_search_tag(text: &str) -> Option<AiSearchTag> {
     None
 }
 
-/// Extract `<search*>` and `<attach>` tags. Supports aliases like `<web_search>`, `<image_search>`.
+/// Extract `<search*>`, `<browse>`, and `<attach>` tags.
 pub fn extract_search_tags(text: &str) -> Vec<AiSearchTag> {
     let mut tags = Vec::new();
     let mut remaining = text;
@@ -331,6 +596,20 @@ pub fn extract_search_tags(text: &str) -> Vec<AiSearchTag> {
                 let query = rest[..close_idx].trim().to_string();
                 if !query.is_empty() {
                     tags.push(AiSearchTag::Web(query));
+                }
+                remaining = &rest[close_idx + close_tag.len()..];
+                continue;
+            }
+        } else if let Some(rest) = after_open.strip_prefix("<browse>").or_else(|| after_open.strip_prefix("<fetch>")) {
+            let close_tag = if rest.contains("</browse>") { "</browse>" } else if rest.contains("</fetch>") { "</fetch>" } else { "</search>" };
+            if let Some(close_idx) = rest.find(close_tag) {
+                let url = rest[..close_idx]
+                    .trim()
+                    .trim_matches(|c| c == '"' || c == '\'' || c == '`' || c == '<' || c == '>')
+                    .trim()
+                    .to_string();
+                if !url.is_empty() {
+                    tags.push(AiSearchTag::Browse(url));
                 }
                 remaining = &rest[close_idx + close_tag.len()..];
                 continue;
@@ -415,6 +694,8 @@ pub fn strip_tool_tags(text: &str) -> String {
     for tag in &[
         "search",
         "web_search",
+        "browse",
+        "fetch",
         "search_image",
         "image_search",
         "search_audio",
@@ -553,6 +834,7 @@ mod tests {
         assert!(validate_url_for_ssrf("http://localhost:8080/evil").await.is_err());
         assert!(validate_url_for_ssrf("file:///etc/passwd").await.is_err());
         assert!(validate_url_for_ssrf("ftp://example.com/test").await.is_err());
+        assert!(validate_url_for_ssrf("duckduckgo.com").await.is_ok());
     }
 
     #[test]
@@ -568,5 +850,57 @@ mod tests {
 
         let jpg_bytes = [0xFF, 0xD8, 0xFF, 0xE0];
         assert_eq!(infer_media_extension("", &jpg_bytes, "/bar"), Some("jpg"));
+    }
+
+    #[test]
+    fn test_parse_duckduckgo_html() {
+        let sample_html = r#"
+            <div class="result results_links results_links_deep web-result ">
+              <div class="links_main links_deep result__body">
+                <h2 class="result__title">
+                  <a rel="nofollow" class="result__a" href="https://osu.ppy.sh/home/download">download | osu!</a>
+                </h2>
+                <a class="result__snippet" href="https://osu.ppy.sh/home/download">Rhythm is just a *click* away! Taiko and original modes.</a>
+              </div>
+            </div>
+        "#;
+        let results = parse_duckduckgo_html(sample_html);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].title.as_deref(), Some("download | osu!"));
+        assert_eq!(results[0].url.as_deref(), Some("https://osu.ppy.sh/home/download"));
+        assert!(results[0].content.as_deref().unwrap().contains("Rhythm is just a"));
+    }
+
+    #[test]
+    fn test_extract_article_text() {
+        let html = r#"
+            <html>
+                <head><script>alert('bad');</script><style>body { color: red; }</style></head>
+                <body>
+                    <header><nav>Home | About</nav></header>
+                    <h1>Article Title</h1>
+                    <p>First paragraph with <b>bold</b> text &amp; info.</p>
+                    <p>Second paragraph.</p>
+                    <footer>Copyright 2026</footer>
+                </body>
+            </html>
+        "#;
+        let text = extract_article_text(html);
+        assert!(!text.contains("alert"));
+        assert!(!text.contains("body {"));
+        assert!(!text.contains("Home | About"));
+        assert!(!text.contains("Copyright 2026"));
+        assert!(text.contains("Article Title"));
+        assert!(text.contains("First paragraph with bold text & info."));
+        assert!(text.contains("Second paragraph."));
+    }
+
+    #[test]
+    fn test_find_closed_browse_tag() {
+        let text = "I should check the website <browse>https://example.com/info</browse> let me see";
+        assert_eq!(
+            find_closed_search_tag(text),
+            Some(AiSearchTag::Browse("https://example.com/info".to_string()))
+        );
     }
 }

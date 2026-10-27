@@ -79,7 +79,7 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
                 return;
             }
             use crate::util::builder::MessageBuilder;
-            let embed = crate::ai::commands::create_context_embed(&ctx, msg.channel_id).await;
+            let embed = crate::ai::commands::create_context_embed(&ctx, msg.channel_id, msg.guild_id).await;
             let _ = msg
                 .channel_id
                 .create_message(&ctx, &MessageBuilder::new().embed(embed))
