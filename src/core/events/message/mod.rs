@@ -40,7 +40,7 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
                     return;
                 }
                 // Direct response to the AI without command prefix
-                crate::ai::commands::handle_prefix_ask(ctx, &msg, &msg.content, &prefix).await;
+                crate::ai::commands::handle_prefix_ask(ctx, &msg, &msg.content, &prefix, crate::ai::AiMode::Thinking).await;
             }
             return;
         }
@@ -54,13 +54,22 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
     let args_str = parts.next().unwrap_or("").trim();
 
     match cmd_name.as_str() {
-        // ── ask / ai ──────────────────────────────────────────────────────────
-        "ask" | "ai" | "a" => {
+        // ── ask / ai (Thinking mode) ──────────────────────────────────────────
+        "ask" | "ai" => {
             if !crate::ai::is_enabled_for_guild(&ctx, msg.guild_id) {
                 let _ = msg.error(&ctx, crate::ai::AI_DISABLED_REPLY).await;
                 return;
             }
-            crate::ai::commands::handle_prefix_ask(ctx, &msg, args_str, &prefix).await;
+            crate::ai::commands::handle_prefix_ask(ctx, &msg, args_str, &prefix, crate::ai::AiMode::Thinking).await;
+        }
+
+        // ── a / fast (Fast mode) ──────────────────────────────────────────────
+        "a" | "fast" => {
+            if !crate::ai::is_enabled_for_guild(&ctx, msg.guild_id) {
+                let _ = msg.error(&ctx, crate::ai::AI_DISABLED_REPLY).await;
+                return;
+            }
+            crate::ai::commands::handle_prefix_ask(ctx, &msg, args_str, &prefix, crate::ai::AiMode::Fast).await;
         }
 
         // ── aicontext / context ───────────────────────────────────────────────

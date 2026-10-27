@@ -8,9 +8,10 @@ use serde::{Deserialize, Serialize};
 use twilight_model::id::{marker::ChannelMarker, Id};
 
 use super::search::{
-    download_media, extract_attach_tags, extract_search_tags, AiSearchTag, SearxClient,
+    download_media, extract_attach_tags, extract_search_tags, find_closed_search_tag, AiSearchTag,
+    SearxClient,
 };
-use super::AiMessage;
+use super::{AiMessage, AiMode};
 
 pub const DEFAULT_MODEL: &str = "huihui_ai/deepseek-r1-abliterated:8b-0528-qwen3";
 pub const DEFAULT_NUM_CTX: u32 = 40_960;
@@ -35,6 +36,7 @@ pub struct LastGenerationStats {
 #[derive(Clone, Debug)]
 pub enum AiStatusUpdate {
     LoadingModel,
+    GeneratingFast,
     Reasoning {
         elapsed_secs: u64,
         thought_snippet: String,
@@ -127,6 +129,16 @@ pub struct OllamaStreamMessage {
 pub struct GenerationResult {
     pub content: String,
     pub attachment: Option<(String, Vec<u8>)>,
+}
+
+#[derive(Debug, Clone)]
+pub enum StreamResult {
+    Completed(String),
+    SearchIntercepted {
+        tag: AiSearchTag,
+        partial_thinking: String,
+        partial_content: String,
+    },
 }
 
 impl OllamaClient {
@@ -233,25 +245,34 @@ impl OllamaClient {
     }
 
     /// Ask Ollama with streaming NDJSON chunks, updating status callback and tracking thinking/load metrics.
+    /// When `allow_search_interception` is true, intercepts closing search tags (`</search*>` in thinking or content)
+    /// immediately so that search results can be injected in real time while thinking.
     pub async fn ask_stream<F>(
         &self,
         channel_id: Id<ChannelMarker>,
         messages: &[AiMessage],
+        allow_search_interception: bool,
+        mode: AiMode,
         mut on_status: F,
-    ) -> Result<String>
+    ) -> Result<StreamResult>
     where
         F: FnMut(AiStatusUpdate) + Send,
     {
-        on_status(AiStatusUpdate::LoadingModel);
+        let is_fast = mode == AiMode::Fast;
+        if is_fast {
+            on_status(AiStatusUpdate::GeneratingFast);
+        } else {
+            on_status(AiStatusUpdate::LoadingModel);
+        }
 
         let request = OllamaRequest {
             model: &self.model,
             messages,
             stream: true,
-            think: Some(self.think_enabled),
+            think: Some(!is_fast && self.think_enabled),
             options: OllamaOptions {
                 num_ctx: self.num_ctx,
-                num_predict: Some(self.num_predict),
+                num_predict: Some(if is_fast { 1024 } else { self.num_predict }),
                 repeat_penalty: self.repeat_penalty,
                 repeat_last_n: self.repeat_last_n,
                 presence_penalty: self.presence_penalty,
@@ -316,6 +337,18 @@ impl OllamaClient {
                             accumulated_thinking.push_str(th);
                             thinking_tokens += 1;
                             in_reasoning_state = true;
+
+                            // Real-time search interception while thinking
+                            if allow_search_interception {
+                                if let Some(tag) = find_closed_search_tag(&accumulated_thinking) {
+                                    return Ok(StreamResult::SearchIntercepted {
+                                        tag,
+                                        partial_thinking: accumulated_thinking,
+                                        partial_content: accumulated_content,
+                                    });
+                                }
+                            }
+
                             let snippet = format_thought_snippet(&accumulated_thinking);
                             on_status(AiStatusUpdate::Reasoning {
                                 elapsed_secs: start_time.elapsed().as_secs(),
@@ -328,6 +361,17 @@ impl OllamaClient {
                     if !msg.content.is_empty() {
                         accumulated_content.push_str(&msg.content);
                         response_tokens += 1;
+
+                        // Real-time search interception if tag is output in content
+                        if allow_search_interception {
+                            if let Some(tag) = find_closed_search_tag(&accumulated_content) {
+                                return Ok(StreamResult::SearchIntercepted {
+                                    tag,
+                                    partial_thinking: accumulated_thinking,
+                                    partial_content: accumulated_content,
+                                });
+                            }
+                        }
 
                         // Check inline <think> tags in content
                         let think_open = accumulated_content.find("<think>");
@@ -387,131 +431,126 @@ impl OllamaClient {
             }
         }
 
-        // Combine thinking into content if Ollama emitted pure thinking without <think> tags
-        let final_output = if accumulated_content.is_empty() && !accumulated_thinking.is_empty() {
-            format!("<think>{}</think>", accumulated_thinking)
-        } else if !accumulated_thinking.is_empty() && !accumulated_content.contains("<think>") {
-            format!("<think>{}</think>{}", accumulated_thinking, accumulated_content)
-        } else {
-            accumulated_content
-        };
-
-        Ok(final_output)
+        let final_output = format_partial_output(&accumulated_thinking, &accumulated_content);
+        Ok(StreamResult::Completed(final_output))
     }
 
-    /// Orchestrate streaming AI response, tag-based SearXNG search execution, and media downloading.
+    /// Orchestrate streaming AI response, real-time SearXNG search execution while thinking, and media downloading.
     pub async fn ask_orchestrated<F>(
         &self,
         searx: &SearxClient,
         channel_id: Id<ChannelMarker>,
         initial_messages: &[AiMessage],
         safesearch_level: u8,
+        mode: AiMode,
         mut on_status: F,
     ) -> Result<GenerationResult>
     where
         F: FnMut(AiStatusUpdate) + Send,
     {
         let mut conversation = initial_messages.to_vec();
+        if mode == AiMode::Fast {
+            conversation.push(AiMessage::assistant("</think>"));
+        }
+
         let mut candidate_media_urls: Vec<String> = Vec::new();
+        let mut search_rounds = 0;
+        const MAX_SEARCH_ROUNDS: usize = 2;
 
-        // 1. First generation turn
-        let raw_answer = self
-            .ask_stream(channel_id, &conversation, &mut on_status)
-            .await?;
+        let final_raw_answer = loop {
+            let allow_search = searx.is_enabled() && search_rounds < MAX_SEARCH_ROUNDS;
+            let stream_res = self
+                .ask_stream(channel_id, &conversation, allow_search, mode, &mut on_status)
+                .await?;
 
-        // 2. Search tag interception loop (up to 2 rounds)
-        let search_tags = extract_search_tags(&raw_answer);
-        let final_raw_answer = if !search_tags.is_empty() && searx.is_enabled() {
-            let mut search_results_text = String::new();
+            match stream_res {
+                StreamResult::Completed(full_text) => {
+                    // Safety net: check if there are any unexecuted search tags in completed text as fallback
+                    if allow_search && search_rounds < MAX_SEARCH_ROUNDS {
+                        let fallback_tags = extract_search_tags(&full_text);
+                        if let Some(first_tag) = fallback_tags.into_iter().next() {
+                            search_rounds += 1;
+                            let (category_label, query, search_category) = match &first_tag {
+                                AiSearchTag::Web(q) => ("web", q.clone(), "general"),
+                                AiSearchTag::Image(q) => ("images", q.clone(), "images"),
+                                AiSearchTag::Audio(q) => ("audio/media", q.clone(), "music,files,videos"),
+                            };
 
-            for tag in search_tags {
-                match tag {
-                    AiSearchTag::Web(q) => {
-                        on_status(AiStatusUpdate::Searching {
-                            query: q.clone(),
-                            category: "web".to_string(),
-                            safesearch_on: safesearch_level > 0,
-                        });
-                        match searx.search(&q, "general", safesearch_level).await {
-                            Ok(results) => {
-                                search_results_text.push_str(&format!("\n[Web Search for \"{q}\"]:\n"));
-                                for (i, item) in results.iter().take(5).enumerate() {
-                                    let title = item.title.as_deref().unwrap_or("No title");
-                                    let url = item.url.as_deref().unwrap_or("");
-                                    let snippet = item.content.as_deref().unwrap_or("");
-                                    search_results_text.push_str(&format!("{}. {} ({})\n   {}\n", i + 1, title, url, snippet));
-                                }
+                            on_status(AiStatusUpdate::Searching {
+                                query: query.clone(),
+                                category: category_label.to_string(),
+                                safesearch_on: safesearch_level > 0,
+                            });
+
+                            let search_results_text = self
+                                .execute_search_and_collect(
+                                    searx,
+                                    &first_tag,
+                                    &query,
+                                    search_category,
+                                    safesearch_level,
+                                    &mut candidate_media_urls,
+                                )
+                                .await;
+
+                            conversation.push(AiMessage::assistant(full_text));
+                            conversation.push(AiMessage::user(format!(
+                                "[System Search Results]:\n{search_results_text}\nNow continue thinking and respond to the user based on these search results."
+                            )));
+                            if mode == AiMode::Fast {
+                                conversation.push(AiMessage::assistant("</think>"));
                             }
-                            Err(e) => {
-                                tracing::warn!(?e, query = %q, "SearXNG web search failed");
-                                search_results_text.push_str(&format!("\n[Web Search for \"{q}\"]: No results or search error.\n"));
-                            }
+                            continue;
                         }
                     }
-                    AiSearchTag::Image(q) => {
-                        on_status(AiStatusUpdate::Searching {
-                            query: q.clone(),
-                            category: "images".to_string(),
-                            safesearch_on: safesearch_level > 0,
-                        });
-                        match searx.search(&q, "images", safesearch_level).await {
-                            Ok(results) => {
-                                search_results_text.push_str(&format!("\n[Image Search for \"{q}\"]:\n"));
-                                for (i, item) in results.iter().take(6).enumerate() {
-                                    let title = item.title.as_deref().unwrap_or("Image");
-                                    let img = item.img_src.as_deref().or(item.thumbnail_src.as_deref()).unwrap_or("");
-                                    if !img.is_empty() {
-                                        candidate_media_urls.push(img.to_string());
-                                        search_results_text.push_str(&format!("{}. {} | Direct Image URL: {}\n", i + 1, title, img));
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                tracing::warn!(?e, query = %q, "SearXNG image search failed");
-                                search_results_text.push_str(&format!("\n[Image Search for \"{q}\"]: No image results.\n"));
-                            }
-                        }
+                    break full_text;
+                }
+                StreamResult::SearchIntercepted {
+                    tag,
+                    partial_thinking,
+                    partial_content,
+                } => {
+                    search_rounds += 1;
+
+                    let (category_label, query, search_category) = match &tag {
+                        AiSearchTag::Web(q) => ("web", q.clone(), "general"),
+                        AiSearchTag::Image(q) => ("images", q.clone(), "images"),
+                        AiSearchTag::Audio(q) => ("audio/media", q.clone(), "music,files,videos"),
+                    };
+
+                    on_status(AiStatusUpdate::Searching {
+                        query: query.clone(),
+                        category: category_label.to_string(),
+                        safesearch_on: safesearch_level > 0,
+                    });
+
+                    let search_results_text = self
+                        .execute_search_and_collect(
+                            searx,
+                            &tag,
+                            &query,
+                            search_category,
+                            safesearch_level,
+                            &mut candidate_media_urls,
+                        )
+                        .await;
+
+                    let assistant_msg = format_partial_output(&partial_thinking, &partial_content);
+                    if !assistant_msg.is_empty() {
+                        conversation.push(AiMessage::assistant(assistant_msg));
                     }
-                    AiSearchTag::Audio(q) => {
-                        on_status(AiStatusUpdate::Searching {
-                            query: q.clone(),
-                            category: "audio/media".to_string(),
-                            safesearch_on: safesearch_level > 0,
-                        });
-                        match searx.search(&q, "music,files,videos", safesearch_level).await {
-                            Ok(results) => {
-                                search_results_text.push_str(&format!("\n[Audio/Media Search for \"{q}\"]:\n"));
-                                for (i, item) in results.iter().take(6).enumerate() {
-                                    let title = item.title.as_deref().unwrap_or("Audio");
-                                    let audio = item.audio_src.as_deref().or(item.url.as_deref()).unwrap_or("");
-                                    if !audio.is_empty() {
-                                        candidate_media_urls.push(audio.to_string());
-                                        search_results_text.push_str(&format!("{}. {} | Media URL: {}\n", i + 1, title, audio));
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                tracing::warn!(?e, query = %q, "SearXNG audio search failed");
-                                search_results_text.push_str(&format!("\n[Audio Search for \"{q}\"]: No audio results.\n"));
-                            }
-                        }
+
+                    conversation.push(AiMessage::user(format!(
+                        "[System Search Results]:\n{search_results_text}\nNow continue thinking and respond to the user based on these search results."
+                    )));
+                    if mode == AiMode::Fast {
+                        conversation.push(AiMessage::assistant("</think>"));
                     }
                 }
             }
-
-            // Append search results and invoke Ollama for the final response
-            conversation.push(AiMessage::assistant(raw_answer));
-            conversation.push(AiMessage::user(format!(
-                "[System Search Response]:\n{search_results_text}\nNow provide the final response to the user based on the above information."
-            )));
-
-            self.ask_stream(channel_id, &conversation, &mut on_status)
-                .await?
-        } else {
-            raw_answer
         };
 
-        // 3. Media file downloading & attachment resolution
+        // Media file downloading & attachment resolution
         let explicit_attaches = extract_attach_tags(&final_raw_answer);
         let mut download_candidates = explicit_attaches;
         download_candidates.extend(candidate_media_urls);
@@ -540,9 +579,130 @@ impl OllamaClient {
         })
     }
 
-    /// Non-streaming ask fallback.
+    async fn execute_search_and_collect(
+        &self,
+        searx: &SearxClient,
+        tag: &AiSearchTag,
+        query: &str,
+        category: &str,
+        safesearch: u8,
+        candidate_media_urls: &mut Vec<String>,
+    ) -> String {
+        let mut search_results_text = String::new();
+        match searx.search(query, category, safesearch).await {
+            Ok(results) => match tag {
+                AiSearchTag::Web(_) => {
+                    search_results_text.push_str(&format!("\n[Web Search for \"{query}\"]:\n"));
+                    for (i, item) in results.iter().take(5).enumerate() {
+                        let title = item.title.as_deref().unwrap_or("No title");
+                        let url = item.url.as_deref().unwrap_or("");
+                        let snippet = item.content.as_deref().unwrap_or("");
+                        search_results_text.push_str(&format!(
+                            "{}. {} ({})\n   {}\n",
+                            i + 1,
+                            title,
+                            url,
+                            snippet
+                        ));
+                    }
+                }
+                AiSearchTag::Image(_) => {
+                    search_results_text.push_str(&format!("\n[Image Search for \"{query}\"]:\n"));
+                    for (i, item) in results.iter().take(6).enumerate() {
+                        let title = item.title.as_deref().unwrap_or("Image");
+                        let img = item
+                            .img_src
+                            .as_deref()
+                            .or(item.thumbnail_src.as_deref())
+                            .unwrap_or("");
+                        if !img.is_empty() {
+                            candidate_media_urls.push(img.to_string());
+                            search_results_text.push_str(&format!(
+                                "{}. {} | Direct Image URL: {}\n",
+                                i + 1,
+                                title,
+                                img
+                            ));
+                        }
+                    }
+                }
+                AiSearchTag::Audio(_) => {
+                    search_results_text.push_str(&format!(
+                        "\n[Audio/Media Search for \"{query}\"]:\n"
+                    ));
+                    for (i, item) in results.iter().take(6).enumerate() {
+                        let title = item.title.as_deref().unwrap_or("Audio");
+                        let audio = item
+                            .audio_src
+                            .as_deref()
+                            .or(item.url.as_deref())
+                            .unwrap_or("");
+                        if !audio.is_empty() {
+                            candidate_media_urls.push(audio.to_string());
+                            search_results_text.push_str(&format!(
+                                "{}. {} | Media URL: {}\n",
+                                i + 1,
+                                title,
+                                audio
+                            ));
+                        }
+                    }
+                }
+            },
+            Err(e) => {
+                tracing::warn!(?e, %query, "SearXNG search failed");
+                search_results_text.push_str(&format!(
+                    "\n[Search for \"{query}\"]: No results found or search failed.\n"
+                ));
+            }
+        }
+
+        if search_results_text.is_empty() {
+            search_results_text = format!("\n[Search for \"{query}\"]: No results found.\n");
+        }
+
+        search_results_text
+    }
+
+    /// Non-streaming ask fallback (Thinking mode).
     pub async fn ask(&self, channel_id: Id<ChannelMarker>, messages: &[AiMessage]) -> Result<String> {
-        self.ask_stream(channel_id, messages, |_| {}).await
+        match self.ask_stream(channel_id, messages, false, AiMode::Thinking, |_| {}).await? {
+            StreamResult::Completed(s) => Ok(s),
+            StreamResult::SearchIntercepted {
+                partial_thinking,
+                partial_content,
+                ..
+            } => Ok(format_partial_output(&partial_thinking, &partial_content)),
+        }
+    }
+
+    /// Non-streaming fast ask fallback (Fast mode).
+    pub async fn ask_fast(&self, channel_id: Id<ChannelMarker>, messages: &[AiMessage]) -> Result<String> {
+        let mut msgs = messages.to_vec();
+        msgs.push(AiMessage::assistant("</think>"));
+        match self.ask_stream(channel_id, &msgs, false, AiMode::Fast, |_| {}).await? {
+            StreamResult::Completed(s) => Ok(s),
+            StreamResult::SearchIntercepted {
+                partial_thinking,
+                partial_content,
+                ..
+            } => Ok(format_partial_output(&partial_thinking, &partial_content)),
+        }
+    }
+}
+
+/// Format partial thinking and content into a single string.
+pub fn format_partial_output(thinking: &str, content: &str) -> String {
+    if content.is_empty() {
+        if thinking.is_empty() {
+            String::new()
+        } else {
+            format!("<think>{}</think>", thinking)
+        }
+    } else if !thinking.is_empty() && !content.contains("<think>") {
+        format!("<think>{}</think>{}", thinking, content)
+    } else {
+        content.to_string()
     }
 }
 

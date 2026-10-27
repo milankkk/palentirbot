@@ -52,7 +52,7 @@ async fn async_main() -> Result<()> {
 
     let mut slash_commands = Commands::get().collect(Command::create);
     if ctx.ai().is_none() {
-        slash_commands.retain(|cmd| !matches!(cmd.name.as_str(), "ask" | "aiclear" | "aicontext"));
+        slash_commands.retain(|cmd| !matches!(cmd.name.as_str(), "ask" | "fast" | "aiclear" | "aicontext"));
     }
     info!("Setting {} slash commands...", slash_commands.len());
 

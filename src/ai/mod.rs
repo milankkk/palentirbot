@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use eyre::{Context as _, Result};
 use serde::Serialize;
 use tokio::sync::RwLock;
+use twilight_interactions::command::{CommandOption, CreateOption};
 use twilight_model::id::{
     marker::{ChannelMarker, GuildMarker},
     Id,
@@ -13,9 +14,18 @@ pub mod ollama;
 pub mod queue;
 pub mod search;
 
-pub use ollama::{GenerationResult, LastGenerationStats, OllamaClient};
+pub use ollama::{GenerationResult, LastGenerationStats, OllamaClient, StreamResult};
 pub use queue::{AiQueue, DEFAULT_MAX_AI_QUEUE_SIZE};
 pub use search::SearxClient;
+
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, CommandOption, CreateOption)]
+pub enum AiMode {
+    #[default]
+    #[option(name = "Thinking (Deep reasoning with live thoughts)", value = "thinking")]
+    Thinking,
+    #[option(name = "Fast (Quick direct response without reasoning)", value = "fast")]
+    Fast,
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct AiMessage {
@@ -97,17 +107,16 @@ pub fn safesearch_level_for_guild(
 const SYSTEM_PROMPT_ENV: &str = "AI_SYSTEM_PROMPT";
 
 pub const SEARCH_SYSTEM_PROMPT: &str = r#"
+Search & Media Tools:
+You have real-time internet search tools. When asked to find or show images, music, or web information, use the tags:
+- To find images/pictures: <search_image>query</search_image>
+- To find music/audio: <search_audio>query</search_audio>
+- To search web facts or news: <search>query</search>
+- To attach media in your final answer: <attach>url</attach>
 
-SEARCH & MEDIA RETRIEVAL INSTRUCTIONS:
-You have access to real-time search and media retrieval tools using XML tags:
-- To search the web for facts, current events, osu! news, or links: write `<search>your query</search>`.
-- To search for pictures when the user asks for an image/picture or when a visual diagram/photo directly answers the request: write `<search_image>image query</search_image>`.
-- To search for audio or music files/sounds: write `<search_audio>audio query</search_audio>`.
-- To attach an image, audio, or video file to your final message: write `<attach>direct_media_url</attach>`. Supported extensions: .jpg, .png, .webp, .gif, .mp3, .ogg, .wav, .mp4.
-
-STRICT RULES:
-1. Do NOT search for or attach images/audio/links on normal conversational messages. ONLY use search tags when the user explicitly asks for an image, picture, audio, link, or current real-time information, or when visual/audio media is necessary to fulfill their request.
-2. If you output a search tag, wait for the search results before presenting your final answer."#;
+IMPORTANT:
+- Output the search tag directly in your thoughts (<think>) as soon as you need real-time info or media. Search results will be retrieved for you immediately.
+- Do NOT search on normal conversational messages. Only search when the user asks for pictures, audio, links, or current information."#;
 
 pub struct AiClient {
     ollama: OllamaClient,

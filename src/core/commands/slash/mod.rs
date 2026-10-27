@@ -56,6 +56,7 @@ impl Commands {
                     Skin => SKIN_SLASH,
                     Settings => SETTINGS_SLASH,
                     Ask => ASK_SLASH,
+                    Fast => FAST_SLASH,
                     AiClear => AICLEAR_SLASH,
                     AiContext => AICONTEXT_SLASH,
                 },

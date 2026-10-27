@@ -40,7 +40,8 @@ impl SearxClient {
         let base_url = std::env::var("SEARXNG_URL")
             .ok()
             .map(|s| s.trim().trim_end_matches('/').to_owned())
-            .filter(|s| !s.is_empty());
+            .filter(|s| !s.is_empty())
+            .or_else(|| Some("http://127.0.0.1:8080".to_owned()));
 
         let client = Client::builder()
             .timeout(Duration::from_secs(10))
@@ -279,38 +280,95 @@ pub fn infer_media_extension(content_type: &str, bytes: &[u8], path: &str) -> Op
     None
 }
 
-/// Extract `<search>...</search>`, `<search_image>...</search_image>`, and `<search_audio>...</search_audio>` tags.
+/// Find the first closed search tag (`<search>...</search>`, `<search_image>...</search_image>`,
+/// or `<search_audio>...</search_audio>`) in text. Also handles `</search>` closing variant
+/// and `<web_search>`, `<image_search>`, `<audio_search>` aliases.
+pub fn find_closed_search_tag(text: &str) -> Option<AiSearchTag> {
+    let mut remaining = text;
+
+    while let Some(open_idx) = remaining.find('<') {
+        let after_open = &remaining[open_idx..];
+
+        if let Some(rest) = after_open.strip_prefix("<search>").or_else(|| after_open.strip_prefix("<web_search>")) {
+            if let Some(close_idx) = rest.find("</search>").or_else(|| rest.find("</web_search>")) {
+                let query = rest[..close_idx].trim().to_string();
+                if !query.is_empty() {
+                    return Some(AiSearchTag::Web(query));
+                }
+            }
+        } else if let Some(rest) = after_open.strip_prefix("<search_image>").or_else(|| after_open.strip_prefix("<image_search>")) {
+            if let Some(close_idx) = rest.find("</search_image>").or_else(|| rest.find("</image_search>")).or_else(|| rest.find("</search>")).or_else(|| rest.find("</web_search>")) {
+                let query = rest[..close_idx].trim().to_string();
+                if !query.is_empty() {
+                    return Some(AiSearchTag::Image(query));
+                }
+            }
+        } else if let Some(rest) = after_open.strip_prefix("<search_audio>").or_else(|| after_open.strip_prefix("<audio_search>")) {
+            if let Some(close_idx) = rest.find("</search_audio>").or_else(|| rest.find("</audio_search>")).or_else(|| rest.find("</search>")).or_else(|| rest.find("</web_search>")) {
+                let query = rest[..close_idx].trim().to_string();
+                if !query.is_empty() {
+                    return Some(AiSearchTag::Audio(query));
+                }
+            }
+        }
+
+        remaining = &after_open[1..];
+    }
+
+    None
+}
+
+/// Extract `<search*>` and `<attach>` tags. Supports aliases like `<web_search>`, `<image_search>`.
 pub fn extract_search_tags(text: &str) -> Vec<AiSearchTag> {
     let mut tags = Vec::new();
     let mut remaining = text;
 
     while let Some(open_idx) = remaining.find('<') {
         let after_open = &remaining[open_idx..];
-        if let Some(rest) = after_open.strip_prefix("<search>") {
-            if let Some(close_idx) = rest.find("</search>") {
+        if let Some(rest) = after_open.strip_prefix("<search>").or_else(|| after_open.strip_prefix("<web_search>")) {
+            let close_tag = if rest.contains("</search>") { "</search>" } else { "</web_search>" };
+            if let Some(close_idx) = rest.find(close_tag) {
                 let query = rest[..close_idx].trim().to_string();
                 if !query.is_empty() {
                     tags.push(AiSearchTag::Web(query));
                 }
-                remaining = &rest[close_idx + "</search>".len()..];
+                remaining = &rest[close_idx + close_tag.len()..];
                 continue;
             }
-        } else if let Some(rest) = after_open.strip_prefix("<search_image>") {
-            if let Some(close_idx) = rest.find("</search_image>") {
+        } else if let Some(rest) = after_open.strip_prefix("<search_image>").or_else(|| after_open.strip_prefix("<image_search>")) {
+            let close_tag = if rest.contains("</search_image>") {
+                "</search_image>"
+            } else if rest.contains("</image_search>") {
+                "</image_search>"
+            } else if rest.contains("</web_search>") {
+                "</web_search>"
+            } else {
+                "</search>"
+            };
+            if let Some(close_idx) = rest.find(close_tag) {
                 let query = rest[..close_idx].trim().to_string();
                 if !query.is_empty() {
                     tags.push(AiSearchTag::Image(query));
                 }
-                remaining = &rest[close_idx + "</search_image>".len()..];
+                remaining = &rest[close_idx + close_tag.len()..];
                 continue;
             }
-        } else if let Some(rest) = after_open.strip_prefix("<search_audio>") {
-            if let Some(close_idx) = rest.find("</search_audio>") {
+        } else if let Some(rest) = after_open.strip_prefix("<search_audio>").or_else(|| after_open.strip_prefix("<audio_search>")) {
+            let close_tag = if rest.contains("</search_audio>") {
+                "</search_audio>"
+            } else if rest.contains("</audio_search>") {
+                "</audio_search>"
+            } else if rest.contains("</web_search>") {
+                "</web_search>"
+            } else {
+                "</search>"
+            };
+            if let Some(close_idx) = rest.find(close_tag) {
                 let query = rest[..close_idx].trim().to_string();
                 if !query.is_empty() {
                     tags.push(AiSearchTag::Audio(query));
                 }
-                remaining = &rest[close_idx + "</search_audio>".len()..];
+                remaining = &rest[close_idx + close_tag.len()..];
                 continue;
             }
         }
@@ -345,13 +403,27 @@ pub fn extract_attach_tags(text: &str) -> Vec<String> {
 pub fn strip_tool_tags(text: &str) -> String {
     let mut result = text.to_string();
 
-    for tag in &["search", "search_image", "search_audio", "attach"] {
+    for tag in &[
+        "search",
+        "web_search",
+        "search_image",
+        "image_search",
+        "search_audio",
+        "audio_search",
+        "attach",
+    ] {
         let open_tag = format!("<{tag}>");
         let close_tag = format!("</{tag}>");
 
         while let Some(start) = result.find(&open_tag) {
             if let Some(end) = result[start..].find(&close_tag) {
                 let end_idx = start + end + close_tag.len();
+                result.drain(start..end_idx);
+            } else if let Some(end) = result[start..].find("</search>") {
+                let end_idx = start + end + "</search>".len();
+                result.drain(start..end_idx);
+            } else if let Some(end) = result[start..].find("</web_search>") {
+                let end_idx = start + end + "</web_search>".len();
                 result.drain(start..end_idx);
             } else {
                 result.truncate(start);
@@ -366,6 +438,55 @@ pub fn strip_tool_tags(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_find_closed_search_tag() {
+        // Closed web search
+        let text1 = "Thinking... <search>osu world cup 2026</search> continuing thought";
+        assert_eq!(
+            find_closed_search_tag(text1),
+            Some(AiSearchTag::Web("osu world cup 2026".to_string()))
+        );
+
+        // Closed image search with standard tag
+        let text2 = "Let me get an image <search_image>cute cat</search_image>";
+        assert_eq!(
+            find_closed_search_tag(text2),
+            Some(AiSearchTag::Image("cute cat".to_string()))
+        );
+
+        // Closed image search with short </search> closing tag
+        let text3 = "Let me get an image <search_image>orange tabby</search> more text";
+        assert_eq!(
+            find_closed_search_tag(text3),
+            Some(AiSearchTag::Image("orange tabby".to_string()))
+        );
+
+        // Closed audio search
+        let text4 = "<search_audio>osu theme song</search_audio>";
+        assert_eq!(
+            find_closed_search_tag(text4),
+            Some(AiSearchTag::Audio("osu theme song".to_string()))
+        );
+
+        // Alias tags: <web_search>, <image_search>
+        assert_eq!(
+            find_closed_search_tag("<web_search>peppy</web_search>"),
+            Some(AiSearchTag::Web("peppy".to_string()))
+        );
+        assert_eq!(
+            find_closed_search_tag("<image_search>red rose</image_search>"),
+            Some(AiSearchTag::Image("red rose".to_string()))
+        );
+
+        // Incomplete / unclosed tag (still streaming)
+        let text5 = "Let me find <search_image>cute cat";
+        assert_eq!(find_closed_search_tag(text5), None);
+
+        // No search tag
+        let text6 = "Normal conversation without any search tags.";
+        assert_eq!(find_closed_search_tag(text6), None);
+    }
 
     #[test]
     fn test_extract_search_tags() {

@@ -15,7 +15,7 @@ use twilight_model::{
 
 use crate::{
     ai::{
-        ollama::AiStatusUpdate, search::strip_tool_tags, AiMessage,
+        ollama::AiStatusUpdate, search::strip_tool_tags, AiMessage, AiMode,
     },
     core::Context,
     util::{
@@ -34,8 +34,19 @@ const DISCORD_RESPONSE_CHAR_LIMIT: usize = 1_900;
 #[derive(CommandModel, CreateCommand, SlashCommand)]
 #[command(name = "ask")]
 #[flags(SKIP_DEFER)]
-/// Ask the AI a question
+/// Ask the AI a question (Thinking or Fast mode)
 pub struct Ask {
+    /// What you want to ask
+    question: String,
+    /// Response mode (Thinking: deep reasoning, Fast: quick direct response)
+    mode: Option<AiMode>,
+}
+
+#[derive(CommandModel, CreateCommand, SlashCommand)]
+#[command(name = "fast")]
+#[flags(SKIP_DEFER)]
+/// Ask the AI a question in Fast mode (quick direct response without reasoning)
+pub struct Fast {
     /// What you want to ask
     question: String,
 }
@@ -76,6 +87,7 @@ impl MessageStatusUpdater {
             AiStatusUpdate::LoadingModel => {
                 "⏳ Thinking (Loading model into memory & reading context...)".to_string()
             }
+            AiStatusUpdate::GeneratingFast => "⚡ Generating response...".to_string(),
             AiStatusUpdate::Reasoning {
                 elapsed_secs,
                 thought_snippet,
@@ -89,10 +101,10 @@ impl MessageStatusUpdater {
                 safesearch_on,
             } => {
                 let safe_str = if safesearch_on { "ON" } else { "OFF" };
-                format!("🌐 Thinking (Searching {category} for \"{query}\" • SafeSearch: {safe_str})...")
+                format!("🌐 Searching {category} for \"{query}\" • SafeSearch: {safe_str}...")
             }
             AiStatusUpdate::DownloadingMedia => {
-                "🖼️ Thinking (Downloading media attachment...)".to_string()
+                "🖼️ Downloading media attachment...".to_string()
             }
         };
 
@@ -154,7 +166,19 @@ impl MessageStatusUpdater {
     }
 }
 
-async fn slash_ask(ctx: Arc<Context>, mut command: InteractionCommand) -> Result<()> {
+async fn slash_ask(ctx: Arc<Context>, command: InteractionCommand) -> Result<()> {
+    slash_ask_impl(ctx, command, None).await
+}
+
+async fn slash_fast(ctx: Arc<Context>, command: InteractionCommand) -> Result<()> {
+    slash_ask_impl(ctx, command, Some(AiMode::Fast)).await
+}
+
+async fn slash_ask_impl(
+    ctx: Arc<Context>,
+    mut command: InteractionCommand,
+    mode_override: Option<AiMode>,
+) -> Result<()> {
     if !crate::ai::is_enabled_for_guild(&ctx, command.guild_id) {
         command
             .error_callback(&ctx, crate::ai::AI_DISABLED_REPLY, true)
@@ -172,7 +196,13 @@ async fn slash_ask(ctx: Arc<Context>, mut command: InteractionCommand) -> Result
         }
     };
 
-    let Ask { question } = Ask::from_interaction(command.input_data())?;
+    let (question, mode) = if let Some(m) = mode_override {
+        let Fast { question } = Fast::from_interaction(command.input_data())?;
+        (question, m)
+    } else {
+        let Ask { question, mode } = Ask::from_interaction(command.input_data())?;
+        (question, mode.unwrap_or(AiMode::Thinking))
+    };
 
     command.defer(&ctx, false).await?;
 
@@ -194,6 +224,13 @@ async fn slash_ask(ctx: Arc<Context>, mut command: InteractionCommand) -> Result
         let content = format!("⏳ Waiting in AI queue (position #{position})...");
         let builder = MessageBuilder::new().content(content);
         let _ = command.update(&ctx, &builder).await;
+    } else {
+        let initial_text = match mode {
+            AiMode::Thinking => "⏳ Thinking (Loading model into memory & reading context...)".to_string(),
+            AiMode::Fast => "⚡ Generating response...".to_string(),
+        };
+        let builder = MessageBuilder::new().content(initial_text);
+        let _ = command.update(&ctx, &builder).await;
     }
 
     let _permit = ticket.wait().await;
@@ -214,6 +251,7 @@ async fn slash_ask(ctx: Arc<Context>, mut command: InteractionCommand) -> Result
             let force = matches!(
                 status,
                 AiStatusUpdate::LoadingModel
+                    | AiStatusUpdate::GeneratingFast
                     | AiStatusUpdate::Searching { .. }
                     | AiStatusUpdate::DownloadingMedia
             );
@@ -231,6 +269,7 @@ async fn slash_ask(ctx: Arc<Context>, mut command: InteractionCommand) -> Result
         &question,
         None,
         None,
+        mode,
         tx,
     )
     .await;
@@ -255,12 +294,13 @@ async fn slash_ask(ctx: Arc<Context>, mut command: InteractionCommand) -> Result
     Ok(())
 }
 
-/// Handle prefix `!ask` (or `!ai`, `!a`) messages.
+/// Handle prefix `!ask` (or `!ai`, `!a`, `!fast`) messages.
 pub async fn handle_prefix_ask(
     ctx: Arc<Context>,
     msg: &Message,
     args_str: &str,
     prefix: &str,
+    mode: AiMode,
 ) {
     if !crate::ai::is_enabled_for_guild(&ctx, msg.guild_id) {
         let _ = msg.error(&ctx, crate::ai::AI_DISABLED_REPLY).await;
@@ -299,10 +339,14 @@ pub async fn handle_prefix_ask(
         if is_reply_to_ai {
             question = "What do you think about what you said?".to_string();
         } else {
+            let example_cmd = match mode {
+                AiMode::Fast => format!("{prefix}a What is osu?"),
+                AiMode::Thinking => format!("{prefix}ask What is osu?"),
+            };
             let _ = msg
                 .error(
                     &ctx,
-                    format!("Please provide a question! Example: `{prefix}ask What is osu?`"),
+                    format!("Please provide a question! Example: `{example_cmd}`"),
                 )
                 .await;
             return;
@@ -325,7 +369,10 @@ pub async fn handle_prefix_ask(
     let initial_content = if position > 0 {
         format!("⏳ Waiting in AI queue (position #{position})...")
     } else {
-        "⏳ Thinking (Loading model into memory & reading context...)".to_string()
+        match mode {
+            AiMode::Thinking => "⏳ Thinking (Loading model into memory & reading context...)".to_string(),
+            AiMode::Fast => "⚡ Generating response...".to_string(),
+        }
     };
 
     let placeholder = msg
@@ -360,6 +407,7 @@ pub async fn handle_prefix_ask(
             let force = matches!(
                 status,
                 AiStatusUpdate::LoadingModel
+                    | AiStatusUpdate::GeneratingFast
                     | AiStatusUpdate::Searching { .. }
                     | AiStatusUpdate::DownloadingMedia
             );
@@ -377,6 +425,7 @@ pub async fn handle_prefix_ask(
         &question,
         Some(msg.id),
         msg.referenced_message.as_deref(),
+        mode,
         tx,
     )
     .await;
@@ -410,11 +459,12 @@ pub async fn execute_ai_question(
     ctx: &Context,
     channel_id: Id<ChannelMarker>,
     guild_id: Option<Id<GuildMarker>>,
-    user_id: Id<UserMarker>,
+    _user_id: Id<UserMarker>,
     username: &str,
     question: &str,
     exclude_message_id: Option<Id<MessageMarker>>,
     referenced_msg: Option<&Message>,
+    mode: AiMode,
     status_sender: mpsc::Sender<AiStatusUpdate>,
 ) -> Result<(String, Option<(String, Vec<u8>)>)> {
     let ai = ctx.ai().ok_or_else(|| eyre::eyre!("AI is not initialized"))?;
@@ -426,18 +476,12 @@ pub async fn execute_ai_question(
 
     let history = get_history(ctx, channel_id, exclude_message_id).await?;
 
-    let system_prompt_template = ai.get_prompt().await;
+    let system_prompt = ai.get_prompt().await;
 
     let clean_username = sanitize_llm_text(username);
     let clean_question = sanitize_llm_text(question);
 
-    let mut system_prompt = system_prompt_template
-        .replace("{username}", &clean_username)
-        .replace("{user_id}", &user_id.to_string());
-
-    let current_user_msg = format!(
-        "{clean_username} (Discord ID {user_id}): {clean_question}"
-    );
+    let current_user_msg = format!("{clean_username}: {clean_question}");
 
     let messages = if let Some(replied) = referenced_msg {
         if replied.author.id == bot_id {
@@ -468,14 +512,12 @@ pub async fn execute_ai_question(
                 history_messages.push(AiMessage::assistant(ai_content));
             }
 
-            system_prompt.push_str(
-                "\n\nCONVERSATION CONTEXT: The user is directly replying to your previous statement above. Focus your response specifically on addressing what they said in direct relation to your statement."
-            );
-
             let mut msgs = Vec::with_capacity(history_messages.len() + 2);
             msgs.push(AiMessage::system(system_prompt));
             msgs.extend(history_messages);
-            msgs.push(AiMessage::user(current_user_msg));
+            msgs.push(AiMessage::user(format!(
+                "{clean_username} (in reply to your statement above): {clean_question}"
+            )));
             msgs
         } else {
             let history_messages = convert_history(history, bot_id);
@@ -503,6 +545,7 @@ pub async fn execute_ai_question(
             channel_id,
             &messages,
             safesearch_level,
+            mode,
             move |status| {
                 let _ = status_sender.try_send(status);
             },
@@ -587,10 +630,7 @@ fn convert_history(history: Vec<Message>, bot_id: Id<UserMarker>) -> Vec<AiMessa
             let author_name = sanitize_llm_text(&message.author.name);
             let cleaned = strip_command_prefix(&content);
             if !cleaned.is_empty() {
-                raw_messages.push(AiMessage::user(format!(
-                    "{} (Discord ID {}): {}",
-                    author_name, message.author.id, cleaned,
-                )));
+                raw_messages.push(AiMessage::user(format!("{author_name}: {cleaned}")));
             }
         }
     }
