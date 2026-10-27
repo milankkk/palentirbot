@@ -34,7 +34,7 @@ pub async fn view(ctx: Arc<Context>, command: InteractionCommand) -> Result<()> 
 
     let (ai_enabled, ai_safesearch) = ctx
         .guild_settings(guild_id, |s| (s.ai_enabled, s.ai_safesearch))
-        .unwrap_or((true, false));
+        .unwrap_or((true, true));
 
     let content = format!(
         "Input channels: {input_channels}\nOutput channel: {output_channel}\nAI module: {}\nSafeSearch: {}",

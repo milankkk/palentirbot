@@ -23,6 +23,7 @@ fn default_true() -> bool {
 }
 
 #[inline]
+#[allow(dead_code)]
 fn default_false() -> bool {
     false
 }
@@ -34,7 +35,7 @@ pub struct Server {
     pub prefix: Option<String>,
     #[serde(default = "default_true")]
     pub ai_enabled: bool,
-    #[serde(default = "default_false")]
+    #[serde(default = "default_true")]
     pub ai_safesearch: bool,
 }
 
@@ -45,7 +46,7 @@ impl Default for Server {
             output_channel: None,
             prefix: None,
             ai_enabled: true,
-            ai_safesearch: false,
+            ai_safesearch: true,
         }
     }
 }
@@ -86,7 +87,7 @@ mod servers {
         prefix: Option<String>,
         #[serde(default = "super::default_true")]
         pub ai_enabled: bool,
-        #[serde(default = "super::default_false")]
+        #[serde(default = "super::default_true")]
         pub ai_safesearch: bool,
     }
 

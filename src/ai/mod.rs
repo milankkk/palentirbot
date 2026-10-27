@@ -78,45 +78,49 @@ pub fn is_enabled_for_guild(ctx: &crate::core::Context, guild_id: Option<Id<Guil
 }
 
 /// Determines the effective SafeSearch level:
-/// - 0: Off (default unless overridden via AI_SAFESEARCH or server settings)
-/// - 1: Moderate
+/// - 0: Off (when disabled in server settings or AI_SAFESEARCH=0)
+/// - 1: Moderate (default)
 /// - 2: Strict
 pub fn safesearch_level_for_guild(
     ctx: &crate::core::Context,
     guild_id: Option<Id<GuildMarker>>,
 ) -> u8 {
-    let env_level: u8 = std::env::var("AI_SAFESEARCH")
-        .ok()
+    let env_var = std::env::var("AI_SAFESEARCH").ok();
+    let server_safesearch = guild_id
+        .and_then(|gid| ctx.guild_settings(gid, |s| s.ai_safesearch))
+        .unwrap_or(true);
+
+    compute_safesearch_level(env_var.as_deref(), server_safesearch)
+}
+
+/// Pure helper for calculating effective SafeSearch level.
+pub fn compute_safesearch_level(env_var: Option<&str>, server_safesearch: bool) -> u8 {
+    let env_level: u8 = env_var
         .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
+        .unwrap_or(1);
 
-    if env_level == 0 {
-        return 0;
+    if !server_safesearch || env_level == 0 {
+        0
+    } else {
+        env_level.max(1)
     }
-
-    if let Some(gid) = guild_id {
-        let server_safesearch = ctx.guild_settings(gid, |s| s.ai_safesearch).unwrap_or(false);
-        if !server_safesearch {
-            return 0;
-        }
-    }
-
-    env_level
 }
 
 const SYSTEM_PROMPT_ENV: &str = "AI_SYSTEM_PROMPT";
 
 pub const SEARCH_SYSTEM_PROMPT: &str = r#"
-Search & Media Tools:
-You have real-time internet search tools. When asked to find or show images, music, or web information, use the tags:
-- To find images/pictures: <search_image>query</search_image>
-- To find music/audio: <search_audio>query</search_audio>
-- To search web facts or news: <search>query</search>
-- To attach media in your final answer: <attach>url</attach>
+[Web & Media Search Tools]
+You have access to real-time search tools ONLY when needed:
+- <search>specific search query</search> : Search the web for current events, live facts, recent osu! news/scores/tournaments/players, or facts you genuinely do not know.
+- <browse>https://...</browse> : Read the full text of a specific URL from search results if snippets are insufficient.
+- <search_image>specific image query</search_image> : Find a picture ONLY when the user explicitly asks for an image/picture/photo or asks what something looks like.
+- <search_audio>specific audio query</search_audio> : Find audio ONLY when the user explicitly asks for an audio/sound file.
+- <attach>direct_media_url</attach> : Attach one chosen direct image or audio URL from the search results to your final reply.
 
-IMPORTANT:
-- Output the search tag directly in your thoughts (<think>) as soon as you need real-time info or media. Search results will be retrieved for you immediately.
-- Do NOT search on normal conversational messages. Only search when the user asks for pictures, audio, links, or current information."#;
+RULES FOR SEARCHING:
+1. DO NOT search for casual conversation, greetings, jokes, opinions, or core osu! knowledge you already know (e.g., you already know peppy / Dean Herbert created osu!, what pp, beatmaps, mods, and danser are).
+2. When you DO search, make the query specific. Because you are in an osu! Discord server, if a user asks about a player, mapper, beatmap, or community figure, include "osu!" in the query (e.g., <search>peppy Dean Herbert osu!</search> instead of just <search>peppy</search>).
+3. NEVER say "Based on your query", "According to search results", or mention search tags in your final response. Stay 100% in your persona and answer naturally."#;
 
 pub struct AiClient {
     ollama: OllamaClient,
@@ -264,5 +268,23 @@ impl AiClient {
         } else {
             Ok(source)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_compute_safesearch_level_default_on() {
+        // Defaults to 1 (Moderate / ON) when unset
+        assert_eq!(compute_safesearch_level(None, true), 1);
+        // Explicitly set to 2 (Strict)
+        assert_eq!(compute_safesearch_level(Some("2"), true), 2);
+        // Explicitly disabled via env var "0"
+        assert_eq!(compute_safesearch_level(Some("0"), true), 0);
+        // Disabled via server settings
+        assert_eq!(compute_safesearch_level(None, false), 0);
+        assert_eq!(compute_safesearch_level(Some("2"), false), 0);
     }
 }

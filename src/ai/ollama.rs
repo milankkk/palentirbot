@@ -13,15 +13,17 @@ use super::search::{
 };
 use super::{AiMessage, AiMode};
 
-pub const DEFAULT_MODEL: &str = "huihui_ai/deepseek-r1-abliterated:8b-0528-qwen3";
+pub const DEFAULT_MODEL: &str = "huihui_ai/qwen3-abliterated:8b";
 pub const DEFAULT_NUM_CTX: u32 = 40_960;
-pub const DEFAULT_REPEAT_PENALTY: f32 = 1.15;
-pub const DEFAULT_REPEAT_LAST_N: i32 = 256;
+pub const DEFAULT_REPEAT_PENALTY: f32 = 1.0;
+pub const DEFAULT_REPEAT_LAST_N: i32 = 64;
 pub const DEFAULT_PRESENCE_PENALTY: f32 = 0.0;
 pub const DEFAULT_FREQUENCY_PENALTY: f32 = 0.0;
 pub const DEFAULT_TEMPERATURE: f32 = 0.6;
 pub const DEFAULT_TOP_P: f32 = 0.95;
 pub const DEFAULT_NUM_PREDICT: i32 = 8192;
+pub const DEFAULT_TOP_K: u32 = 20;
+pub const DEFAULT_MIN_P: f32 = 0.0;
 
 #[derive(Clone, Debug, Default)]
 pub struct LastGenerationStats {
@@ -62,6 +64,8 @@ pub struct OllamaClient {
     frequency_penalty: f32,
     temperature: f32,
     top_p: f32,
+    top_k: u32,
+    min_p: f32,
     think_enabled: bool,
     last_stats: tokio::sync::RwLock<HashMap<Id<ChannelMarker>, LastGenerationStats>>,
 }
@@ -83,6 +87,9 @@ struct OllamaOptions {
     frequency_penalty: f32,
     temperature: f32,
     top_p: f32,
+    top_k: u32,
+    #[serde(skip_serializing_if = "is_zero_f32")]
+    min_p: f32,
 }
 
 #[derive(Serialize)]
@@ -189,6 +196,16 @@ impl OllamaClient {
             .and_then(|s| s.parse().ok())
             .unwrap_or(DEFAULT_TOP_P);
 
+        let top_k = std::env::var("OLLAMA_TOP_K")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(DEFAULT_TOP_K);
+
+        let min_p = std::env::var("OLLAMA_MIN_P")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(DEFAULT_MIN_P);
+
         let think_enabled = std::env::var("OLLAMA_THINK_ENABLED")
             .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
             .unwrap_or(true);
@@ -215,6 +232,8 @@ impl OllamaClient {
             frequency_penalty,
             temperature,
             top_p,
+            top_k,
+            min_p,
             think_enabled,
             last_stats: tokio::sync::RwLock::new(HashMap::new()),
         }
@@ -269,16 +288,22 @@ impl OllamaClient {
             model: &self.model,
             messages,
             stream: true,
-            think: Some(!is_fast && self.think_enabled),
+            think: if is_fast {
+                Some(false)
+            } else {
+                Some(self.think_enabled)
+            },
             options: OllamaOptions {
                 num_ctx: self.num_ctx,
-                num_predict: Some(if is_fast { 1024 } else { self.num_predict }),
+                num_predict: Some(if is_fast { 2048 } else { self.num_predict }),
                 repeat_penalty: self.repeat_penalty,
                 repeat_last_n: self.repeat_last_n,
                 presence_penalty: self.presence_penalty,
                 frequency_penalty: self.frequency_penalty,
                 temperature: self.temperature,
                 top_p: self.top_p,
+                top_k: self.top_k,
+                min_p: self.min_p,
             },
         };
 
@@ -451,10 +476,12 @@ impl OllamaClient {
         let mut conversation = initial_messages.to_vec();
 
         let mut candidate_media_urls: Vec<String> = Vec::new();
+        let mut media_search_requested = false;
+        let mut executed_searches: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut search_rounds = 0;
         const MAX_SEARCH_ROUNDS: usize = 2;
 
-        let final_raw_answer = loop {
+        let mut final_raw_answer = loop {
             let allow_search = searx.is_enabled() && search_rounds < MAX_SEARCH_ROUNDS;
             let stream_res = self
                 .ask_stream(channel_id, &conversation, allow_search, mode, &mut on_status)
@@ -466,77 +493,89 @@ impl OllamaClient {
                     if allow_search && search_rounds < MAX_SEARCH_ROUNDS {
                         let fallback_tags = extract_search_tags(&full_text);
                         if let Some(first_tag) = fallback_tags.into_iter().next() {
-                            search_rounds += 1;
                             let (category_label, query, search_category) = match &first_tag {
                                 AiSearchTag::Web(q) => ("web (DuckDuckGo)", q.clone(), "general"),
                                 AiSearchTag::Browse(u) => ("webpage", u.clone(), "browse"),
-                                AiSearchTag::Image(q) => ("images", q.clone(), "images"),
-                                AiSearchTag::Audio(q) => ("audio/media", q.clone(), "music,files,videos"),
+                                AiSearchTag::Image(q) => {
+                                    media_search_requested = true;
+                                    ("images", q.clone(), "images")
+                                }
+                                AiSearchTag::Audio(q) => {
+                                    media_search_requested = true;
+                                    ("audio/media", q.clone(), "music,files,videos")
+                                }
                             };
 
-                            on_status(AiStatusUpdate::Searching {
-                                query: query.clone(),
-                                category: category_label.to_string(),
-                                safesearch_on: safesearch_level > 0,
-                            });
+                            if !executed_searches.contains(&query) {
+                                executed_searches.insert(query.clone());
+                                search_rounds += 1;
 
-                            let search_results_text = match &first_tag {
-                                AiSearchTag::Browse(url) => {
-                                    match fetch_webpage_clean_text(searx.client(), url).await {
-                                        Ok(content) => {
-                                            format!(
-                                                "\n[Webpage Content for \"{url}\"]:\n{content}\n\n[Instructions]: Synthesize this content to answer the user's question accurately in character.\n"
-                                            )
-                                        }
-                                        Err(e) => {
-                                            format!(
-                                                "\n[Webpage Content for \"{url}\"]: Could not load page ({e}). Use your current knowledge or other search results.\n"
-                                            )
+                                on_status(AiStatusUpdate::Searching {
+                                    query: query.clone(),
+                                    category: category_label.to_string(),
+                                    safesearch_on: safesearch_level > 0,
+                                });
+
+                                let search_results_text = match &first_tag {
+                                    AiSearchTag::Browse(url) => {
+                                        match fetch_webpage_clean_text(searx.client(), url).await {
+                                            Ok(content) => {
+                                                format!("\n[Webpage Content for \"{url}\"]:\n{content}\n")
+                                            }
+                                            Err(e) => {
+                                                format!("\n[Webpage Content for \"{url}\"]: Could not load page ({e}).\n")
+                                            }
                                         }
                                     }
-                                }
-                                _ => {
-                                    self.execute_search_and_collect(
-                                        searx,
-                                        &first_tag,
-                                        &query,
-                                        search_category,
-                                        safesearch_level,
-                                        &mut candidate_media_urls,
-                                    )
-                                    .await
-                                }
-                            };
+                                    _ => {
+                                        self.execute_search_and_collect(
+                                            searx,
+                                            &first_tag,
+                                            &query,
+                                            search_category,
+                                            safesearch_level,
+                                            &mut candidate_media_urls,
+                                        )
+                                        .await
+                                    }
+                                };
 
-                            conversation.push(AiMessage::assistant(full_text));
-                            let follow_up = if mode == AiMode::Fast {
-                                format!(
-                                    "{search_results_text}\nNow formulate a direct, accurate answer to the user's question based on these findings without hallucinating."
-                                )
-                            } else {
-                                format!(
-                                    "{search_results_text}\nNow carefully analyze and verify these findings in your thoughts, use <browse>URL</browse> if deeper article details are needed, close with </think> when done, and formulate your accurate response."
-                                )
-                            };
-                            conversation.push(AiMessage::user(follow_up));
-                            continue;
+                                let search_context_msg = AiMessage::system(format!(
+                                    "[Real-Time Search Data for Current Question]\n{}\n\nNote: Use relevant facts from above (combined with your osu! & general knowledge) to answer the user's message naturally in character. Ignore irrelevant dictionary definitions if an osu!/gaming meaning applies. Do NOT emit another search tag for the same query.",
+                                    search_results_text.trim()
+                                ));
+                                let insert_pos = conversation.len().saturating_sub(1);
+                                conversation.insert(insert_pos, search_context_msg);
+                                continue;
+                            }
                         }
                     }
                     break full_text;
                 }
                 StreamResult::SearchIntercepted {
                     tag,
-                    partial_thinking,
-                    partial_content,
+                    ..
                 } => {
-                    search_rounds += 1;
-
                     let (category_label, query, search_category) = match &tag {
                         AiSearchTag::Web(q) => ("web (DuckDuckGo)", q.clone(), "general"),
                         AiSearchTag::Browse(u) => ("webpage", u.clone(), "browse"),
-                        AiSearchTag::Image(q) => ("images", q.clone(), "images"),
-                        AiSearchTag::Audio(q) => ("audio/media", q.clone(), "music,files,videos"),
+                        AiSearchTag::Image(q) => {
+                            media_search_requested = true;
+                            ("images", q.clone(), "images")
+                        }
+                        AiSearchTag::Audio(q) => {
+                            media_search_requested = true;
+                            ("audio/media", q.clone(), "music,files,videos")
+                        }
                     };
+
+                    if executed_searches.contains(&query) {
+                        search_rounds += 1;
+                        continue;
+                    }
+
+                    executed_searches.insert(query.clone());
+                    search_rounds += 1;
 
                     on_status(AiStatusUpdate::Searching {
                         query: query.clone(),
@@ -548,14 +587,10 @@ impl OllamaClient {
                         AiSearchTag::Browse(url) => {
                             match fetch_webpage_clean_text(searx.client(), url).await {
                                 Ok(content) => {
-                                    format!(
-                                        "\n[Webpage Content for \"{url}\"]:\n{content}\n\n[Instructions]: Synthesize this content to answer the user's question accurately in character.\n"
-                                    )
+                                    format!("\n[Webpage Content for \"{url}\"]:\n{content}\n")
                                 }
                                 Err(e) => {
-                                    format!(
-                                        "\n[Webpage Content for \"{url}\"]: Could not load page ({e}). Use your current knowledge or other search results.\n"
-                                    )
+                                    format!("\n[Webpage Content for \"{url}\"]: Could not load page ({e}).\n")
                                 }
                             }
                         }
@@ -572,53 +607,62 @@ impl OllamaClient {
                         }
                     };
 
-                    let tag_str = match &tag {
-                        AiSearchTag::Web(q) => format!("<search>{q}</search>"),
-                        AiSearchTag::Browse(u) => format!("<browse>{u}</browse>"),
-                        AiSearchTag::Image(q) => format!("<search_image>{q}</search_image>"),
-                        AiSearchTag::Audio(q) => format!("<search_audio>{q}</search_audio>"),
-                    };
-                    let assistant_msg = if !partial_content.trim().is_empty() {
-                        if !partial_thinking.trim().is_empty() {
-                            format!("<think>\n{}\n</think>\n{}\n{}", partial_thinking.trim(), partial_content.trim(), tag_str)
-                        } else {
-                            format!("{}\n{}", partial_content.trim(), tag_str)
-                        }
-                    } else if !partial_thinking.trim().is_empty() {
-                        format!("<think>\n{}\n</think>\n{}", partial_thinking.trim(), tag_str)
-                    } else {
-                        tag_str
-                    };
-                    conversation.push(AiMessage::assistant(assistant_msg));
-
-                    let follow_up = if mode == AiMode::Fast {
-                        format!(
-                            "{search_results_text}\nNow formulate a direct, accurate answer to the user's question based on these findings without hallucinating."
-                        )
-                    } else {
-                        format!(
-                            "{search_results_text}\nNow carefully analyze and verify these findings in your thoughts, use <browse>URL</browse> if deeper article details are needed, close with </think> when done, and formulate your accurate response."
-                        )
-                    };
-                    conversation.push(AiMessage::user(follow_up));
+                    let search_context_msg = AiMessage::system(format!(
+                        "[Real-Time Search Data for Current Question]\n{}\n\nNote: Use relevant facts from above (combined with your osu! & general knowledge) to answer the user's message naturally in character. Ignore irrelevant dictionary definitions if an osu!/gaming meaning applies. Do NOT emit another search tag for the same query.",
+                        search_results_text.trim()
+                    ));
+                    let insert_pos = conversation.len().saturating_sub(1);
+                    conversation.insert(insert_pos, search_context_msg);
                 }
             }
         };
 
-        // Media file downloading & attachment resolution
-        let explicit_attaches = extract_attach_tags(&final_raw_answer);
-        let mut download_candidates = explicit_attaches;
+        // Auto-Recover if Generation Ends With Only Thoughts
+        if crate::ai::commands::clean_ai_response(&final_raw_answer).trim().is_empty()
+            || (final_raw_answer.contains("<think>") && {
+                let after_think = final_raw_answer.split("</think>").nth(1).unwrap_or("").trim();
+                after_think.is_empty()
+            })
+        {
+            tracing::info!("Model ended generation with only thoughts; making auto-recovery continuation call");
+            let mut continuation_convo = conversation.clone();
+            let think_block = if final_raw_answer.contains("</think>") {
+                final_raw_answer.clone()
+            } else {
+                format!("{final_raw_answer}\n</think>")
+            };
+            continuation_convo.push(AiMessage::assistant(think_block));
+            continuation_convo.push(AiMessage::system(
+                "You have finished thinking. Now write ONLY your final response to the user in character, with no <think> tags."
+            ));
 
-        // If the model mentioned any candidate media URL directly in its response text, prioritize it
-        for cand in &candidate_media_urls {
-            if final_raw_answer.contains(cand) && !download_candidates.contains(cand) {
-                download_candidates.push(cand.clone());
+            if let Ok(StreamResult::Completed(recovered)) = self
+                .ask_stream(channel_id, &continuation_convo, false, AiMode::Fast, &mut on_status)
+                .await
+            {
+                if !recovered.trim().is_empty() {
+                    final_raw_answer = recovered;
+                }
             }
         }
-        // Fall back to remaining search candidate media URLs
-        for cand in candidate_media_urls {
-            if !download_candidates.contains(&cand) {
-                download_candidates.push(cand);
+
+        // Media file downloading & attachment resolution
+        let content_without_thoughts = crate::ai::commands::clean_ai_response(&final_raw_answer);
+        let explicit_attaches = extract_attach_tags(&content_without_thoughts);
+        let mut download_candidates = explicit_attaches.clone();
+
+        if !explicit_attaches.is_empty() || media_search_requested {
+            // If the model mentioned any candidate media URL directly in its response text, prioritize it
+            for cand in &candidate_media_urls {
+                if content_without_thoughts.contains(cand) && !download_candidates.contains(cand) {
+                    download_candidates.push(cand.clone());
+                }
+            }
+            // Fall back to remaining search candidate media URLs
+            for cand in candidate_media_urls {
+                if !download_candidates.contains(&cand) {
+                    download_candidates.push(cand);
+                }
             }
         }
 
@@ -669,9 +713,6 @@ impl OllamaClient {
                             i + 1,
                         ));
                     }
-                    search_results_text.push_str(
-                        "\n[Search Instructions]: Analyze these findings carefully. If you need deeper details from any URL above, emit <browse>URL</browse>. Otherwise, synthesize these verified facts to formulate an accurate, grounded response for the user.\n"
-                    );
                 }
                 AiSearchTag::Image(_) => {
                     search_results_text.push_str(&format!("\n[Image Search Results for \"{query}\"]:\n"));
@@ -713,9 +754,7 @@ impl OllamaClient {
                     }
                     if count > 0 {
                         search_results_text.push_str(
-                            "\n[Instructions for choosing image]:\n\
-                             1. In your thinking, evaluate which image from the list best depicts what was requested.\n\
-                             2. In your final response, briefly tell the user what picture you found and attach it using: <attach>CHOSEN_URL</attach>\n"
+                            "\n(Reminder: Include <attach>DIRECT_URL</attach> in your response to attach the chosen image.)\n"
                         );
                     }
                 }
@@ -736,6 +775,17 @@ impl OllamaClient {
                         if normalized.is_empty() || !normalized.starts_with("http") {
                             continue;
                         }
+                        let is_direct_audio = item.audio_src.is_some() || {
+                            let path = normalized.split('?').next().unwrap_or("").to_ascii_lowercase();
+                            path.ends_with(".mp3")
+                                || path.ends_with(".ogg")
+                                || path.ends_with(".wav")
+                                || path.ends_with(".mp4")
+                                || path.ends_with(".webm")
+                        };
+                        if !is_direct_audio {
+                            continue;
+                        }
                         let title = item.title.as_deref().unwrap_or("Audio").trim();
                         candidate_media_urls.push(normalized.clone());
                         count += 1;
@@ -748,7 +798,7 @@ impl OllamaClient {
                     }
                     if count > 0 {
                         search_results_text.push_str(
-                            "\n[Instructions]: In your thinking, pick the best audio and attach it using: <attach>CHOSEN_URL</attach>\n"
+                            "\n(Reminder: Include <attach>DIRECT_URL</attach> in your response to attach the chosen audio.)\n"
                         );
                     }
                 }
@@ -803,9 +853,7 @@ pub fn format_partial_output(thinking: &str, content: &str) -> String {
         if trimmed_thinking.is_empty() {
             String::new()
         } else {
-            // Model generated thoughts but stopped before outputting content.
-            // Salvage the thinking output so it isn't completely stripped!
-            trimmed_thinking.to_string()
+            format!("<think>{trimmed_thinking}")
         }
     } else if !trimmed_thinking.is_empty() && !trimmed_content.contains("<think>") {
         format!("<think>{trimmed_thinking}</think>\n{trimmed_content}")
@@ -855,7 +903,7 @@ mod tests {
     #[test]
     fn test_format_partial_output() {
         assert_eq!(format_partial_output("thinking", "content"), "<think>thinking</think>\ncontent");
-        assert_eq!(format_partial_output("only thoughts", ""), "only thoughts");
+        assert_eq!(format_partial_output("only thoughts", ""), "<think>only thoughts");
         assert_eq!(format_partial_output("", "only content"), "only content");
         assert_eq!(format_partial_output("", ""), "");
     }

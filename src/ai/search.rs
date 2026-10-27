@@ -73,8 +73,13 @@ impl SearxClient {
     }
 
     /// Direct DuckDuckGo HTML search for fast, reliable web results without CAPTCHA.
-    pub async fn search_duckduckgo(&self, query: &str) -> Result<Vec<SearxResultItem>> {
+    pub async fn search_duckduckgo(&self, query: &str, safesearch: u8) -> Result<Vec<SearxResultItem>> {
         let url = "https://html.duckduckgo.com/html/";
+        let kp = match safesearch {
+            0 => "-2",
+            1 => "-1",
+            _ => "1",
+        };
         let res = self
             .client
             .post(url)
@@ -82,7 +87,7 @@ impl SearxClient {
             .header(reqwest::header::ACCEPT, "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
             .header(reqwest::header::CONTENT_TYPE, "application/x-www-form-urlencoded")
             .header(reqwest::header::REFERER, "https://html.duckduckgo.com/")
-            .form(&[("q", query), ("b", "")])
+            .form(&[("q", query), ("kl", "wt-wt"), ("kp", kp)])
             .send()
             .await
             .context("failed to query DuckDuckGo")?;
@@ -97,47 +102,46 @@ impl SearxClient {
         Ok(results)
     }
 
-    /// Query web search (DuckDuckGo first, with SearXNG fallback) or SearXNG media categories (`images`, `music,files,videos`).
+    /// Query web search (SearXNG first, falling back to DuckDuckGo for general web search) or SearXNG media categories (`images`, `music,files,videos`).
     pub async fn search(&self, query: &str, category: &str, safesearch: u8) -> Result<Vec<SearxResultItem>> {
-        if category == "general" {
-            match self.search_duckduckgo(query).await {
-                Ok(results) if !results.is_empty() => return Ok(results),
-                Ok(_) => {
-                    tracing::debug!(query, "DuckDuckGo returned 0 results, attempting SearXNG fallback");
+        if let Some(base_url) = self.base_url.as_deref() {
+            let url = format!("{base_url}/search");
+            let res = self
+                .client
+                .get(&url)
+                .query(&[
+                    ("q", query),
+                    ("categories", category),
+                    ("format", "json"),
+                    ("safesearch", &safesearch.to_string()),
+                ])
+                .send()
+                .await;
+
+            match res {
+                Ok(resp) if resp.status().is_success() => {
+                    if let Ok(parsed) = resp.json::<SearxResponse>().await {
+                        if !parsed.results.is_empty() {
+                            return Ok(parsed.results);
+                        }
+                    }
+                }
+                Ok(resp) => {
+                    let status = resp.status();
+                    let body = resp.text().await.unwrap_or_default();
+                    tracing::debug!(query, %status, body, "SearXNG returned non-success, checking fallback");
                 }
                 Err(err) => {
-                    tracing::debug!(?err, query, "DuckDuckGo search error, attempting SearXNG fallback");
+                    tracing::debug!(query, ?err, "SearXNG query error, checking fallback");
                 }
             }
         }
 
-        let base_url = match self.base_url.as_deref() {
-            Some(u) => u,
-            None => eyre::bail!("SearXNG is not configured (SEARXNG_URL is empty)"),
-        };
-
-        let url = format!("{base_url}/search");
-        let res = self
-            .client
-            .get(&url)
-            .query(&[
-                ("q", query),
-                ("categories", category),
-                ("format", "json"),
-                ("safesearch", &safesearch.to_string()),
-            ])
-            .send()
-            .await
-            .context("failed to query SearXNG")?;
-
-        let status = res.status();
-        if !status.is_success() {
-            let body = res.text().await.unwrap_or_default();
-            eyre::bail!("SearXNG returned HTTP {status}: {body}");
+        if category == "general" {
+            return self.search_duckduckgo(query, safesearch).await;
         }
 
-        let parsed: SearxResponse = res.json().await.context("failed to parse SearXNG JSON")?;
-        Ok(parsed.results)
+        eyre::bail!("SearXNG returned no results or is unavailable, and category '{category}' has no fallback")
     }
 }
 
@@ -304,8 +308,29 @@ pub fn parse_duckduckgo_html(html: &str) -> Vec<SearxResultItem> {
                     let href_start = &a_tag_full[href_pos + 6..];
                     if let Some(href_end) = href_start.find('"') {
                         let extracted_url = &href_start[..href_end];
-                        if extracted_url.starts_with("http") {
-                            url = Some(decode_html_entities(extracted_url));
+                        let raw_decoded = decode_html_entities(extracted_url);
+                        let full_url = if raw_decoded.starts_with("//") {
+                            format!("https:{raw_decoded}")
+                        } else {
+                            raw_decoded
+                        };
+
+                        let resolved = if let Ok(parsed_url) = reqwest::Url::parse(&full_url) {
+                            if let Some((_, dest)) = parsed_url.query_pairs().find(|(k, _)| k == "uddg") {
+                                if dest.starts_with("http") {
+                                    dest.into_owned()
+                                } else {
+                                    full_url
+                                }
+                            } else {
+                                full_url
+                            }
+                        } else {
+                            full_url
+                        };
+
+                        if resolved.starts_with("http") {
+                            url = Some(resolved);
                         }
                     }
                 }
@@ -949,12 +974,24 @@ mod tests {
                 <a class="result__snippet" href="https://osu.ppy.sh/home/download">Rhythm is just a *click* away! Taiko and original modes.</a>
               </div>
             </div>
+            <div class="result results_links results_links_deep web-result ">
+              <div class="links_main links_deep result__body">
+                <h2 class="result__title">
+                  <a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fpeppy.ch%2Fabout&rut=xyz">peppy's blog</a>
+                </h2>
+                <a class="result__snippet" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fpeppy.ch%2Fabout&rut=xyz">Personal blog of Dean Herbert.</a>
+              </div>
+            </div>
         "#;
         let results = parse_duckduckgo_html(sample_html);
-        assert_eq!(results.len(), 1);
+        assert_eq!(results.len(), 2);
         assert_eq!(results[0].title.as_deref(), Some("download | osu!"));
         assert_eq!(results[0].url.as_deref(), Some("https://osu.ppy.sh/home/download"));
         assert!(results[0].content.as_deref().unwrap().contains("Rhythm is just a"));
+
+        assert_eq!(results[1].title.as_deref(), Some("peppy's blog"));
+        assert_eq!(results[1].url.as_deref(), Some("https://peppy.ch/about"));
+        assert!(results[1].content.as_deref().unwrap().contains("Dean Herbert"));
     }
 
     #[test]
