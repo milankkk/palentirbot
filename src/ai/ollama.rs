@@ -13,7 +13,7 @@ use super::search::{
 };
 use super::{AiMessage, AiMode};
 
-pub const DEFAULT_MODEL: &str = "huihui_ai/deepseek-r1-abliterated:8b-0528-qwen3";
+pub const DEFAULT_MODEL: &str = "hf.co/Abiray/Qwen3.5-9B-abliterated-GGUF:Q4_K_M";
 pub const DEFAULT_NUM_CTX: u32 = 40_960;
 pub const DEFAULT_REPEAT_PENALTY: f32 = 1.15;
 pub const DEFAULT_REPEAT_LAST_N: i32 = 256;
@@ -492,7 +492,7 @@ impl OllamaClient {
 
                             conversation.push(AiMessage::assistant(full_text));
                             conversation.push(AiMessage::user(format!(
-                                "[System Search Results]:\n{search_results_text}\nNow continue thinking and respond to the user based on these search results."
+                                "{search_results_text}\nNow continue thinking and respond to the user based on these search results."
                             )));
                             continue;
                         }
@@ -501,8 +501,8 @@ impl OllamaClient {
                 }
                 StreamResult::SearchIntercepted {
                     tag,
-                    partial_thinking,
                     partial_content,
+                    ..
                 } => {
                     search_rounds += 1;
 
@@ -529,13 +529,20 @@ impl OllamaClient {
                         )
                         .await;
 
-                    let assistant_msg = format_partial_output(&partial_thinking, &partial_content);
-                    if !assistant_msg.is_empty() {
-                        conversation.push(AiMessage::assistant(assistant_msg));
-                    }
+                    let tag_str = match &tag {
+                        AiSearchTag::Web(q) => format!("<search>{q}</search>"),
+                        AiSearchTag::Image(q) => format!("<search_image>{q}</search_image>"),
+                        AiSearchTag::Audio(q) => format!("<search_audio>{q}</search_audio>"),
+                    };
+                    let assistant_msg = if !partial_content.trim().is_empty() {
+                        format!("{}\n{tag_str}", partial_content.trim())
+                    } else {
+                        tag_str
+                    };
+                    conversation.push(AiMessage::assistant(assistant_msg));
 
                     conversation.push(AiMessage::user(format!(
-                        "[System Search Results]:\n{search_results_text}\nNow continue thinking and respond to the user based on these search results."
+                        "{search_results_text}\nNow continue thinking and respond to the user based on these search results."
                     )));
                 }
             }
@@ -544,7 +551,19 @@ impl OllamaClient {
         // Media file downloading & attachment resolution
         let explicit_attaches = extract_attach_tags(&final_raw_answer);
         let mut download_candidates = explicit_attaches;
-        download_candidates.extend(candidate_media_urls);
+
+        // If the model mentioned any candidate media URL directly in its response text, prioritize it
+        for cand in &candidate_media_urls {
+            if final_raw_answer.contains(cand) && !download_candidates.contains(cand) {
+                download_candidates.push(cand.clone());
+            }
+        }
+        // Fall back to remaining search candidate media URLs
+        for cand in candidate_media_urls {
+            if !download_candidates.contains(&cand) {
+                download_candidates.push(cand);
+            }
+        }
 
         let mut attachment: Option<(String, Vec<u8>)> = None;
 
@@ -583,60 +602,97 @@ impl OllamaClient {
         match searx.search(query, category, safesearch).await {
             Ok(results) => match tag {
                 AiSearchTag::Web(_) => {
-                    search_results_text.push_str(&format!("\n[Web Search for \"{query}\"]:\n"));
+                    search_results_text.push_str(&format!("\n[Web Search Results for \"{query}\"]:\n"));
                     for (i, item) in results.iter().take(5).enumerate() {
-                        let title = item.title.as_deref().unwrap_or("No title");
-                        let url = item.url.as_deref().unwrap_or("");
-                        let snippet = item.content.as_deref().unwrap_or("");
+                        let title = item.title.as_deref().unwrap_or("No title").trim();
+                        let url = item.url.as_deref().unwrap_or("").trim();
+                        let snippet = item.content.as_deref().unwrap_or("").trim();
                         search_results_text.push_str(&format!(
-                            "{}. {} ({})\n   {}\n",
+                            "{}. Title: \"{title}\" ({url})\n   Snippet: {snippet}\n",
                             i + 1,
-                            title,
-                            url,
-                            snippet
                         ));
                     }
+                    search_results_text.push_str(
+                        "\n[Search Instructions]: In your thinking, synthesize these findings to formulate an accurate, direct response to the user.\n"
+                    );
                 }
                 AiSearchTag::Image(_) => {
-                    search_results_text.push_str(&format!("\n[Image Search for \"{query}\"]:\n"));
-                    for (i, item) in results.iter().take(6).enumerate() {
-                        let title = item.title.as_deref().unwrap_or("Image");
-                        let img = item
+                    search_results_text.push_str(&format!("\n[Image Search Results for \"{query}\"]:\n"));
+                    let mut count = 0;
+                    for item in results.iter() {
+                        let raw_img = item
                             .img_src
                             .as_deref()
                             .or(item.thumbnail_src.as_deref())
                             .unwrap_or("");
-                        if !img.is_empty() {
-                            candidate_media_urls.push(img.to_string());
+                        let normalized = if raw_img.starts_with("//") {
+                            format!("https:{raw_img}")
+                        } else {
+                            raw_img.to_string()
+                        };
+                        if normalized.is_empty() || !normalized.starts_with("http") {
+                            continue;
+                        }
+                        let lower = normalized.to_ascii_lowercase();
+                        if lower.ends_with(".svg") || lower.contains(".svg?") {
+                            continue;
+                        }
+                        let title = item.title.as_deref().unwrap_or("Image").trim();
+                        let snippet = item.content.as_deref().unwrap_or("").trim();
+                        candidate_media_urls.push(normalized.clone());
+                        count += 1;
+                        if snippet.is_empty() {
                             search_results_text.push_str(&format!(
-                                "{}. {} | Direct Image URL: {}\n",
-                                i + 1,
-                                title,
-                                img
+                                "{count}. Title: \"{title}\"\n   Direct Image URL: {normalized}\n"
+                            ));
+                        } else {
+                            search_results_text.push_str(&format!(
+                                "{count}. Title: \"{title}\" (Description: {snippet})\n   Direct Image URL: {normalized}\n"
                             ));
                         }
+                        if count >= 6 {
+                            break;
+                        }
+                    }
+                    if count > 0 {
+                        search_results_text.push_str(
+                            "\n[Instructions for choosing image]:\n\
+                             1. In your thinking, evaluate which image from the list best depicts what was requested.\n\
+                             2. In your final response, briefly tell the user what picture you found and attach it using: <attach>CHOSEN_URL</attach>\n"
+                        );
                     }
                 }
                 AiSearchTag::Audio(_) => {
-                    search_results_text.push_str(&format!(
-                        "\n[Audio/Media Search for \"{query}\"]:\n"
-                    ));
-                    for (i, item) in results.iter().take(6).enumerate() {
-                        let title = item.title.as_deref().unwrap_or("Audio");
-                        let audio = item
+                    search_results_text.push_str(&format!("\n[Audio Search Results for \"{query}\"]:\n"));
+                    let mut count = 0;
+                    for item in results.iter() {
+                        let raw_audio = item
                             .audio_src
                             .as_deref()
                             .or(item.url.as_deref())
                             .unwrap_or("");
-                        if !audio.is_empty() {
-                            candidate_media_urls.push(audio.to_string());
-                            search_results_text.push_str(&format!(
-                                "{}. {} | Media URL: {}\n",
-                                i + 1,
-                                title,
-                                audio
-                            ));
+                        let normalized = if raw_audio.starts_with("//") {
+                            format!("https:{raw_audio}")
+                        } else {
+                            raw_audio.to_string()
+                        };
+                        if normalized.is_empty() || !normalized.starts_with("http") {
+                            continue;
                         }
+                        let title = item.title.as_deref().unwrap_or("Audio").trim();
+                        candidate_media_urls.push(normalized.clone());
+                        count += 1;
+                        search_results_text.push_str(&format!(
+                            "{count}. Title: \"{title}\"\n   Media URL: {normalized}\n"
+                        ));
+                        if count >= 6 {
+                            break;
+                        }
+                    }
+                    if count > 0 {
+                        search_results_text.push_str(
+                            "\n[Instructions]: In your thinking, pick the best audio and attach it using: <attach>CHOSEN_URL</attach>\n"
+                        );
                     }
                 }
             },

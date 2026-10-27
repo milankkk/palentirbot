@@ -378,19 +378,28 @@ pub fn extract_search_tags(text: &str) -> Vec<AiSearchTag> {
     tags
 }
 
-/// Extract `<attach>URL</attach>` tags from the text.
+/// Extract `<attach>URL</attach>` or `<attachment>URL</attachment>` tags from the text.
 pub fn extract_attach_tags(text: &str) -> Vec<String> {
     let mut urls = Vec::new();
     let mut remaining = text;
 
-    while let Some(start) = remaining.find("<attach>") {
-        let rest = &remaining[start + "<attach>".len()..];
-        if let Some(end) = rest.find("</attach>") {
-            let url = rest[..end].trim().to_string();
+    while let Some(open_idx) = remaining.find('<') {
+        let after_open = &remaining[open_idx..];
+        let (prefix, close_tag) = if let Some(rest) = after_open.strip_prefix("<attach>") {
+            (rest, "</attach>")
+        } else if let Some(rest) = after_open.strip_prefix("<attachment>") {
+            (rest, "</attachment>")
+        } else {
+            remaining = &after_open[1..];
+            continue;
+        };
+
+        if let Some(end) = prefix.find(close_tag) {
+            let url = prefix[..end].trim().to_string();
             if !url.is_empty() {
                 urls.push(url);
             }
-            remaining = &rest[end + "</attach>".len()..];
+            remaining = &prefix[end + close_tag.len()..];
         } else {
             break;
         }
@@ -411,6 +420,7 @@ pub fn strip_tool_tags(text: &str) -> String {
         "search_audio",
         "audio_search",
         "attach",
+        "attachment",
     ] {
         let open_tag = format!("<{tag}>");
         let close_tag = format!("</{tag}>");

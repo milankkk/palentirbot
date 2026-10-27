@@ -476,7 +476,15 @@ pub async fn execute_ai_question(
 
     let history = get_history(ctx, channel_id, exclude_message_id).await?;
 
-    let system_prompt = ai.get_prompt().await;
+    let raw_prompt = ai.get_prompt().await;
+    let system_prompt = match mode {
+        AiMode::Fast => format!(
+            "{raw_prompt}\n\n[Operating Mode: Fast Mode]\nProvide a direct, snappy response. Do not use deep internal reasoning."
+        ),
+        AiMode::Thinking => format!(
+            "{raw_prompt}\n\n[Operating Mode: Thinking Mode]\nReason carefully through the request before formulating your response."
+        ),
+    };
 
     let clean_username = sanitize_llm_text(username);
     let clean_question = sanitize_llm_text(question);
