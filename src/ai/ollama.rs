@@ -509,9 +509,16 @@ impl OllamaClient {
                             };
 
                             conversation.push(AiMessage::assistant(full_text));
-                            conversation.push(AiMessage::user(format!(
-                                "{search_results_text}\nNow continue thinking, close with </think> when done, and respond to the user based on these search results."
-                            )));
+                            let follow_up = if mode == AiMode::Fast {
+                                format!(
+                                    "{search_results_text}\nNow formulate a direct, accurate answer to the user's question based on these findings without hallucinating."
+                                )
+                            } else {
+                                format!(
+                                    "{search_results_text}\nNow carefully analyze and verify these findings in your thoughts, use <browse>URL</browse> if deeper article details are needed, close with </think> when done, and formulate your accurate response."
+                                )
+                            };
+                            conversation.push(AiMessage::user(follow_up));
                             continue;
                         }
                     }
@@ -584,9 +591,16 @@ impl OllamaClient {
                     };
                     conversation.push(AiMessage::assistant(assistant_msg));
 
-                    conversation.push(AiMessage::user(format!(
-                        "{search_results_text}\nNow continue thinking, close with </think> when done, and respond to the user based on these search results."
-                    )));
+                    let follow_up = if mode == AiMode::Fast {
+                        format!(
+                            "{search_results_text}\nNow formulate a direct, accurate answer to the user's question based on these findings without hallucinating."
+                        )
+                    } else {
+                        format!(
+                            "{search_results_text}\nNow carefully analyze and verify these findings in your thoughts, use <browse>URL</browse> if deeper article details are needed, close with </think> when done, and formulate your accurate response."
+                        )
+                    };
+                    conversation.push(AiMessage::user(follow_up));
                 }
             }
         };
@@ -656,7 +670,7 @@ impl OllamaClient {
                         ));
                     }
                     search_results_text.push_str(
-                        "\n[Search Instructions]: In your thinking, synthesize these findings to formulate an accurate, direct response to the user.\n"
+                        "\n[Search Instructions]: Analyze these findings carefully. If you need deeper details from any URL above, emit <browse>URL</browse>. Otherwise, synthesize these verified facts to formulate an accurate, grounded response for the user.\n"
                     );
                 }
                 AiSearchTag::Image(_) => {

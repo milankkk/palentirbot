@@ -496,10 +496,10 @@ pub async fn execute_ai_question(
     let raw_prompt = ai.get_prompt().await;
     let system_prompt = match mode {
         AiMode::Fast => format!(
-            "{raw_prompt}\n\n{location_header}\n\n[Mode: Fast Mode]\nBe direct and concise. You may use <search> or <browse> if you need external facts."
+            "{raw_prompt}\n\n{location_header}\n\n[Mode: Fast Mode]\nBe direct and decisive. If external facts or news are needed, immediately emit <search>exact user keywords</search> without hesitation."
         ),
         AiMode::Thinking => format!(
-            "{raw_prompt}\n\n{location_header}\n\n[Mode: Thinking Mode]\nCarefully reason through the question in your thoughts before closing with </think> and writing your concise response for the user."
+            "{raw_prompt}\n\n{location_header}\n\n[Mode: Thinking Mode]\nReason thoroughly and critically inside your thoughts. Doubt your memory, search with exact user keywords, verify facts, close with </think>, and formulate your grounded response."
         ),
     };
 
