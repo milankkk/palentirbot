@@ -53,7 +53,7 @@ pub async fn ai(ctx: Arc<Context>, command: InteractionCommand, args: SetupAi) -
     if args.enabled.is_none() && args.safesearch.is_none() {
         let (ai_enabled, safesearch) = ctx
             .guild_settings(guild_id, |s| (s.ai_enabled, s.ai_safesearch))
-            .unwrap_or((false, true));
+            .unwrap_or((true, false));
 
         let content = format!(
             "**AI Settings for this server:**\n• AI Module: **{}**\n• SafeSearch: **{}**",
@@ -82,7 +82,7 @@ pub async fn ai(ctx: Arc<Context>, command: InteractionCommand, args: SetupAi) -
 
     let (ai_enabled, safesearch) = ctx
         .guild_settings(guild_id, |s| (s.ai_enabled, s.ai_safesearch))
-        .unwrap_or((false, true));
+        .unwrap_or((true, false));
 
     let content = format!(
         "✅ **Updated AI settings for this server:**\n• AI Module: **{}**\n• SafeSearch: **{}**",

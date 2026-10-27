@@ -22,14 +22,19 @@ fn default_true() -> bool {
     true
 }
 
+#[inline]
+fn default_false() -> bool {
+    false
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Server {
     pub input_channels: HashSet<Id<ChannelMarker>, IntBuildHasher>,
     pub output_channel: Option<Id<ChannelMarker>>,
     pub prefix: Option<String>,
-    #[serde(default)]
-    pub ai_enabled: bool,
     #[serde(default = "default_true")]
+    pub ai_enabled: bool,
+    #[serde(default = "default_false")]
     pub ai_safesearch: bool,
 }
 
@@ -39,8 +44,8 @@ impl Default for Server {
             input_channels: HashSet::default(),
             output_channel: None,
             prefix: None,
-            ai_enabled: false,
-            ai_safesearch: true,
+            ai_enabled: true,
+            ai_safesearch: false,
         }
     }
 }
@@ -79,9 +84,9 @@ mod servers {
         output_channel: Option<Id<ChannelMarker>>,
         #[serde(default)]
         prefix: Option<String>,
-        #[serde(default)]
-        pub ai_enabled: bool,
         #[serde(default = "super::default_true")]
+        pub ai_enabled: bool,
+        #[serde(default = "super::default_false")]
         pub ai_safesearch: bool,
     }
 

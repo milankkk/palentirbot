@@ -49,11 +49,11 @@ impl AiMessage {
 pub const AI_DISABLED_REPLY: &str =
     "ℹ️ The AI module is disabled in this server. An administrator can enable it with `/setup ai enabled:True`.";
 
-/// Checks if AI is globally enabled via the `AI_ENABLED` environment variable (defaults to false).
+/// Checks if AI is globally enabled via the `AI_ENABLED` environment variable (defaults to true).
 pub fn is_globally_enabled() -> bool {
     std::env::var("AI_ENABLED")
-        .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
-        .unwrap_or(false)
+        .map(|v| !v.eq_ignore_ascii_case("false") && v != "0")
+        .unwrap_or(true)
 }
 
 /// Checks if AI is active and permitted for this guild (or DM).
@@ -62,15 +62,15 @@ pub fn is_enabled_for_guild(ctx: &crate::core::Context, guild_id: Option<Id<Guil
         return false;
     }
     match guild_id {
-        Some(gid) => ctx.guild_settings(gid, |s| s.ai_enabled).unwrap_or(false),
+        Some(gid) => ctx.guild_settings(gid, |s| s.ai_enabled).unwrap_or(true),
         None => true, // Enabled in DMs if AI is globally enabled
     }
 }
 
 /// Determines the effective SafeSearch level:
-/// - 0: Off (if AI_SAFESEARCH=0 or server ai_safesearch=false)
-/// - 1: Moderate (default)
-/// - 2: Strict (if AI_SAFESEARCH=2 and server ai_safesearch=true)
+/// - 0: Off (default unless overridden via AI_SAFESEARCH or server settings)
+/// - 1: Moderate
+/// - 2: Strict
 pub fn safesearch_level_for_guild(
     ctx: &crate::core::Context,
     guild_id: Option<Id<GuildMarker>>,
@@ -78,14 +78,14 @@ pub fn safesearch_level_for_guild(
     let env_level: u8 = std::env::var("AI_SAFESEARCH")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(1);
+        .unwrap_or(0);
 
     if env_level == 0 {
         return 0;
     }
 
     if let Some(gid) = guild_id {
-        let server_safesearch = ctx.guild_settings(gid, |s| s.ai_safesearch).unwrap_or(true);
+        let server_safesearch = ctx.guild_settings(gid, |s| s.ai_safesearch).unwrap_or(false);
         if !server_safesearch {
             return 0;
         }
