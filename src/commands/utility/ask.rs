@@ -582,6 +582,36 @@ fn clean_ai_response(content: &str) -> String {
         text.drain(..end_idx);
     }
 
+    // Repeatedly strip all complete <thought>...</thought> blocks
+    while let Some(start) = text.find("<thought>") {
+        if let Some(end) = text[start..].find("</thought>") {
+            let end_idx = start + end + "</thought>".len();
+            text.drain(start..end_idx);
+        } else {
+            text.truncate(start);
+            break;
+        }
+    }
+    while let Some(end) = text.find("</thought>") {
+        let end_idx = end + "</thought>".len();
+        text.drain(..end_idx);
+    }
+
+    // Repeatedly strip all complete <reasoning>...</reasoning> blocks
+    while let Some(start) = text.find("<reasoning>") {
+        if let Some(end) = text[start..].find("</reasoning>") {
+            let end_idx = start + end + "</reasoning>".len();
+            text.drain(start..end_idx);
+        } else {
+            text.truncate(start);
+            break;
+        }
+    }
+    while let Some(end) = text.find("</reasoning>") {
+        let end_idx = end + "</reasoning>".len();
+        text.drain(..end_idx);
+    }
+
     let mut content = text.trim();
 
     // Strip ChatML / role delimiters and artifacts
@@ -692,6 +722,12 @@ mod tests {
     fn test_clean_ai_response_thoughts() {
         let response = "<think>Hmm let me think...</think> Hello! How can I help?";
         assert_eq!(clean_ai_response(response), "Hello! How can I help?");
+
+        let thought_response = "<thought>Internal deliberation</thought>Here is the answer.";
+        assert_eq!(clean_ai_response(thought_response), "Here is the answer.");
+
+        let reasoning_response = "<reasoning>Analyzing physical physics</reasoning>Drive your car.";
+        assert_eq!(clean_ai_response(reasoning_response), "Drive your car.");
 
         let unclosed = "<think>I am still thinking and got cut off";
         assert_eq!(clean_ai_response(unclosed), "");

@@ -10,7 +10,7 @@ use super::AiMessage;
 
 pub const DEFAULT_MODEL: &str = "huihui_ai/qwen3-abliterated:8b";
 pub const DEFAULT_NUM_CTX: u32 = 40_960;
-pub const DEFAULT_REPEAT_PENALTY: f32 = 1.0;
+pub const DEFAULT_REPEAT_PENALTY: f32 = 1.1;
 pub const DEFAULT_REPEAT_LAST_N: i32 = 64;
 pub const DEFAULT_PRESENCE_PENALTY: f32 = 0.0;
 pub const DEFAULT_FREQUENCY_PENALTY: f32 = 0.0;
@@ -308,7 +308,7 @@ impl OllamaClient {
                             }
                         }
                     }
-                    trimmed_think.to_owned()
+                    String::new()
                 } else {
                     String::new()
                 }
