@@ -8,14 +8,17 @@ use twilight_model::id::{marker::ChannelMarker, Id};
 
 use super::AiMessage;
 
+pub const DEFAULT_MODEL: &str = "huihui_ai/qwen3-abliterated:8b";
 pub const DEFAULT_NUM_CTX: u32 = 40_960;
-pub const DEFAULT_REPEAT_PENALTY: f32 = 1.15;
-pub const DEFAULT_REPEAT_LAST_N: i32 = 256;
+pub const DEFAULT_REPEAT_PENALTY: f32 = 1.0;
+pub const DEFAULT_REPEAT_LAST_N: i32 = 64;
 pub const DEFAULT_PRESENCE_PENALTY: f32 = 0.0;
 pub const DEFAULT_FREQUENCY_PENALTY: f32 = 0.0;
-pub const DEFAULT_TEMPERATURE: f32 = 0.8;
-pub const DEFAULT_TOP_P: f32 = 0.9;
-pub const DEFAULT_NUM_PREDICT: i32 = 1024;
+pub const DEFAULT_TEMPERATURE: f32 = 0.6;
+pub const DEFAULT_TOP_P: f32 = 0.95;
+pub const DEFAULT_NUM_PREDICT: i32 = 8192;
+pub const DEFAULT_TOP_K: u32 = 20;
+pub const DEFAULT_MIN_P: f32 = 0.0;
 
 #[derive(Clone, Debug, Default)]
 pub struct LastGenerationStats {
@@ -38,6 +41,9 @@ pub struct OllamaClient {
     frequency_penalty: f32,
     temperature: f32,
     top_p: f32,
+    top_k: u32,
+    min_p: f32,
+    think_enabled: bool,
     last_stats: tokio::sync::RwLock<HashMap<Id<ChannelMarker>, LastGenerationStats>>,
 }
 
@@ -58,6 +64,9 @@ struct OllamaOptions {
     frequency_penalty: f32,
     temperature: f32,
     top_p: f32,
+    top_k: u32,
+    #[serde(skip_serializing_if = "is_zero_f32")]
+    min_p: f32,
 }
 
 #[derive(Serialize)]
@@ -96,7 +105,8 @@ impl OllamaClient {
         let url =
             std::env::var("OLLAMA_URL").unwrap_or_else(|_| "http://127.0.0.1:11434".to_owned());
 
-        let model = std::env::var("OLLAMA_MODEL").unwrap_or_else(|_| "gpt-oss".to_owned());
+        let model =
+            std::env::var("OLLAMA_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_owned());
 
         let num_ctx = std::env::var("OLLAMA_NUM_CTX")
             .ok()
@@ -138,10 +148,24 @@ impl OllamaClient {
             .and_then(|s| s.parse().ok())
             .unwrap_or(DEFAULT_TOP_P);
 
+        let top_k = std::env::var("OLLAMA_TOP_K")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(DEFAULT_TOP_K);
+
+        let min_p = std::env::var("OLLAMA_MIN_P")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(DEFAULT_MIN_P);
+
+        let think_enabled = std::env::var("OLLAMA_THINK_ENABLED")
+            .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+            .unwrap_or(true);
+
         let timeout_secs = std::env::var("OLLAMA_TIMEOUT_SECS")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(120);
+            .unwrap_or(180);
 
         let client = Client::builder()
             .timeout(Duration::from_secs(timeout_secs))
@@ -160,6 +184,9 @@ impl OllamaClient {
             frequency_penalty,
             temperature,
             top_p,
+            top_k,
+            min_p,
+            think_enabled,
             last_stats: tokio::sync::RwLock::new(HashMap::new()),
         }
     }
@@ -185,7 +212,7 @@ impl OllamaClient {
             model: &self.model,
             messages,
             stream: false,
-            think: Some(false),
+            think: Some(self.think_enabled),
             options: OllamaOptions {
                 num_ctx: self.num_ctx,
                 num_predict: Some(self.num_predict),
@@ -195,6 +222,8 @@ impl OllamaClient {
                 frequency_penalty: self.frequency_penalty,
                 temperature: self.temperature,
                 top_p: self.top_p,
+                top_k: self.top_k,
+                min_p: self.min_p,
             },
         };
 
@@ -233,7 +262,64 @@ impl OllamaClient {
             self.last_stats.write().await.insert(channel_id, stats);
         }
 
-        Ok(response.message.content)
+        let content = if response.message.content.trim().is_empty() {
+            if let Some(ref think) = response.message.thinking {
+                let trimmed_think = think.trim();
+                if !trimmed_think.is_empty() {
+                    tracing::warn!("Ollama returned empty content with thinking; attempting fast continuation");
+                    let mut continuation_messages = messages.to_vec();
+                    continuation_messages.push(AiMessage::assistant(format!("<think>{trimmed_think}</think>")));
+                    continuation_messages.push(AiMessage::user("Based on your reasoning above, provide your final response now. /no_think"));
+
+                    let cont_request = OllamaRequest {
+                        model: &self.model,
+                        messages: &continuation_messages,
+                        stream: false,
+                        think: Some(false),
+                        options: OllamaOptions {
+                            num_ctx: self.num_ctx,
+                            num_predict: Some(2048),
+                            repeat_penalty: self.repeat_penalty,
+                            repeat_last_n: self.repeat_last_n,
+                            presence_penalty: self.presence_penalty,
+                            frequency_penalty: self.frequency_penalty,
+                            temperature: self.temperature,
+                            top_p: self.top_p,
+                            top_k: self.top_k,
+                            min_p: self.min_p,
+                        },
+                    };
+
+                    if let Ok(cont_resp) = self
+                        .client
+                        .post(format!("{}/api/chat", self.url.trim_end_matches('/')))
+                        .json(&cont_request)
+                        .send()
+                        .await
+                    {
+                        if cont_resp.status().is_success() {
+                            if let Ok(cont_bytes) = cont_resp.bytes().await {
+                                let cont_str = String::from_utf8_lossy(&cont_bytes);
+                                if let Ok(parsed) = serde_json::from_str::<OllamaResponse>(&cont_str) {
+                                    if !parsed.message.content.trim().is_empty() {
+                                        return Ok(parsed.message.content);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    trimmed_think.to_owned()
+                } else {
+                    String::new()
+                }
+            } else {
+                String::new()
+            }
+        } else {
+            response.message.content
+        };
+
+        Ok(content)
     }
 }
 

@@ -19,8 +19,10 @@ use crate::{
     },
 };
 
-/// Maximum number of previous Discord messages sent to the AI.
-const HISTORY_LIMIT: u16 = 100;
+/// Default number of previous Discord messages sent to the AI (kept focused to prevent context pollution).
+const DEFAULT_HISTORY_LIMIT: u16 = 25;
+/// Hard ceiling for history messages.
+const MAX_HISTORY_LIMIT: u16 = 50;
 /// Maximum number of characters taken from a single historical message.
 ///
 /// This prevents a handful of enormous Discord messages from consuming the
@@ -323,7 +325,7 @@ pub async fn execute_ai_question(
             }
 
             system_prompt.push_str(
-                "\n\nCONVERSATION CONTEXT: The user is directly replying to your previous statement above. Focus your response specifically on addressing what they said in direct relation to your statement."
+                "\n\nCONVERSATION CONTEXT: The user is directly replying to your previous statement above. Focus your response specifically on addressing what they said in direct relation to your statement. Do NOT repeat or summarize what you already said—simply answer their reply directly."
             );
 
             let mut msgs = Vec::with_capacity(history_messages.len() + 2);
@@ -381,7 +383,8 @@ async fn get_history(
     let limit = std::env::var("AI_HISTORY_MESSAGES")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(HISTORY_LIMIT);
+        .unwrap_or(DEFAULT_HISTORY_LIMIT);
+    let limit = limit.clamp(1, MAX_HISTORY_LIMIT);
 
     let response = ctx
         .http
@@ -406,6 +409,46 @@ async fn get_history(
     messages.reverse();
 
     Ok(messages)
+}
+
+fn is_transient_status(content: &str) -> bool {
+    content.starts_with("⏳ Waiting in AI queue")
+        || content.starts_with("⏳ Thinking")
+        || content.starts_with("💭 Thinking")
+        || content.starts_with("🧠 **Thinking")
+        || content.starts_with("🌐 Searching")
+        || content.starts_with("🌐 Thinking")
+        || content.starts_with("🌐 Browsing")
+        || content.starts_with("🖼️ Thinking")
+        || content.starts_with("🖼️ Downloading")
+        || content.starts_with("✍️ Thinking")
+        || content.starts_with("⚡ Generating")
+        || content.starts_with("💭 Generating")
+        || content.starts_with("⚠️ ")
+        || content.starts_with("🧹 ")
+        || content.starts_with("🏓 Pong")
+        || content.starts_with("*(blinks blankly")
+        || content.starts_with("Something went wrong while asking the AI")
+        || content.contains("replays.insertdomainname.be")
+        || content.contains("Finished rendering replay")
+        || content.contains("Started replay processing")
+}
+
+fn is_non_ai_command(content: &str) -> bool {
+    let lower = content.to_ascii_lowercase();
+    let trimmed = lower.trim();
+    if trimmed == "!r" || trimmed == "!q" {
+        return true;
+    }
+    for prefix in &[
+        "!render", "!r ", "/render", "!queue", "!q ", "!skin", "!danser",
+        "!settings", "!setup", "!ping", "!help", "!np", "!replay",
+    ] {
+        if lower.starts_with(prefix) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Convert normal Discord messages into messages suitable for the AI.
@@ -440,21 +483,22 @@ fn convert_history(history: Vec<Message>, bot_id: Id<UserMarker>) -> Vec<AiMessa
         let content = sanitize_llm_text(&truncate_history_message(&message.content));
 
         if message.author.id == bot_id {
-            // Filter out non-conversational bot messages (status, queue notices, clear confirmations)
-            if content.starts_with("⏳ Waiting in AI queue")
-                || content.starts_with("💭 Thinking")
-                || content.starts_with("💭 Generating")
-                || content.starts_with("⚠️ ")
-                || content.starts_with("🧹 ")
-                || content.starts_with("🏓 Pong")
-                || content.starts_with("*(blinks blankly")
-                || content.starts_with("Something went wrong while asking the AI")
-            {
+            // Filter out non-conversational bot messages (status, queue notices, clear confirmations, render alerts)
+            if is_transient_status(&content) {
                 continue;
             }
-            // Previous AI response.
-            raw_messages.push(AiMessage::assistant(content));
+            // Previous AI response - clean to remove residual think blocks or role headers
+            let cleaned = clean_ai_response(&content);
+            if !cleaned.is_empty() {
+                raw_messages.push(AiMessage::assistant(cleaned));
+            }
         } else {
+            // Ignore non-AI commands to prevent polluting the conversation with danser/utility spam
+            let trimmed = content.trim();
+            if is_non_ai_command(trimmed) {
+                continue;
+            }
+
             // Human Discord message.
             let author_name = sanitize_llm_text(&message.author.name);
             let cleaned = strip_command_prefix(&content);
@@ -490,7 +534,7 @@ fn strip_command_prefix(content: &str) -> &str {
     let trimmed = content.trim();
     for prefix in &[
         "!ask ", "!ask", "!ai ", "!ai", "!a ", "!a",
-        "/ask ", "/ask", "!render ", "!render", "!queue", "!ping"
+        "/ask ", "/ask",
     ] {
         if let Some(rest) = trimmed.strip_prefix(prefix) {
             return rest.trim_start();
@@ -690,5 +734,26 @@ mod tests {
         let builder = MessageBuilder::new().content("hello").reply(msg_id);
         assert_eq!(builder.reply, Some(msg_id));
         assert_eq!(builder.content.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn test_is_transient_status() {
+        assert!(is_transient_status("⏳ Waiting in AI queue (position #1)..."));
+        assert!(is_transient_status("💭 Thinking..."));
+        assert!(is_transient_status("⚡ Generating response..."));
+        assert!(is_transient_status("Finished rendering replay https://replays.insertdomainname.be/watch/123.mp4"));
+        assert!(is_transient_status("*(blinks blankly... no thoughts head empty)*"));
+        assert!(!is_transient_status("osu! was created in 2007 by Dean Herbert."));
+    }
+
+    #[test]
+    fn test_is_non_ai_command() {
+        assert!(is_non_ai_command("!render https://osu.ppy.sh/scores/123"));
+        assert!(is_non_ai_command("!r"));
+        assert!(is_non_ai_command("/render"));
+        assert!(is_non_ai_command("!skin"));
+        assert!(is_non_ai_command("!ping"));
+        assert!(!is_non_ai_command("!ask what is osu?"));
+        assert!(!is_non_ai_command("Can you render this map for me?"));
     }
 }

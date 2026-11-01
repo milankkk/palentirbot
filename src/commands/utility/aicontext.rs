@@ -202,7 +202,8 @@ async fn fetch_channel_history(ctx: &Context, channel_id: Id<ChannelMarker>) -> 
     let limit = std::env::var("AI_HISTORY_MESSAGES")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(100);
+        .unwrap_or(25);
+    let limit = limit.clamp(1, 50);
     let response = ctx.http.channel_messages(channel_id).limit(limit).await?;
     let mut messages: Vec<Message> = response.model().await?;
 
