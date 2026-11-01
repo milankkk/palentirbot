@@ -160,7 +160,7 @@ impl OllamaClient {
 
         let think_enabled = std::env::var("OLLAMA_THINK_ENABLED")
             .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
-            .unwrap_or(true);
+            .unwrap_or(false);
 
         let timeout_secs = std::env::var("OLLAMA_TIMEOUT_SECS")
             .ok()
@@ -263,58 +263,7 @@ impl OllamaClient {
         }
 
         let content = if response.message.content.trim().is_empty() {
-            if let Some(ref think) = response.message.thinking {
-                let trimmed_think = think.trim();
-                if !trimmed_think.is_empty() {
-                    tracing::warn!("Ollama returned empty content with thinking; attempting fast continuation");
-                    let mut continuation_messages = messages.to_vec();
-                    continuation_messages.push(AiMessage::assistant(format!("<think>{trimmed_think}</think>")));
-                    continuation_messages.push(AiMessage::user("Based on your reasoning above, provide your final response now. /no_think"));
-
-                    let cont_request = OllamaRequest {
-                        model: &self.model,
-                        messages: &continuation_messages,
-                        stream: false,
-                        think: Some(false),
-                        options: OllamaOptions {
-                            num_ctx: self.num_ctx,
-                            num_predict: Some(2048),
-                            repeat_penalty: self.repeat_penalty,
-                            repeat_last_n: self.repeat_last_n,
-                            presence_penalty: self.presence_penalty,
-                            frequency_penalty: self.frequency_penalty,
-                            temperature: self.temperature,
-                            top_p: self.top_p,
-                            top_k: self.top_k,
-                            min_p: self.min_p,
-                        },
-                    };
-
-                    if let Ok(cont_resp) = self
-                        .client
-                        .post(format!("{}/api/chat", self.url.trim_end_matches('/')))
-                        .json(&cont_request)
-                        .send()
-                        .await
-                    {
-                        if cont_resp.status().is_success() {
-                            if let Ok(cont_bytes) = cont_resp.bytes().await {
-                                let cont_str = String::from_utf8_lossy(&cont_bytes);
-                                if let Ok(parsed) = serde_json::from_str::<OllamaResponse>(&cont_str) {
-                                    if !parsed.message.content.trim().is_empty() {
-                                        return Ok(parsed.message.content);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    String::new()
-                } else {
-                    String::new()
-                }
-            } else {
-                String::new()
-            }
+            response.message.thinking.unwrap_or_default()
         } else {
             response.message.content
         };
