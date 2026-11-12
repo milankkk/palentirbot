@@ -2,16 +2,18 @@ use std::sync::Arc;
 
 use command_macros::SlashCommand;
 use eyre::Result;
-use twilight_interactions::command::{CommandModel, CreateCommand};
+use twilight_interactions::command::{AutocompleteValue, CommandModel, CreateCommand};
 
 use crate::{
     util::{interaction::InteractionCommand, InteractionCommandExt},
     Context,
 };
 
+use self::ai::*;
 use self::cache::*;
 use self::settings::*;
 
+mod ai;
 mod cache;
 pub mod settings;
 
@@ -24,6 +26,18 @@ pub enum Owner {
     Cache(OwnerCache),
     #[command(name = "settings")]
     Settings(OwnerSettings),
+    #[command(name = "ai")]
+    Ai(OwnerAi),
+}
+
+#[derive(CommandModel)]
+pub enum OwnerParsable {
+    #[command(name = "cache")]
+    Cache(OwnerCache),
+    #[command(name = "settings")]
+    Settings(OwnerSettings),
+    #[command(name = "ai")]
+    Ai(OwnerAiParsable),
 }
 
 #[derive(CommandModel, CreateCommand)]
@@ -49,5 +63,20 @@ async fn slash_owner(ctx: Arc<Context>, mut command: InteractionCommand) -> Resu
     match Owner::from_interaction(command.input_data())? {
         Owner::Cache(_) => cache(ctx, command).await,
         Owner::Settings(_) => settings(ctx, command).await,
+        Owner::Ai(action) => handle_owner_ai(ctx, command, action).await,
     }
+}
+
+pub async fn slash_owner_autocomplete(
+    ctx: Arc<Context>,
+    mut command: InteractionCommand,
+) -> Result<()> {
+    if let OwnerParsable::Ai(OwnerAiParsable::Model(args)) =
+        OwnerParsable::from_interaction(command.input_data())?
+    {
+        if let AutocompleteValue::Focused(partial) = args.name {
+            handle_owner_model_autocomplete(&ctx, &command, &partial).await?;
+        }
+    }
+    Ok(())
 }

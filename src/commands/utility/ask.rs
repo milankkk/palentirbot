@@ -18,7 +18,9 @@ use twilight_model::{
 
 use crate::{
     core::{
-        ai::{base64_encode, sanitize_llm_text, AiMessage, AiStreamEvent, SearchMode},
+        ai::{
+            base64_encode, sanitize_llm_text, AiMessage, AiPersonaMode, AiStreamEvent, SearchMode,
+        },
         Context,
     },
     util::{
@@ -668,6 +670,16 @@ pub async fn execute_ai_question_with_options(
     let mut system_prompt = system_prompt_template
         .replace("{username}", &clean_username)
         .replace("{user_id}", &user_id.to_string());
+
+    match ctx.ai().channel_mode(channel_id) {
+        AiPersonaMode::Default => {}
+        AiPersonaMode::Helpful => system_prompt.push_str(
+            "\n\nCHANNEL PERSONA OVERRIDE (Helpful Mode): Respond clearly, concisely, and directly like a helpful osu! & tech Discord assistant. Skip exaggerated slang/brainrot while keeping accurate facts and casual readability.",
+        ),
+        AiPersonaMode::Brainrot => system_prompt.push_str(
+            "\n\nCHANNEL PERSONA OVERRIDE (Brainrot Mode): Lean heavily into chaotic Discord banter and unhinged humor while still reporting verified tool facts accurately.",
+        ),
+    }
 
     let current_user_msg = format!(
         "{clean_username} (Discord ID {user_id}): {clean_question}"

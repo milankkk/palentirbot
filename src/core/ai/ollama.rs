@@ -30,6 +30,36 @@ pub const DEFAULT_TOP_P: f32 = 0.95;
 pub const DEFAULT_NUM_PREDICT: i32 = 2048;
 pub const DEFAULT_TOP_K: u32 = 20;
 pub const DEFAULT_MIN_P: f32 = 0.0;
+const AI_RUNTIME_FILE_PATH: &str = "data/ai_runtime.json";
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AiPersonaMode {
+    #[default]
+    Default,
+    Helpful,
+    Brainrot,
+}
+
+impl std::fmt::Display for AiPersonaMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Default => f.write_str("Default (prompt.txt)"),
+            Self::Helpful => f.write_str("Helpful (clean / direct)"),
+            Self::Brainrot => f.write_str("Brainrot (extra chaotic)"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RuntimeAiConfig {
+    pub model: String,
+    pub think_enabled: bool,
+    pub temperature: f32,
+    pub num_ctx: u32,
+    #[serde(default)]
+    pub channel_modes: HashMap<String, AiPersonaMode>,
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct LastGenerationStats {
@@ -43,20 +73,18 @@ pub struct LastGenerationStats {
 pub struct OllamaClient {
     client: Client,
     url: String,
-    model: String,
-    num_ctx: u32,
     num_predict: i32,
     repeat_penalty: f32,
     repeat_last_n: i32,
     presence_penalty: f32,
     frequency_penalty: f32,
-    temperature: f32,
     top_p: f32,
     top_k: u32,
     min_p: f32,
-    think_enabled: bool,
     keep_alive: String,
     search: super::search::WebSearchClient,
+    runtime: std::sync::RwLock<RuntimeAiConfig>,
+    runtime_save_lock: tokio::sync::Mutex<()>,
     last_stats: tokio::sync::RwLock<HashMap<Id<ChannelMarker>, LastGenerationStats>>,
 }
 
@@ -293,37 +321,136 @@ impl OllamaClient {
 
         let search = super::search::WebSearchClient::new();
 
+        let default_runtime = RuntimeAiConfig {
+            model,
+            think_enabled,
+            temperature,
+            num_ctx,
+            channel_modes: HashMap::new(),
+        };
+        let runtime_cfg = std::fs::read(AI_RUNTIME_FILE_PATH)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<RuntimeAiConfig>(&bytes).ok())
+            .map(|mut loaded| {
+                if loaded.model.trim().is_empty() {
+                    loaded.model = default_runtime.model.clone();
+                }
+                loaded.temperature = loaded.temperature.clamp(0.0, 2.0);
+                loaded.num_ctx = loaded.num_ctx.clamp(2_048, 131_072);
+                loaded
+            })
+            .unwrap_or(default_runtime);
+
         Self {
             client,
             url,
-            model,
-            num_ctx,
             num_predict,
             repeat_penalty,
             repeat_last_n,
             presence_penalty,
             frequency_penalty,
-            temperature,
             top_p,
             top_k,
             min_p,
-            think_enabled,
             keep_alive,
             search,
+            runtime: std::sync::RwLock::new(runtime_cfg),
+            runtime_save_lock: tokio::sync::Mutex::new(()),
             last_stats: tokio::sync::RwLock::new(HashMap::new()),
         }
     }
 
+    pub fn snapshot_config(&self) -> RuntimeAiConfig {
+        self.runtime
+            .read()
+            .expect("ai runtime RwLock poisoned")
+            .clone()
+    }
+
     pub fn num_ctx(&self) -> u32 {
-        self.num_ctx
+        self.runtime
+            .read()
+            .expect("ai runtime RwLock poisoned")
+            .num_ctx
     }
 
     pub fn num_predict(&self) -> i32 {
         self.num_predict
     }
 
-    pub fn model_name(&self) -> &str {
-        &self.model
+    pub fn model_name(&self) -> String {
+        self.runtime
+            .read()
+            .expect("ai runtime RwLock poisoned")
+            .model
+            .clone()
+    }
+
+    pub fn channel_mode(&self, channel_id: Id<ChannelMarker>) -> AiPersonaMode {
+        self.runtime
+            .read()
+            .expect("ai runtime RwLock poisoned")
+            .channel_modes
+            .get(&channel_id.get().to_string())
+            .copied()
+            .unwrap_or_default()
+    }
+
+    pub async fn update_runtime<F>(&self, f: F) -> Result<RuntimeAiConfig>
+    where
+        F: FnOnce(&mut RuntimeAiConfig),
+    {
+        let _save_guard = self.runtime_save_lock.lock().await;
+        let snapshot = {
+            let mut guard = self.runtime.write().expect("ai runtime RwLock poisoned");
+            f(&mut guard);
+            guard.temperature = guard.temperature.clamp(0.0, 2.0);
+            guard.num_ctx = guard.num_ctx.clamp(2_048, 131_072);
+            guard.clone()
+        };
+
+        let json = serde_json::to_vec_pretty(&snapshot)?;
+        let path = std::path::Path::new(AI_RUNTIME_FILE_PATH);
+        if let Some(parent) = path.parent() {
+            let _ = tokio::fs::create_dir_all(parent).await;
+        }
+        let tmp = path.with_extension("json.tmp");
+        tokio::fs::write(&tmp, json).await?;
+        tokio::fs::rename(&tmp, path).await?;
+
+        Ok(snapshot)
+    }
+
+    /// List locally installed Ollama models from `/api/tags`.
+    pub async fn list_models(&self) -> Result<Vec<String>> {
+        #[derive(Deserialize)]
+        struct TagsResponse {
+            #[serde(default)]
+            models: Vec<TagModel>,
+        }
+        #[derive(Deserialize)]
+        struct TagModel {
+            name: String,
+        }
+
+        let resp = self
+            .client
+            .get(format!("{}/api/tags", self.url.trim_end_matches('/')))
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await
+            .context("failed to query Ollama /api/tags")?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            eyre::bail!("Ollama /api/tags returned HTTP {status}");
+        }
+        let parsed: TagsResponse = resp
+            .json()
+            .await
+            .context("failed to parse Ollama /api/tags response")?;
+
+        Ok(parsed.models.into_iter().map(|m| m.name).collect())
     }
 
     pub async fn last_stats(&self, channel_id: Id<ChannelMarker>) -> Option<LastGenerationStats> {
@@ -487,8 +614,10 @@ impl OllamaClient {
         let base_tools = Self::tools_for(search_mode, osu.is_some());
         let mut last_response: Option<OllamaResponse> = None;
 
+        let think_enabled = self.snapshot_config().think_enabled;
+
         for round in 0..MAX_TOOL_ROUNDS {
-            let pass_think = if round == 0 { self.think_enabled } else { false };
+            let pass_think = if round == 0 { think_enabled } else { false };
             let pass_tools = base_tools;
             let resp = self
                 .send_chat_request(
@@ -684,21 +813,22 @@ impl OllamaClient {
         stream_tx: Option<&UnboundedSender<AiStreamEvent>>,
     ) -> Result<OllamaResponse> {
         let streaming = stream_tx.is_some();
+        let cfg = self.snapshot_config();
         let request = OllamaRequest {
-            model: &self.model,
+            model: &cfg.model,
             messages,
             stream: streaming,
             think: Some(think),
             keep_alive: &self.keep_alive,
             tools,
             options: OllamaOptions {
-                num_ctx: self.num_ctx,
+                num_ctx: cfg.num_ctx,
                 num_predict: Some(num_predict),
                 repeat_penalty: self.repeat_penalty,
                 repeat_last_n: self.repeat_last_n,
                 presence_penalty: self.presence_penalty,
                 frequency_penalty: self.frequency_penalty,
-                temperature: self.temperature,
+                temperature: cfg.temperature,
                 top_p: self.top_p,
                 top_k: self.top_k,
                 min_p: self.min_p,
@@ -802,5 +932,24 @@ mod tests {
         assert_eq!(rx.try_recv().unwrap(), AiStreamEvent::Status("💭 Thinking...".into()));
         assert_eq!(rx.try_recv().unwrap(), AiStreamEvent::Content("mrekk is ".into()));
         assert_eq!(rx.try_recv().unwrap(), AiStreamEvent::Content("mrekk is #1!".into()));
+    }
+
+    #[test]
+    fn test_runtime_ai_config_serde_and_channel_modes() {
+        let mut modes = HashMap::new();
+        modes.insert("123456".to_owned(), AiPersonaMode::Helpful);
+        let cfg = RuntimeAiConfig {
+            model: "qwen3.5:9b".to_owned(),
+            think_enabled: false,
+            temperature: 0.4,
+            num_ctx: 16_384,
+            channel_modes: modes,
+        };
+        let raw = serde_json::to_string(&cfg).expect("serialize");
+        let parsed: RuntimeAiConfig = serde_json::from_str(&raw).expect("deserialize");
+        assert_eq!(parsed.model, "qwen3.5:9b");
+        assert!(!parsed.think_enabled);
+        assert_eq!(parsed.num_ctx, 16_384);
+        assert_eq!(parsed.channel_modes.get("123456").copied(), Some(AiPersonaMode::Helpful));
     }
 }

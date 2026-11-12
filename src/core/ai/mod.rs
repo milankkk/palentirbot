@@ -10,7 +10,9 @@ pub mod osu_tools;
 mod queue;
 pub mod search;
 
-pub use ollama::{AiStreamEvent, LastGenerationStats, OllamaClient};
+pub use ollama::{
+    AiPersonaMode, AiStreamEvent, LastGenerationStats, OllamaClient, RuntimeAiConfig,
+};
 pub use queue::{AiQueue, DEFAULT_MAX_AI_QUEUE_SIZE};
 #[allow(unused_imports)]
 pub use search::WebSearchClient;
@@ -194,7 +196,7 @@ impl AiClient {
     }
 
     /// The model identifier currently configured.
-    pub fn model_name(&self) -> &str {
+    pub fn model_name(&self) -> String {
         self.ollama.model_name()
     }
 
@@ -206,6 +208,29 @@ impl AiClient {
     /// Maximum generated tokens limit configured for Ollama.
     pub fn num_predict(&self) -> i32 {
         self.ollama.num_predict()
+    }
+
+    /// Snapshot of runtime-mutable AI configuration.
+    pub fn runtime_config(&self) -> RuntimeAiConfig {
+        self.ollama.snapshot_config()
+    }
+
+    /// Active persona mode override for a channel.
+    pub fn channel_mode(&self, channel_id: Id<ChannelMarker>) -> AiPersonaMode {
+        self.ollama.channel_mode(channel_id)
+    }
+
+    /// Mutate and atomically persist runtime AI configuration to disk.
+    pub async fn update_runtime_config<F>(&self, f: F) -> Result<RuntimeAiConfig>
+    where
+        F: FnOnce(&mut RuntimeAiConfig),
+    {
+        self.ollama.update_runtime(f).await
+    }
+
+    /// Query installed Ollama models via `/api/tags`.
+    pub async fn list_models(&self) -> Result<Vec<String>> {
+        self.ollama.list_models().await
     }
 
     /// Return the cached system-prompt template.
