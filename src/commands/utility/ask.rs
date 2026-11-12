@@ -19,7 +19,8 @@ use twilight_model::{
 use crate::{
     core::{
         ai::{
-            base64_encode, sanitize_llm_text, AiMessage, AiPersonaMode, AiStreamEvent, SearchMode,
+            base64_encode, sanitize_llm_text, text_mentions_osu, AiMessage, AiPersonaMode,
+            AiStreamEvent, SearchMode,
         },
         Context,
     },
@@ -477,7 +478,7 @@ pub async fn handle_prefix_ask(
             let _ = msg
                 .error(
                     &ctx,
-                    format!("Please provide a question! Example: `{prefix}ask What is osu?`"),
+                    format!("Please provide a question! Example: `{prefix}ask Why is the sky blue?`"),
                 )
                 .await;
             return;
@@ -766,15 +767,25 @@ pub async fn execute_ai_question_with_options(
         .replace("{user_id}", &user_id.to_string());
 
     let runtime_cfg = ctx.ai().runtime_config();
+    let osu_mentioned = text_mentions_osu(question)
+        || opts
+            .referenced_msg
+            .is_some_and(|replied| text_mentions_osu(&format_message_text_and_embeds(replied)));
 
     match ctx.ai().channel_mode(channel_id) {
         AiPersonaMode::Default => {}
         AiPersonaMode::Helpful => system_prompt.push_str(
-            "\n\nCHANNEL PERSONA OVERRIDE (Helpful Mode): Respond clearly, concisely, and directly like a helpful osu! & tech Discord assistant. Skip exaggerated slang/brainrot while keeping accurate facts and casual readability.",
+            "\n\nCHANNEL PERSONA OVERRIDE (Helpful Mode): Respond clearly, concisely, and directly like a helpful, knowledgeable Discord assistant. Skip exaggerated slang/brainrot while keeping accurate facts and casual readability.",
         ),
         AiPersonaMode::Brainrot => system_prompt.push_str(
             "\n\nCHANNEL PERSONA OVERRIDE (Brainrot Mode): Lean heavily into chaotic Discord banter and unhinged humor while still reporting verified tool facts accurately.",
         ),
+    }
+
+    if !osu_mentioned {
+        system_prompt.push_str(
+            "\n\nTOPIC GUARD: Stay strictly on the user's current topic. Do NOT bring up osu!, beatmaps, pp, accuracy, or rhythm-game jokes/references unless the user mentions osu!.",
+        );
     }
 
     if runtime_cfg.think_enabled {
@@ -882,7 +893,7 @@ pub async fn execute_ai_question_with_options(
             channel_id,
             &messages,
             opts.search_mode,
-            Some(ctx.osu()),
+            osu_mentioned.then_some(ctx.osu()),
             opts.stream_tx,
         )
         .await?;

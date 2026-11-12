@@ -14,6 +14,7 @@ pub use ollama::{
     normalize_num_predict, AiPersonaMode, AiStreamEvent, AiThinkDepth, LastGenerationStats,
     OllamaClient, RuntimeAiConfig,
 };
+pub use osu_tools::text_mentions_osu;
 pub use queue::{AiQueue, DEFAULT_MAX_AI_QUEUE_SIZE};
 #[allow(unused_imports)]
 pub use search::WebSearchClient;

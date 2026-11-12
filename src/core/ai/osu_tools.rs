@@ -363,6 +363,132 @@ fn compute_rosu_pp(osu_bytes: &[u8], mod_bits: u32) -> Option<serde_json::Value>
     }))
 }
 
+const OSU_SUBSTRINGS: &[&str] = &[
+    "osu.ppy.sh",
+    ".osr",
+    "beatmap",
+    "rosu-pp",
+    "rosu_pp",
+    "bancho",
+    "peppy",
+    "danser",
+    "bathbot",
+    "owobot",
+    "sliderbreak",
+    "overstream",
+    "diffspike",
+    "star rating",
+    "pp record",
+    "pp rework",
+    "full combo",
+    "osu!mania",
+    "osu!taiko",
+    "osu!catch",
+    "osu_player",
+    "osu_beatmap",
+];
+
+const OSU_WORDS: &[&str] = &[
+    "osu",
+    "taiko",
+    "mania",
+    "ctb",
+    "owc",
+    "mwc",
+    "twc",
+    "cwc",
+    "nomod",
+    "hddt",
+    "hdhr",
+    "dthr",
+    "ezdt",
+    "hrdt",
+    "hdfl",
+    "dtfl",
+    "hdhrdt",
+    "mrekk",
+    "cookiezi",
+    "chocomint",
+    "whitecat",
+    "vaxei",
+    "btmc",
+    "accolibed",
+    "ivaxa",
+    "gnahus",
+    "lifeline",
+    "maliszewski",
+    "ninerik",
+    "aetrna",
+    "merami",
+    "wubwoofwolf",
+    "shigetora",
+];
+
+fn contains_ascii_word(haystack: &str, word: &str) -> bool {
+    let bytes = haystack.as_bytes();
+    let mut start = 0usize;
+    while let Some(rel) = haystack[start..].find(word) {
+        let idx = start + rel;
+        let end = idx + word.len();
+        let left_ok = idx == 0 || !bytes[idx - 1].is_ascii_alphanumeric();
+        let right_ok = end == bytes.len() || !bytes[end].is_ascii_alphanumeric();
+        if left_ok && right_ok {
+            return true;
+        }
+        start = idx + 1;
+    }
+    false
+}
+
+fn contains_pp_mention(haystack: &str) -> bool {
+    let bytes = haystack.as_bytes();
+    let mut start = 0usize;
+    while let Some(rel) = haystack[start..].find("pp") {
+        let idx = start + rel;
+        let end = idx + 2;
+        let left_ok = idx == 0
+            || bytes[idx - 1].is_ascii_whitespace()
+            || bytes[idx - 1].is_ascii_digit()
+            || matches!(bytes[idx - 1], b'(' | b'[' | b'+' | b'/' | b'~');
+        let right_ok = end == bytes.len() || !bytes[end].is_ascii_alphanumeric();
+        if left_ok && right_ok {
+            return true;
+        }
+        start = idx + 1;
+    }
+    false
+}
+
+fn contains_map_stat_token(haystack: &str) -> bool {
+    let bytes = haystack.as_bytes();
+    for stat in ["ar", "od"] {
+        let mut start = 0usize;
+        while let Some(rel) = haystack[start..].find(stat) {
+            let idx = start + rel;
+            let end = idx + stat.len();
+            let left_ok = idx == 0 || !bytes[idx - 1].is_ascii_alphanumeric();
+            if left_ok && end < bytes.len() {
+                let rest = &bytes[end..];
+                let num_idx = usize::from(rest.first().copied() == Some(b' '));
+                if rest.get(num_idx).is_some_and(u8::is_ascii_digit) {
+                    return true;
+                }
+            }
+            start = idx + 1;
+        }
+    }
+    false
+}
+
+/// Return true when user text or a referenced score card actually mentions osu!.
+pub fn text_mentions_osu(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    OSU_SUBSTRINGS.iter().any(|s| lower.contains(s))
+        || OSU_WORDS.iter().any(|w| contains_ascii_word(&lower, w))
+        || contains_pp_mention(&lower)
+        || contains_map_stat_token(&lower)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -400,5 +526,20 @@ mod tests {
 
         let num_val = serde_json::json!({ "username": 7562902 });
         assert!(matches!(parse_osu_user_id(&num_val), Some(UserId::Id(7_562_902))));
+    }
+
+    #[test]
+    fn test_text_mentions_osu() {
+        assert!(text_mentions_osu("what is osu?"));
+        assert!(text_mentions_osu("check mrekk on osu!"));
+        assert!(text_mentions_osu("how much pp is 1,400pp HDDT?"));
+        assert!(text_mentions_osu("https://osu.ppy.sh/beatmapsets/1011011#osu/2116202"));
+        assert!(text_mentions_osu("if AR 9.3 and OD 8.5"));
+
+        assert!(!text_mentions_osu("why is the sky blue?"));
+        assert!(!text_mentions_osu("check my apple support app please"));
+        assert!(!text_mentions_osu("let's focus on physics homework"));
+        assert!(!text_mentions_osu("what is the AR-15 rifle or CS 2 rank?"));
+        assert!(!text_mentions_osu("what was the football score yesterday?"));
     }
 }
