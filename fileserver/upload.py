@@ -1,7 +1,7 @@
 # upload.py
 from flask import Flask, request, jsonify
 from werkzeug.utils import secure_filename
-import hmac, os, uuid
+import hmac, json, os, shutil, subprocess, time, uuid
 
 # Automatically link with .env in repository root if present
 def _load_env_file():
@@ -39,6 +39,60 @@ if SECRET == "palentir_replay_secret_key":
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
+
+def _cleanup_file(path):
+    if path and os.path.exists(path):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def _probe_video(video_path):
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        return None, None, None
+    try:
+        proc = subprocess.run(
+            [ffprobe, "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=width,height:format=duration",
+             "-of", "json", video_path],
+            check=True, capture_output=True, timeout=15, text=True,
+        )
+        info = json.loads(proc.stdout or "{}")
+        streams = info.get("streams") or []
+        s0 = streams[0] if streams else {}
+        fmt = info.get("format") or {}
+        width = int(s0["width"]) if s0.get("width") else None
+        height = int(s0["height"]) if s0.get("height") else None
+        duration = float(fmt["duration"]) if fmt.get("duration") else None
+        return width, height, duration
+    except (subprocess.SubprocessError, ValueError, KeyError, OSError, json.JSONDecodeError):
+        return None, None, None
+
+
+def _generate_thumbnail(video_path, thumb_path, stem, duration_secs):
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        return False
+    seek = min(5.0, max(0.2, duration_secs * 0.35)) if (duration_secs and duration_secs > 0) else 5.0
+    if duration_secs and seek >= duration_secs:
+        seek = max(0.0, duration_secs * 0.5)
+    tmp_thumb = os.path.join(UPLOAD_DIR, f".{stem}.tmp.jpg")
+    try:
+        subprocess.run(
+            [ffmpeg, "-y", "-ss", f"{seek:.2f}", "-i", video_path,
+             "-frames:v", "1", "-vf", "scale=1280:-2", "-q:v", "3", tmp_thumb],
+            check=True, timeout=60, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        os.chmod(tmp_thumb, 0o644)
+        os.replace(tmp_thumb, thumb_path)
+        return True
+    except (subprocess.SubprocessError, OSError):
+        _cleanup_file(tmp_thumb)
+        return False
+
+
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({"ok": True}), 200
@@ -69,16 +123,47 @@ def upload():
         os.chmod(tmp_path, 0o644)
         os.replace(tmp_path, final_path)
     except Exception:
-        if os.path.exists(tmp_path):
-            try:
-                os.remove(tmp_path)
-            except OSError:
-                pass
+        _cleanup_file(tmp_path)
         raise
 
+    stem, _ = os.path.splitext(filename)
+    width, height, duration = _probe_video(final_path)
+    has_thumb = _generate_thumbnail(final_path, os.path.join(UPLOAD_DIR, f"{stem}.jpg"), stem, duration)
+
     watch_base = BASE_URL if BASE_URL.endswith("/watch") else f"{BASE_URL}/watch"
-    url = f"{watch_base}/{filename}"
-    return jsonify({"error": 0, "text": url})
+    url = f"{watch_base}/{stem}"
+
+    meta_path = os.path.join(UPLOAD_DIR, f"{stem}.json")
+    tmp_meta = os.path.join(UPLOAD_DIR, f".{stem}.tmp.json")
+    try:
+        meta = {
+            "filename": filename,
+            "title": (request.form.get("title") or "").strip()[:300] or stem,
+            "author": (request.form.get("author") or "").strip()[:64],
+            "beatmap": (request.form.get("beatmap") or "").strip()[:300],
+            "hash": (request.form.get("hash") or "").strip()[:128],
+            "width": width,
+            "height": height,
+            "duration": round(duration, 2) if duration is not None else None,
+            "size_bytes": os.path.getsize(final_path),
+            "uploaded_at": int(time.time()),
+            "watch_url": url,
+        }
+        with open(tmp_meta, "w", encoding="utf-8") as mf:
+            json.dump(meta, mf, ensure_ascii=False, separators=(",", ":"))
+        os.chmod(tmp_meta, 0o644)
+        os.replace(tmp_meta, meta_path)
+    except OSError:
+        _cleanup_file(tmp_meta)
+
+    return jsonify({
+        "error": 0,
+        "text": url,
+        "thumbnail_url": f"{BASE_URL}/{stem}.jpg" if has_thumb else None,
+        "width": width,
+        "height": height,
+        "duration": round(duration, 2) if duration is not None else None,
+    })
 
 if __name__ == "__main__":
     app.run(host=HOST, port=PORT, threaded=True)

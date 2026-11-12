@@ -28,21 +28,49 @@
     <meta property="og:video" content="{scheme}://{host}/{re.watchpage.1}.mp4" />
     <meta property="og:video:url" content="{scheme}://{host}/{re.watchpage.1}.mp4" />
     <meta property="og:video:type" content="video/mp4" />
-    <meta property="og:video:width" content="1280" />
-    <meta property="og:video:height" content="720" />
+    <meta property="og:video:width" content="1920" />
+    <meta property="og:video:height" content="1080" />
     <meta name="twitter:card" content="player" />
     <meta name="twitter:player" content="{scheme}://{host}/{re.watchpage.1}.mp4" />
     <meta name="theme-color" content="#96DFE3" />
 </head>
-<body style="margin:0; background:#1f1f1f; color:#f5f5f5; text-align:center;">
-    <video controls autoplay style="width:100%; max-height:80vh; margin:auto;">
-        <source src="/{re.watchpage.1}.mp4" type="video/mp4">
-    </video>
-    <div style="margin-top:20px;">
-        <a href="/{re.watchpage.1}.mp4" download style="display:inline-flex; align-items:center; justify-content:center; padding:12px 20px; border-radius:10px; background:#2d2d2d; color:#f5f5f5; text-decoration:none; font-weight:bold; border:1px solid rgba(255,255,255,0.12);">
-            Download Replay
-        </a>
+<body style="margin:0; padding:20px 15px; background:#14171f; color:#f5f5f5; font-family:system-ui,-apple-system,sans-serif;">
+    <div style="max-width:1100px; margin:0 auto; display:flex; flex-direction:column; gap:14px;">
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+            <a href="/" style="color:#96DFE3; text-decoration:none; font-weight:600;">← Gallery</a>
+            <span id="meta-dims" style="color:#9aa0a6; font-size:13px;"></span>
+        </div>
+        <video controls autoplay loop playsinline style="width:100%; max-height:78vh; background:#000; border-radius:12px;">
+            <source src="/{re.watchpage.1}.mp4" type="video/mp4">
+        </video>
+        <div style="background:#1e2330; padding:16px 20px; border-radius:12px; display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:12px;">
+            <div>
+                <h1 id="replay-title" style="margin:0; font-size:17px; word-break:break-word;">{re.watchpage.1}</h1>
+                <a id="beatmap-link" href="#" target="_blank" rel="noopener" style="display:none; color:#96DFE3; font-size:13px; text-decoration:none; margin-top:4px;">Open beatmap on osu!</a>
+            </div>
+            <a href="/{re.watchpage.1}.mp4" download style="display:inline-flex; align-items:center; justify-content:center; padding:11px 18px; border-radius:10px; background:#2b3142; color:#f5f5f5; text-decoration:none; font-weight:700; border:1px solid rgba(255,255,255,0.12);">
+                Download Replay
+            </a>
+        </div>
     </div>
+    <script>
+        fetch('/{re.watchpage.1}.json').then(r => r.ok ? r.json() : null).then(m => {
+            if (!m) return;
+            if (m.title) {
+                document.title = m.title;
+                document.getElementById('replay-title').textContent = m.title;
+            }
+            if (m.beatmap && /^https:\/\/osu\.ppy\.sh\//.test(m.beatmap)) {
+                const a = document.getElementById('beatmap-link');
+                a.href = m.beatmap;
+                a.style.display = 'inline-block';
+            }
+            const parts = [];
+            if (m.width && m.height) parts.push(m.width + '×' + m.height);
+            if (m.duration) parts.push(Math.floor(m.duration / 60) + ':' + Math.floor(m.duration % 60).toString().padStart(2, '0'));
+            document.getElementById('meta-dims').textContent = parts.join(' • ');
+        }).catch(() => {});
+    </script>
 </body>
 </html>` 200
 	}

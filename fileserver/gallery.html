@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Replays Gallery</title>
+    <meta name="theme-color" content="#96DFE3" />
+    <style>
+        :root {
+            --theme-cyan: #96DFE3;
+            --theme-purple: #b066ff;
+            --bg-dark: #0a0e17;
+            --card-bg: rgba(255, 255, 255, 0.03);
+            --card-border: rgba(255, 255, 255, 0.08);
+        }
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            padding: 40px 20px;
+            background-color: var(--bg-dark);
+            background-image:
+                radial-gradient(circle at 15% 10%, rgba(150, 223, 227, 0.15), transparent 30%),
+                radial-gradient(circle at 85% 80%, rgba(176, 102, 255, 0.15), transparent 30%);
+            background-attachment: fixed;
+            color: #f5f5f5;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            min-height: 100vh;
+        }
+        h1 {
+            text-align: center;
+            margin-bottom: 18px;
+            font-size: 38px;
+            font-weight: 800;
+            background: linear-gradient(135deg, var(--theme-cyan), var(--theme-purple));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        .notice {
+            text-align: center;
+            background: rgba(150, 223, 227, 0.05);
+            border: 1px solid rgba(150, 223, 227, 0.3);
+            color: #d8f5f6;
+            padding: 14px 24px;
+            border-radius: 12px;
+            max-width: 640px;
+            margin: 0 auto 24px auto;
+            font-size: 14.5px;
+            line-height: 1.5;
+        }
+        .search-wrap {
+            max-width: 520px;
+            margin: 0 auto 36px auto;
+        }
+        .search-input {
+            width: 100%;
+            padding: 12px 16px;
+            border-radius: 10px;
+            border: 1px solid var(--card-border);
+            background: rgba(255, 255, 255, 0.05);
+            color: #fff;
+            font-size: 15px;
+            outline: none;
+        }
+        .search-input:focus {
+            border-color: var(--theme-cyan);
+        }
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+            gap: 25px;
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+        .card {
+            background: var(--card-bg);
+            border-radius: 16px;
+            overflow: hidden;
+            text-decoration: none;
+            color: #f5f5f5;
+            transition: all 0.25s ease;
+            border: 1px solid var(--card-border);
+            display: flex;
+            flex-direction: column;
+        }
+        .card:hover {
+            transform: translateY(-5px);
+            border-color: rgba(150, 223, 227, 0.45);
+        }
+        .thumbnail-wrapper {
+            position: relative;
+            width: 100%;
+            padding-top: 56.25%;
+            background: #000;
+            overflow: hidden;
+        }
+        .thumbnail {
+            position: absolute;
+            inset: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+        .duration-badge {
+            position: absolute;
+            bottom: 10px;
+            right: 10px;
+            background: rgba(0, 0, 0, 0.78);
+            color: #fff;
+            font-size: 12px;
+            font-weight: 700;
+            padding: 4px 8px;
+            border-radius: 6px;
+        }
+        .info { padding: 16px 18px; }
+        .title {
+            font-size: 15px;
+            font-weight: 600;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            margin-bottom: 8px;
+            color: #fff;
+        }
+        .meta {
+            font-size: 13px;
+            color: #9aa0a6;
+            display: flex;
+            justify-content: space-between;
+        }
+    </style>
+</head>
+<body>
+    <h1>Currently Available Replays</h1>
+    <div class="notice">
+        To render new replays, use the <strong>Discord bot</strong>.<br>
+        <em>Replays older than 7 days are automatically deleted to save space.</em>
+    </div>
+    <div class="search-wrap">
+        <input id="filter" class="search-input" type="search" placeholder="Filter by player, map, difficulty, or mod..." />
+    </div>
+    <div class="grid">
+        {{range .Items}}
+            {{if hasSuffix ".mp4" .Name}}
+                {{$basename := trimSuffix ".mp4" .Name}}
+                <a href="/watch/{{$basename}}" class="card" data-stem="{{$basename}}">
+                    <div class="thumbnail-wrapper">
+                        <img class="thumbnail" src="/{{$basename}}.jpg" alt="{{$basename}}" loading="lazy">
+                        <span class="duration-badge" data-video="/{{.Name}}">--:--</span>
+                    </div>
+                    <div class="info">
+                        <div class="title">{{$basename}}</div>
+                        <div class="meta">
+                            <span>{{.HumanSize}}</span>
+                            <span>{{.HumanModTime "Jan 02, 2006"}}</span>
+                        </div>
+                    </div>
+                </a>
+            {{end}}
+        {{end}}
+    </div>
+    <script>
+        document.addEventListener("DOMContentLoaded", () => {
+            const filter = document.getElementById('filter');
+            const cards = Array.from(document.querySelectorAll('.card'));
+            filter.addEventListener('input', () => {
+                const q = filter.value.trim().toLowerCase();
+                for (const card of cards) {
+                    const hay = card.dataset.search || card.textContent.toLowerCase();
+                    card.style.display = !q || hay.includes(q) ? '' : 'none';
+                }
+            });
+
+            const observer = new IntersectionObserver((entries, obs) => {
+                for (const entry of entries) {
+                    if (!entry.isIntersecting) continue;
+                    const card = entry.target;
+                    const stem = card.dataset.stem;
+                    const badge = card.querySelector('.duration-badge');
+                    const titleEl = card.querySelector('.title');
+
+                    fetch(`/${encodeURIComponent(stem)}.json`)
+                        .then(r => r.ok ? r.json() : null)
+                        .then(meta => {
+                            if (meta && meta.title) {
+                                titleEl.textContent = meta.title;
+                                titleEl.title = meta.title;
+                                card.dataset.search = `${meta.title} ${stem}`.toLowerCase();
+                            }
+                            if (meta && typeof meta.duration === 'number' && meta.duration > 0) {
+                                const tot = Math.floor(meta.duration);
+                                badge.innerText = `${Math.floor(tot / 60)}:${(tot % 60).toString().padStart(2, '0')}`;
+                                return true;
+                            }
+                            return false;
+                        })
+                        .then(hasDuration => {
+                            if (hasDuration) return;
+                            const v = document.createElement('video');
+                            v.preload = 'metadata';
+                            v.onloadedmetadata = function() {
+                                if (!isNaN(this.duration) && isFinite(this.duration)) {
+                                    const tot = Math.floor(this.duration);
+                                    badge.innerText = `${Math.floor(tot / 60)}:${(tot % 60).toString().padStart(2, '0')}`;
+                                }
+                            };
+                            v.src = badge.getAttribute('data-video');
+                        })
+                        .catch(() => {});
+
+                    obs.unobserve(card);
+                }
+            });
+
+            cards.forEach(card => observer.observe(card));
+        });
+    </script>
+</body>
+</html>

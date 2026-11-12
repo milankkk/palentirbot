@@ -41,8 +41,8 @@ replays.insertdomainname.be {
     <meta property="og:video" content="https://replays.insertdomainname.be/{re.watchpage.1}.mp4" />
     <meta property="og:video:url" content="https://replays.insertdomainname.be/{re.watchpage.1}.mp4" />
     <meta property="og:video:type" content="video/mp4" />
-    <meta property="og:video:width" content="1280" />
-    <meta property="og:video:height" content="720" />
+    <meta property="og:video:width" content="1920" />
+    <meta property="og:video:height" content="1080" />
     <meta name="twitter:card" content="player" />
     <meta name="twitter:player" content="https://replays.insertdomainname.be/{re.watchpage.1}.mp4" />
     <meta name="theme-color" content="#96DFE3" />
