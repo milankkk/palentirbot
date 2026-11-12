@@ -30,7 +30,12 @@ app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024  # 500 MB upload limit
 UPLOAD_DIR = os.environ.get("UPLOAD_DIR", "replays")
 SECRET = os.environ.get("UPLOAD_SECRET", "palentir_replay_secret_key")
 BASE_URL = (os.environ.get("PUBLIC_REPLAY_BASE_URL") or os.environ.get("BASE_URL", "http://localhost:8085")).rstrip("/")
+HOST = os.environ.get("UPLOAD_HOST", "0.0.0.0")
 PORT = int(os.environ.get("UPLOAD_PORT") or os.environ.get("PORT") or 5555)
+
+if SECRET == "palentir_replay_secret_key":
+    import sys
+    print("WARNING: UPLOAD_SECRET is using the default fallback value. Set a strong secret in .env for production!", file=sys.stderr)
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
@@ -56,4 +61,4 @@ def upload():
     return jsonify({"error": 0, "text": url})
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=PORT)
+    app.run(host=HOST, port=PORT, threaded=True)

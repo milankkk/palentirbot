@@ -16,8 +16,11 @@ pub async fn settings(ctx: Arc<Context>, command: InteractionCommand) -> Result<
     let mut default_path = BotConfig::get().paths.danser().to_owned();
     default_path.push("settings/default.json");
 
-    let file = std::fs::File::open(&default_path).context("failed to open default.json")?;
-    let json: serde_json::Value = serde_json::from_reader(std::io::BufReader::new(file)).context("failed to parse default.json")?;
+    let bytes = tokio::fs::read(&default_path)
+        .await
+        .context("failed to read default.json")?;
+    let json: serde_json::Value =
+        serde_json::from_slice(&bytes).context("failed to parse default.json")?;
 
     let mut options = Vec::new();
     if let serde_json::Value::Object(map) = json {
@@ -78,21 +81,22 @@ pub async fn handle_owner_settings_section(ctx: Arc<Context>, component: Interac
 
     let mut default_path = BotConfig::get().paths.danser().to_owned();
     default_path.push("settings/default.json");
-    let file = std::fs::File::open(&default_path).context("failed to open default.json")?;
-    let json: serde_json::Value = serde_json::from_reader(std::io::BufReader::new(file)).context("failed to parse default.json")?;
+    let bytes = tokio::fs::read(&default_path)
+        .await
+        .context("failed to read default.json")?;
+    let json: serde_json::Value =
+        serde_json::from_slice(&bytes).context("failed to parse default.json")?;
 
     let mut options = Vec::new();
-    if let Some(section_val) = json.get(&section) {
-        if let serde_json::Value::Object(map) = section_val {
-            for (key, _) in map {
-                options.push(SelectMenuOption {
-                    default: false,
-                    description: None,
-                    emoji: None,
-                    label: key.clone(),
-                    value: key.clone(),
-                });
-            }
+    if let Some(serde_json::Value::Object(map)) = json.get(&section) {
+        for key in map.keys() {
+            options.push(SelectMenuOption {
+                default: false,
+                description: None,
+                emoji: None,
+                label: key.clone(),
+                value: key.clone(),
+            });
         }
     }
 
@@ -147,8 +151,11 @@ pub async fn handle_owner_settings_prop(ctx: Arc<Context>, component: Interactio
 
     let mut default_path = BotConfig::get().paths.danser().to_owned();
     default_path.push("settings/default.json");
-    let file = std::fs::File::open(&default_path).context("failed to open default.json")?;
-    let json: serde_json::Value = serde_json::from_reader(std::io::BufReader::new(file)).context("failed to parse default.json")?;
+    let bytes = tokio::fs::read(&default_path)
+        .await
+        .context("failed to read default.json")?;
+    let json: serde_json::Value =
+        serde_json::from_slice(&bytes).context("failed to parse default.json")?;
 
     let current_val = json.get(section).and_then(|s| s.get(&prop)).map(|v| v.to_string()).unwrap_or_default();
     let current_val = current_val.trim_matches('"'); 
@@ -192,8 +199,11 @@ pub async fn handle_owner_settings_modal(ctx: Arc<Context>, modal: InteractionMo
 
     let mut default_path = BotConfig::get().paths.danser().to_owned();
     default_path.push("settings/default.json");
-    let file = std::fs::File::open(&default_path).context("failed to open default.json")?;
-    let mut json: serde_json::Value = serde_json::from_reader(std::io::BufReader::new(file)).context("failed to parse default.json")?;
+    let bytes = tokio::fs::read(&default_path)
+        .await
+        .context("failed to read default.json")?;
+    let mut json: serde_json::Value =
+        serde_json::from_slice(&bytes).context("failed to parse default.json")?;
 
     if let Some(section_val) = json.get_mut(section) {
         if let Some(prop_val) = section_val.get_mut(prop) {
@@ -231,12 +241,10 @@ pub async fn handle_owner_settings_modal(ctx: Arc<Context>, modal: InteractionMo
         tracing::error!("Section '{}' not found in default.json", section);
     }
 
-    let file = std::fs::OpenOptions::new()
-        .write(true)
-        .truncate(true)
-        .open(&default_path)
-        .context("failed to open default.json for writing")?;
-    serde_json::to_writer_pretty(file, &json).context("failed to write default.json")?;
+    let serialized = serde_json::to_vec_pretty(&json).context("failed to serialize default.json")?;
+    tokio::fs::write(&default_path, serialized)
+        .await
+        .context("failed to write default.json")?;
 
     let apply_btn = Button {
         sku_id: None,
@@ -299,8 +307,11 @@ pub async fn handle_owner_settings_applyall(ctx: Arc<Context>, component: Intera
 
     let mut default_path = BotConfig::get().paths.danser().to_owned();
     default_path.push("settings/default.json");
-    let file = std::fs::File::open(&default_path).context("failed to open default.json")?;
-    let default_json: serde_json::Value = serde_json::from_reader(std::io::BufReader::new(file)).context("failed to parse default.json")?;
+    let default_bytes = tokio::fs::read(&default_path)
+        .await
+        .context("failed to read default.json")?;
+    let default_json: serde_json::Value =
+        serde_json::from_slice(&default_bytes).context("failed to parse default.json")?;
 
     let default_val = default_json.get(section).and_then(|s| s.get(prop));
     
@@ -329,13 +340,13 @@ pub async fn handle_owner_settings_applyall(ctx: Arc<Context>, component: Intera
             continue;
         }
 
-        if let Ok(file) = std::fs::File::open(&path) {
-            if let Ok(mut json) = serde_json::from_reader::<_, serde_json::Value>(std::io::BufReader::new(file)) {
+        if let Ok(bytes) = tokio::fs::read(&path).await {
+            if let Ok(mut json) = serde_json::from_slice::<serde_json::Value>(&bytes) {
                 if let Some(section_val) = json.get_mut(section) {
                     if let Some(prop_val) = section_val.get_mut(prop) {
                         *prop_val = default_val.clone();
-                        if let Ok(file) = std::fs::OpenOptions::new().write(true).truncate(true).open(&path) {
-                            if serde_json::to_writer_pretty(file, &json).is_ok() {
+                        if let Ok(out) = serde_json::to_vec_pretty(&json) {
+                            if tokio::fs::write(&path, out).await.is_ok() {
                                 applied_count += 1;
                             }
                         }

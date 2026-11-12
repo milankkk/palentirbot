@@ -24,11 +24,14 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
 
     let bot_id = ctx.cache.current_user(|u| u.id).ok();
 
-    // Check if the message is a direct reply to a message sent by the bot
+    // Check if the message is a direct reply to a conversational AI message sent by the bot
     let is_reply_to_bot = msg
         .referenced_message
         .as_deref()
-        .map(|replied| Some(replied.author.id) == bot_id)
+        .map(|replied| {
+            Some(replied.author.id) == bot_id
+                && crate::commands::utility::is_conversational_ai_message(replied)
+        })
         .unwrap_or(false);
 
     let content = match msg.content.strip_prefix(prefix.as_str()) {
@@ -84,7 +87,7 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
         // ── render ────────────────────────────────────────────────────────────
         "render" => {
             if let Some(attachment) = msg.attachments.first() {
-                if !matches!(attachment.filename.split('.').last(), Some("osr")) {
+                if !matches!(attachment.filename.split('.').next_back(), Some("osr")) {
                     let _ = msg
                         .error(&ctx, "The attachment must be a `.osr` file!")
                         .await;

@@ -384,7 +384,7 @@ pub async fn render_score_from_embed(
             output_channel,
             pitch: None,
             path: path.clone(),
-            replay: replay,
+            replay,
             time_points: TimePoints { start: 0, end: 0 },
             user,
             title: None,
@@ -445,14 +445,14 @@ fn parse_embed(embed: &Embed) -> Option<ParsedEmbed> {
         // https://osu.ppy.sh/beatmaps/442905
         beatmap_url
             .split('/')
-            .last()
+            .next_back()
             .and_then(|id| id.parse::<u32>().ok())?
     } else if beatmap_url.contains("/beatmapsets/") {
         if let Some(fragment) = beatmap_url.split('#').nth(1) {
             // https://osu.ppy.sh/beatmapsets/123#osu/442905
             fragment
                 .split('/')
-                .last()
+                .next_back()
                 .and_then(|id| id.parse::<u32>().ok())?
         } else {
             tracing::warn!(
@@ -477,7 +477,6 @@ fn parse_embed(embed: &Embed) -> Option<ParsedEmbed> {
 
     let timestamp = embed
         .timestamp
-        .clone()
         .or_else(|| get_timestamp_from_minimized_embed(embed));
 
     Some(ParsedEmbed {

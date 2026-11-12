@@ -69,7 +69,7 @@ into_int!(i64);
 into_int!(isize);
 
 pub fn last_multiple(per_page: usize, total: usize) -> usize {
-    if per_page <= total && total % per_page == 0 {
+    if per_page <= total && total.is_multiple_of(per_page) {
         total - per_page
     } else {
         total - total % per_page

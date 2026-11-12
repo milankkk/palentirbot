@@ -29,7 +29,7 @@ pub async fn build_shards(
 
     let config = Config::new(token.to_owned(), intents);
 
-    let shards: Vec<Shard> = create_recommended(&*http, config, |_, builder| builder.build())
+    let shards: Vec<Shard> = create_recommended(&http, config, |_, builder| builder.build())
         .await
         .context("failed to build shards")?
         .collect();

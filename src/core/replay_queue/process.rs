@@ -444,15 +444,15 @@ async fn process_single_replay(
     let grade = replay.grade;
     tracing::warn!("grade reported: {:?}", grade);
     let rank_value = match grade {
-        Grade::XH => format!("{}", emojis.grade_xh),
-        Grade::X => format!("{}", emojis.grade_x),
-        Grade::SH => format!("{}", emojis.grade_sh),
-        Grade::S => format!("{}", emojis.grade_s),
-        Grade::A => format!("{}", emojis.grade_a),
-        Grade::B => format!("{}", emojis.grade_b),
-        Grade::C => format!("{}", emojis.grade_c),
-        Grade::D => format!("{}", emojis.grade_d),
-        _ => format!("{}", emojis.grade_fail),
+        Grade::XH => emojis.grade_xh.to_string(),
+        Grade::X => emojis.grade_x.to_string(),
+        Grade::SH => emojis.grade_sh.to_string(),
+        Grade::S => emojis.grade_s.to_string(),
+        Grade::A => emojis.grade_a.to_string(),
+        Grade::B => emojis.grade_b.to_string(),
+        Grade::C => emojis.grade_c.to_string(),
+        Grade::D => emojis.grade_d.to_string(),
+        _ => emojis.grade_fail.to_string(),
     };
 
     let is_perfect_fc = replay.max_combo == max_possible_combo && replay.count_miss == 0;
@@ -621,7 +621,7 @@ async fn process_single_replay(
     if let Err(err) = output_channel.create_message(&ctx, &embed_builder).await {
         warn!(
             "{:?}",
-            Report::from(err).wrap_err("failed to send replay details embed")
+            err.wrap_err("failed to send replay details embed")
         );
     }
 
@@ -634,7 +634,7 @@ async fn process_single_replay(
     }
 
     if let Err(err) = output_channel.create_message(&ctx, &builder).await {
-        let err = Report::from(err).wrap_err("failed to send video link");
+        let err = err.wrap_err("failed to send video link");
         warn!("{err:?}");
     }
 
@@ -676,7 +676,7 @@ async fn read_danser_progress<R: tokio::io::AsyncRead + Unpin>(
         let chunk = String::from_utf8_lossy(&buf[..n]);
         text_buffer.push_str(&chunk);
 
-        let mut lines: Vec<&str> = text_buffer.split(|c| c == '\r' || c == '\n').collect();
+        let mut lines: Vec<&str> = text_buffer.split(['\r', '\n']).collect();
         let incomplete = lines.pop().unwrap_or("").to_string();
 
         for line in lines {
@@ -926,50 +926,56 @@ async fn calc_latest_pp(
     max_combo: u32,
     is_lazer: bool,
 ) -> Option<PpTriple> {
-    let dotnet_path = std::env::var("DOTNET_PATH").unwrap_or_else(|_| {
+    static DOTNET_PATH: once_cell::sync::Lazy<Option<String>> = once_cell::sync::Lazy::new(|| {
+        if let Ok(custom) = std::env::var("DOTNET_PATH") {
+            if std::path::Path::new(&custom).exists() || custom == "dotnet" {
+                return Some(custom);
+            }
+        }
         if let Ok(output) = std::process::Command::new("dotnet").arg("--version").output() {
             if output.status.success() {
-                return "dotnet".to_string();
+                return Some("dotnet".to_string());
             }
         }
         if let Ok(home) = std::env::var("HOME") {
             let user_dotnet = std::path::PathBuf::from(home).join(".dotnet/dotnet");
             if user_dotnet.exists() {
-                return user_dotnet.to_string_lossy().into_owned();
+                return Some(user_dotnet.to_string_lossy().into_owned());
             }
         }
         for p in &["/usr/bin/dotnet", "/usr/local/bin/dotnet", "/app/dotnet/dotnet"] {
             if std::path::Path::new(p).exists() {
-                return p.to_string();
+                return Some((*p).to_string());
             }
         }
-        "dotnet".to_string()
+        None
     });
-    let perf_calc_path = std::env::var("PERF_CALC_PATH").unwrap_or_else(|_| {
-        let base = crate::core::BotConfig::get().paths.folders();
-        let net10 = base.join("osu-tools/PerformanceCalculator/bin/Release/net10.0/PerformanceCalculator.dll");
-        if net10.exists() {
-            net10.to_string_lossy().into_owned()
+
+    static PERF_CALC_PATH: once_cell::sync::Lazy<Option<String>> = once_cell::sync::Lazy::new(|| {
+        let candidate = std::env::var("PERF_CALC_PATH").unwrap_or_else(|_| {
+            let base = crate::core::BotConfig::get().paths.folders();
+            let net10 = base.join("osu-tools/PerformanceCalculator/bin/Release/net10.0/PerformanceCalculator.dll");
+            if net10.exists() {
+                net10.to_string_lossy().into_owned()
+            } else {
+                let net8 = base.join("osu-tools/PerformanceCalculator/bin/Release/net8.0/PerformanceCalculator.dll");
+                net8.to_string_lossy().into_owned()
+            }
+        });
+        if std::path::Path::new(&candidate).exists() {
+            Some(candidate)
         } else {
-            let net8 = base.join("osu-tools/PerformanceCalculator/bin/Release/net8.0/PerformanceCalculator.dll");
-            net8.to_string_lossy().into_owned()
+            None
         }
     });
 
-    let dotnet_exists = if dotnet_path == "dotnet" {
-        true
-    } else {
-        std::path::Path::new(&dotnet_path).exists()
-    };
-
-    if !dotnet_exists || !std::path::Path::new(&perf_calc_path).exists() {
-        return None;
-    }
+    let dotnet_path = DOTNET_PATH.as_deref()?;
+    let perf_calc_path = PERF_CALC_PATH.as_deref()?;
 
     let (pp, max_pp, nochoke_pp) = tokio::join!(
         calc_single_latest_pp(
-            &dotnet_path,
-            &perf_calc_path,
+            dotnet_path,
+            perf_calc_path,
             map_path,
             replay,
             max_combo,
@@ -977,8 +983,8 @@ async fn calc_latest_pp(
             is_lazer
         ),
         calc_single_latest_pp(
-            &dotnet_path,
-            &perf_calc_path,
+            dotnet_path,
+            perf_calc_path,
             map_path,
             replay,
             max_combo,
@@ -986,8 +992,8 @@ async fn calc_latest_pp(
             is_lazer
         ),
         calc_single_latest_pp(
-            &dotnet_path,
-            &perf_calc_path,
+            dotnet_path,
+            perf_calc_path,
             map_path,
             replay,
             max_combo,
@@ -1016,7 +1022,7 @@ async fn create_title(
         .with_context(|| format!("failed to parse map at {map_path:?}"))?;
 
     let diff_attrs = rosu_pp::Difficulty::new()
-        .mods(replay.mods as u32)
+        .mods(replay.mods)
         .lazer(is_lazer)
         .calculate(&map);
 
@@ -1024,7 +1030,7 @@ async fn create_title(
     let max_possible_combo = diff_attrs.max_combo();
 
     let mut perf = rosu_pp::Performance::new(diff_attrs.clone())
-        .mods(replay.mods as u32)
+        .mods(replay.mods)
         .n300(replay.count_300 as u32)
         .n100(replay.count_100 as u32)
         .n50(replay.count_50 as u32)
@@ -1038,13 +1044,13 @@ async fn create_title(
     let pp = perf.calculate().pp();
 
     let max_pp = rosu_pp::Performance::new(diff_attrs.clone())
-        .mods(replay.mods as u32)
+        .mods(replay.mods)
         .lazer(is_lazer)
         .calculate()
         .pp();
 
     let nochoke_perf = rosu_pp::Performance::new(diff_attrs)
-        .mods(replay.mods as u32)
+        .mods(replay.mods)
         .n300((replay.count_300 + replay.count_miss) as u32)
         .n100(replay.count_100 as u32)
         .n50(replay.count_50 as u32)
@@ -1062,15 +1068,15 @@ async fn create_title(
 
     let stars = (stars * 100.0).round() / 100.0;
 
-    let pp_latest = calc_latest_pp(&map_path, replay, max_possible_combo as u32, is_lazer).await;
+    let pp_latest = calc_latest_pp(&map_path, replay, max_possible_combo, is_lazer).await;
 
     let pp_2025 = if !is_lazer {
         if let Ok(map_2025) = rosu_pp_2025::Beatmap::from_path(&map_path) {
             let diff_2025 = rosu_pp_2025::Difficulty::new()
-                .mods(replay.mods as u32)
+                .mods(replay.mods)
                 .calculate(&map_2025);
             let pp = rosu_pp_2025::Performance::new(diff_2025.clone())
-                .mods(replay.mods as u32)
+                .mods(replay.mods)
                 .n300(replay.count_300 as u32)
                 .n100(replay.count_100 as u32)
                 .n50(replay.count_50 as u32)
@@ -1079,11 +1085,11 @@ async fn create_title(
                 .calculate()
                 .pp();
             let max_pp = rosu_pp_2025::Performance::new(diff_2025.clone())
-                .mods(replay.mods as u32)
+                .mods(replay.mods)
                 .calculate()
                 .pp();
             let nochoke_pp = rosu_pp_2025::Performance::new(diff_2025)
-                .mods(replay.mods as u32)
+                .mods(replay.mods)
                 .n300((replay.count_300 + replay.count_miss) as u32)
                 .n100(replay.count_100 as u32)
                 .n50(replay.count_50 as u32)
@@ -1106,10 +1112,10 @@ async fn create_title(
     let pp_2024 = if !is_lazer {
         if let Ok(map_2024) = rosu_pp_2024::Beatmap::from_path(&map_path) {
             let diff_2024 = rosu_pp_2024::Difficulty::new()
-                .mods(replay.mods as u32)
+                .mods(replay.mods)
                 .calculate(&map_2024);
             let pp = rosu_pp_2024::Performance::new(diff_2024.clone())
-                .mods(replay.mods as u32)
+                .mods(replay.mods)
                 .n300(replay.count_300 as u32)
                 .n100(replay.count_100 as u32)
                 .n50(replay.count_50 as u32)
@@ -1118,11 +1124,11 @@ async fn create_title(
                 .calculate()
                 .pp();
             let max_pp = rosu_pp_2024::Performance::new(diff_2024.clone())
-                .mods(replay.mods as u32)
+                .mods(replay.mods)
                 .calculate()
                 .pp();
             let nochoke_pp = rosu_pp_2024::Performance::new(diff_2024)
-                .mods(replay.mods as u32)
+                .mods(replay.mods)
                 .n300((replay.count_300 + replay.count_miss) as u32)
                 .n100(replay.count_100 as u32)
                 .n50(replay.count_50 as u32)
@@ -1145,7 +1151,7 @@ async fn create_title(
     let pp_2022 = if !is_lazer {
         if let Ok(map_2022) = rosu_pp_2022::Beatmap::from_path(&map_path) {
             let pp = rosu_pp_2022::AnyPP::new(&map_2022)
-                .mods(replay.mods as u32)
+                .mods(replay.mods)
                 .n300(replay.count_300 as usize)
                 .n100(replay.count_100 as usize)
                 .n50(replay.count_50 as usize)
@@ -1154,11 +1160,11 @@ async fn create_title(
                 .calculate()
                 .pp();
             let max_pp = rosu_pp_2022::AnyPP::new(&map_2022)
-                .mods(replay.mods as u32)
+                .mods(replay.mods)
                 .calculate()
                 .pp();
             let nochoke_pp = rosu_pp_2022::AnyPP::new(&map_2022)
-                .mods(replay.mods as u32)
+                .mods(replay.mods)
                 .n300((replay.count_300 + replay.count_miss) as usize)
                 .n100(replay.count_100 as usize)
                 .n50(replay.count_50 as usize)
@@ -1181,10 +1187,10 @@ async fn create_title(
     let pp_2021 = if !is_lazer {
         if let Ok(map_2021) = rosu_pp_2021::Beatmap::from_path(&map_path) {
             let diff_2021 = rosu_pp_2021::Difficulty::new()
-                .mods(replay.mods as u32)
+                .mods(replay.mods)
                 .calculate(&map_2021);
             let pp = rosu_pp_2021::Performance::new(diff_2021.clone())
-                .mods(replay.mods as u32)
+                .mods(replay.mods)
                 .n300(replay.count_300 as u32)
                 .n100(replay.count_100 as u32)
                 .n50(replay.count_50 as u32)
@@ -1193,11 +1199,11 @@ async fn create_title(
                 .calculate()
                 .pp();
             let max_pp = rosu_pp_2021::Performance::new(diff_2021.clone())
-                .mods(replay.mods as u32)
+                .mods(replay.mods)
                 .calculate()
                 .pp();
             let nochoke_pp = rosu_pp_2021::Performance::new(diff_2021)
-                .mods(replay.mods as u32)
+                .mods(replay.mods)
                 .n300((replay.count_300 + replay.count_miss) as u32)
                 .n100(replay.count_100 as u32)
                 .n50(replay.count_50 as u32)
@@ -1217,7 +1223,7 @@ async fn create_title(
         None
     };
 
-    let player_name = replay.player_name.as_ref().map(|user| user.clone());
+    let player_name = replay.player_name.clone();
     let player = player_name.as_deref().unwrap_or("Unknown player");
     let acc = replay.accuracy();
     let legacy = GameModsLegacy::from_bits(replay.mods);

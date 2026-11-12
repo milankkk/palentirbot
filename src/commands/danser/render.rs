@@ -42,7 +42,7 @@ pub async fn slash_render(ctx: Arc<Context>, mut command: InteractionCommand) ->
         pitch,
     } = Render::from_interaction(command.input_data())?;
 
-    if !matches!(attachment.filename.split('.').last(), Some("osr")) {
+    if !matches!(attachment.filename.split('.').next_back(), Some("osr")) {
         let content = "The attachment must be a .osr file!";
         command.error_callback(&ctx, content, true).await?;
 

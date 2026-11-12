@@ -7,9 +7,12 @@ use twilight_model::id::{marker::ChannelMarker, Id};
 
 mod ollama;
 mod queue;
+pub mod search;
 
 pub use ollama::{LastGenerationStats, OllamaClient};
 pub use queue::{AiQueue, DEFAULT_MAX_AI_QUEUE_SIZE};
+#[allow(unused_imports)]
+pub use search::WebSearchClient;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct AiMessage {
@@ -41,6 +44,7 @@ impl AiMessage {
 }
 
 const SYSTEM_PROMPT_ENV: &str = "AI_SYSTEM_PROMPT";
+const CUTOFFS_FILE_PATH: &str = "data/ai_cutoffs.json";
 
 pub struct AiClient {
     ollama: OllamaClient,
@@ -64,11 +68,13 @@ impl AiClient {
             .and_then(|s| s.parse().ok())
             .unwrap_or(DEFAULT_MAX_AI_QUEUE_SIZE);
 
+        let cutoffs = Self::load_cutoffs_from_disk().await;
+
         Self {
             ollama: OllamaClient::new(),
             queue: AiQueue::new(max_queue_size),
             cached_prompt: RwLock::new(prompt),
-            context_cutoffs: RwLock::new(HashMap::new()),
+            context_cutoffs: RwLock::new(cutoffs),
         }
     }
 
@@ -121,15 +127,44 @@ impl AiClient {
     /// Mark a cutoff for a channel — messages older than or equal to `now` will be ignored.
     pub async fn clear_context(&self, channel_id: Id<ChannelMarker>) {
         let now = time::OffsetDateTime::now_utc().unix_timestamp();
-        self.context_cutoffs
-            .write()
-            .await
-            .insert(channel_id, now);
+        let snapshot = {
+            let mut guard = self.context_cutoffs.write().await;
+            guard.insert(channel_id, now);
+            guard.clone()
+        };
+        if let Err(err) = Self::save_cutoffs_to_disk(&snapshot).await {
+            tracing::warn!(?err, "failed to persist AI context cutoffs to disk");
+        }
     }
 
     /// Return the cutoff timestamp for a channel, if any.
     pub async fn get_cutoff(&self, channel_id: Id<ChannelMarker>) -> Option<i64> {
         self.context_cutoffs.read().await.get(&channel_id).copied()
+    }
+
+    async fn load_cutoffs_from_disk() -> HashMap<Id<ChannelMarker>, i64> {
+        let Ok(bytes) = tokio::fs::read(CUTOFFS_FILE_PATH).await else {
+            return HashMap::new();
+        };
+        let Ok(raw) = serde_json::from_slice::<HashMap<String, i64>>(&bytes) else {
+            return HashMap::new();
+        };
+        raw.into_iter()
+            .filter_map(|(k, v)| k.parse::<u64>().ok().and_then(Id::new_checked).map(|id| (id, v)))
+            .collect()
+    }
+
+    async fn save_cutoffs_to_disk(cutoffs: &HashMap<Id<ChannelMarker>, i64>) -> Result<()> {
+        let raw: HashMap<String, i64> = cutoffs
+            .iter()
+            .map(|(k, &v)| (k.get().to_string(), v))
+            .collect();
+        let json = serde_json::to_vec_pretty(&raw)?;
+        if let Some(parent) = std::path::Path::new(CUTOFFS_FILE_PATH).parent() {
+            let _ = tokio::fs::create_dir_all(parent).await;
+        }
+        tokio::fs::write(CUTOFFS_FILE_PATH, json).await?;
+        Ok(())
     }
 
     /// Read the prompt from disk or env var.

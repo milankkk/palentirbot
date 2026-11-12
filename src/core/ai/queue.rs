@@ -140,3 +140,37 @@ impl Drop for AiQueuePermit {
         });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_ai_queue_fifo_and_capacity() {
+        let queue = AiQueue::new(2);
+        assert!(queue.is_empty().await);
+
+        let ticket1 = queue.enter().await.expect("first ticket should succeed");
+        assert_eq!(ticket1.position(), 0);
+        assert_eq!(queue.len().await, 1);
+
+        let ticket2 = queue.enter().await.expect("second ticket should succeed");
+        assert_eq!(ticket2.position(), 1);
+        assert_eq!(queue.len().await, 2);
+
+        // Queue is now at capacity (2)
+        let err = queue.enter().await.err().expect("third ticket should fail");
+        assert_eq!(err, 2);
+
+        let permit1 = ticket1.wait().await;
+        drop(permit1);
+
+        // Next waiter should be woken up
+        let permit2 = ticket2.wait().await;
+        drop(permit2);
+
+        // Give the spawned drop task a tick to clear running state
+        tokio::task::yield_now().await;
+        assert_eq!(queue.len().await, 0);
+    }
+}

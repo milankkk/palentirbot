@@ -20,7 +20,7 @@ use crate::{
 };
 
 /// Default number of previous Discord messages sent to the AI (kept focused to prevent context pollution).
-const DEFAULT_HISTORY_LIMIT: u16 = 25;
+const DEFAULT_HISTORY_LIMIT: u16 = 10;
 /// Hard ceiling for history messages.
 const MAX_HISTORY_LIMIT: u16 = 50;
 /// Maximum number of characters taken from a single historical message.
@@ -128,7 +128,7 @@ pub async fn handle_prefix_ask(
     let is_reply_to_ai = msg
         .referenced_message
         .as_deref()
-        .map(|r| Some(r.author.id) == bot_id)
+        .map(|r| Some(r.author.id) == bot_id && is_conversational_ai_message(r))
         .unwrap_or(false);
 
     // If the message is a reply to another human message (not the AI), include that as context
@@ -274,9 +274,6 @@ pub async fn execute_ai_question(
         .current_user(|user| user.id)
         .expect("missing CurrentUser in cache");
 
-    // Get the last N messages from this channel, filtered by context cutoff.
-    let history = get_history(ctx, channel_id, exclude_message_id).await?;
-
     // Get the cached system prompt template from AiClient.
     let system_prompt_template = ctx.ai().get_prompt().await;
 
@@ -292,40 +289,61 @@ pub async fn execute_ai_question(
         "{clean_username} (Discord ID {user_id}): {clean_question}"
     );
 
-    let messages = if let Some(replied) = referenced_msg {
-        if replied.author.id == bot_id {
-            // User is directly replying to a message sent by the AI!
-            let mut raw_ai_text = replied.content.clone();
-            if raw_ai_text.trim().is_empty() {
-                for embed in &replied.embeds {
-                    if let Some(ref desc) = embed.description {
-                        raw_ai_text.push_str(desc);
-                        raw_ai_text.push(' ');
-                    }
-                    if let Some(ref title) = embed.title {
-                        raw_ai_text.push_str(title);
-                        raw_ai_text.push(' ');
-                    }
-                }
-            }
-            let ai_content = sanitize_llm_text(&clean_ai_response(&truncate_history_message(&raw_ai_text)));
+    // Fetch recent channel messages for this specific chat channel (respecting /aiclear cutoffs)
+    let history = match tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        get_history(ctx, channel_id, exclude_message_id),
+    )
+    .await
+    {
+        Ok(Ok(history)) => history,
+        Ok(Err(err)) => {
+            tracing::warn!(?err, %channel_id, "failed to fetch channel history for AI; continuing without it");
+            Vec::new()
+        }
+        Err(_) => {
+            tracing::warn!(%channel_id, "timed out fetching channel history for AI; continuing without it");
+            Vec::new()
+        }
+    };
 
-            // Focus context: Take messages up to the replied AI message, excluding intervening chatter
+    let messages = if let Some(replied) = referenced_msg {
+        if replied.author.id == bot_id && is_conversational_ai_message(replied) {
+            // User is directly replying to a conversational message sent by the AI!
+            let raw_ai_text = &replied.content;
+            let ai_content = sanitize_llm_text(&clean_ai_response(&truncate_history_message(raw_ai_text)));
+
+            // Focus context: Take messages up to the replied AI message in this chat
             let history_before_ai = if let Some(idx) = history.iter().position(|m| m.id == replied.id) {
                 history[..idx].to_vec()
             } else {
                 history.into_iter().filter(|m| m.id != replied.id).collect()
             };
 
-            let mut history_messages = convert_history(history_before_ai, bot_id);
+            // Keep only the most recent few turns before the AI message (up to 6 messages)
+            let history_slice = if history_before_ai.len() > 6 {
+                history_before_ai[history_before_ai.len() - 6..].to_vec()
+            } else {
+                history_before_ai
+            };
+
+            let mut history_messages = convert_history(history_slice, bot_id);
 
             // Put the exact AI message being replied to as the immediate prior assistant turn
             if !ai_content.is_empty() {
-                history_messages.push(AiMessage::assistant(ai_content));
+                if let Some(last) = history_messages.last_mut() {
+                    if last.role == "assistant" {
+                        *last = AiMessage::assistant(ai_content);
+                    } else {
+                        history_messages.push(AiMessage::assistant(ai_content));
+                    }
+                } else {
+                    history_messages.push(AiMessage::assistant(ai_content));
+                }
             }
 
             system_prompt.push_str(
-                "\n\nCONVERSATION CONTEXT: The user is directly replying to your previous statement above. Focus your response specifically on addressing what they said in direct relation to your statement. Do NOT repeat or summarize what you already said—simply answer their reply directly."
+                "\n\nCONVERSATION CONTEXT: The user is directly replying to your previous statement above. Focus your response specifically on addressing what they said in direct relation to your statement. Do NOT repeat or regurgitate what you already said—simply answer their reply directly."
             );
 
             let mut msgs = Vec::with_capacity(history_messages.len() + 2);
@@ -334,8 +352,23 @@ pub async fn execute_ai_question(
             msgs.push(AiMessage::user(current_user_msg));
             msgs
         } else {
-            // Replying to another user
-            let history_messages = convert_history(history, bot_id);
+            // Replying to another human user in this chat
+            let history_slice = if history.len() > 8 {
+                history[history.len() - 8..].to_vec()
+            } else {
+                history
+            };
+            let mut history_messages = convert_history(history_slice, bot_id);
+            if let Some(last) = history_messages.last() {
+                if last.role == "user" {
+                    history_messages.pop();
+                }
+            }
+
+            system_prompt.push_str(
+                "\n\nRecent messages from this specific Discord chat are provided for conversational context. Answer the current question directly. If the latest question introduces a new topic, focus entirely on the new topic—do NOT repeat previous answers or equations from earlier in the chat!"
+            );
+
             let mut msgs = Vec::with_capacity(history_messages.len() + 2);
             msgs.push(AiMessage::system(system_prompt));
             msgs.extend(history_messages);
@@ -343,8 +376,23 @@ pub async fn execute_ai_question(
             msgs
         }
     } else {
-        // Standalone question
-        let history_messages = convert_history(history, bot_id);
+        // Normal question in this channel - preserve conversational context for this specific chat
+        let history_slice = if history.len() > 8 {
+            history[history.len() - 8..].to_vec()
+        } else {
+            history
+        };
+        let mut history_messages = convert_history(history_slice, bot_id);
+        if let Some(last) = history_messages.last() {
+            if last.role == "user" {
+                history_messages.pop();
+            }
+        }
+
+        system_prompt.push_str(
+            "\n\nRecent messages from this specific Discord chat are provided for conversational context. Answer the current question directly. If the latest question introduces a new topic, focus entirely on the new topic—do NOT repeat previous answers or equations from earlier in the chat!"
+        );
+
         let mut msgs = Vec::with_capacity(history_messages.len() + 2);
         msgs.push(AiMessage::system(system_prompt));
         msgs.extend(history_messages);
@@ -411,7 +459,34 @@ async fn get_history(
     Ok(messages)
 }
 
-fn is_transient_status(content: &str) -> bool {
+/// Determine whether a bot message is an actual conversational AI reply
+/// (as opposed to an embed, command output, status notice, or finished replay link).
+pub fn is_conversational_ai_message(msg: &Message) -> bool {
+    let trimmed = msg.content.trim();
+    !trimmed.is_empty() && msg.embeds.is_empty() && !is_transient_status(trimmed)
+}
+
+pub(crate) fn is_transient_status(content: &str) -> bool {
+    static REPLAY_BASE_HOST: once_cell::sync::Lazy<Option<String>> =
+        once_cell::sync::Lazy::new(|| {
+            std::env::var("PUBLIC_REPLAY_BASE_URL")
+                .ok()
+                .map(|u| {
+                    u.trim()
+                        .trim_start_matches("https://")
+                        .trim_start_matches("http://")
+                        .trim_end_matches('/')
+                        .to_owned()
+                })
+                .filter(|s| !s.is_empty())
+        });
+
+    if let Some(ref base) = *REPLAY_BASE_HOST {
+        if content.contains(base.as_str()) {
+            return true;
+        }
+    }
+
     content.starts_with("⏳ Waiting in AI queue")
         || content.starts_with("⏳ Thinking")
         || content.starts_with("💭 Thinking")
@@ -426,15 +501,19 @@ fn is_transient_status(content: &str) -> bool {
         || content.starts_with("💭 Generating")
         || content.starts_with("⚠️ ")
         || content.starts_with("🧹 ")
+        || content.starts_with("🔄 ")
         || content.starts_with("🏓 Pong")
+        || content.starts_with("Pong!")
+        || content.starts_with("Failed to download map.")
         || content.starts_with("*(blinks blankly")
         || content.starts_with("Something went wrong while asking the AI")
+        || content.contains("[Replay](http")
         || content.contains("replays.insertdomainname.be")
         || content.contains("Finished rendering replay")
         || content.contains("Started replay processing")
 }
 
-fn is_non_ai_command(content: &str) -> bool {
+pub(crate) fn is_non_ai_command(content: &str) -> bool {
     let lower = content.to_ascii_lowercase();
     let trimmed = lower.trim();
     if trimmed == "!r" || trimmed == "!q" {
@@ -612,6 +691,23 @@ fn clean_ai_response(content: &str) -> String {
         text.drain(..end_idx);
     }
 
+    // Strip any residual <search>...</search> or <browse>...</browse> tool tags
+    for (open_tag, close_tag) in &[("<search>", "</search>"), ("<browse>", "</browse>")] {
+        while let Some(start) = text.find(open_tag) {
+            if let Some(end) = text[start..].find(close_tag) {
+                let end_idx = start + end + close_tag.len();
+                text.drain(start..end_idx);
+            } else {
+                text.truncate(start);
+                break;
+            }
+        }
+        while let Some(end) = text.find(close_tag) {
+            let end_idx = end + close_tag.len();
+            text.drain(..end_idx);
+        }
+    }
+
     let mut content = text.trim();
 
     // Strip ChatML / role delimiters and artifacts
@@ -620,6 +716,13 @@ fn clean_ai_response(content: &str) -> String {
         "<|im_start|>",
         "<|im_end|>",
         "<|endoftext|>",
+        "**Render Slave:**",
+        "**Render Slave**:",
+        "Render Slave:",
+        "render slave:",
+        "**The Logic:**",
+        "The Logic:",
+        "the logic:",
         "assistant:",
         "Assistant:",
         "### Assistant:",
@@ -687,12 +790,10 @@ fn truncate_discord_response(content: &str) -> String {
 ///
 /// Ensures slicing always occurs on a valid UTF-8 character boundary.
 fn truncate_chars(content: &str, max_chars: usize) -> String {
-    let mut count = 0;
-    for (idx, _) in content.char_indices() {
+    for (count, (idx, _)) in content.char_indices().enumerate() {
         if count == max_chars {
             return content[..idx].to_owned();
         }
-        count += 1;
     }
 
     content.to_owned()
@@ -737,6 +838,12 @@ mod tests {
 
         let chatml = "<|im_start|>assistant\n42<|im_end|>";
         assert_eq!(clean_ai_response(chatml), "42");
+
+        let search_tags = "<search>osu pp rework</search>Here is the answer.";
+        assert_eq!(clean_ai_response(search_tags), "Here is the answer.");
+
+        let browse_tags = "<browse>https://osu.ppy.sh</browse>Here is the webpage info.";
+        assert_eq!(clean_ai_response(browse_tags), "Here is the webpage info.");
     }
 
     #[test]
@@ -778,6 +885,7 @@ mod tests {
         assert!(is_transient_status("💭 Thinking..."));
         assert!(is_transient_status("⚡ Generating response..."));
         assert!(is_transient_status("Finished rendering replay https://replays.insertdomainname.be/watch/123.mp4"));
+        assert!(is_transient_status("<@123456> [Replay](https://my-custom-domain.com/watch/123.mp4)"));
         assert!(is_transient_status("*(blinks blankly... no thoughts head empty)*"));
         assert!(!is_transient_status("osu! was created in 2007 by Dean Herbert."));
     }

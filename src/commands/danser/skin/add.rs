@@ -137,13 +137,13 @@ pub async fn add(
                 Ok(b) => b,
                 Err(err) => {
                     let _ = command.error(&ctx, "Failed to download from URL").await;
-                    return Err(Report::from(err).wrap_err("failed to download skin from url"));
+                    return Err(err.wrap_err("failed to download skin from url"));
                 }
             };
 
             let raw_filename = url
                 .split('/')
-                .last()
+                .next_back()
                 .unwrap_or("skin")
                 .trim_end_matches(".osk");
             let decoded_filename = if let Some(pos) = raw_filename.find('?') {

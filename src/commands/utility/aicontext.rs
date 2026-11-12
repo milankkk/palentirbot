@@ -29,9 +29,10 @@ use crate::{
 pub struct AiContext;
 
 async fn slash_aicontext(ctx: Arc<Context>, command: InteractionCommand) -> Result<()> {
+    command.defer(&ctx, true).await?;
     let embed = create_context_embed(&ctx, command.channel_id).await;
     let builder = MessageBuilder::new().embed(embed);
-    command.callback(&ctx, builder, true).await?;
+    command.update(&ctx, &builder).await?;
 
     Ok(())
 }
@@ -50,21 +51,41 @@ pub async fn create_context_embed(ctx: &Context, channel_id: Id<ChannelMarker>) 
     // In English & slang text with Qwen tokenizer, 1 token is ~3.8 characters
     let prompt_tokens = (prompt_chars as f64 / 3.8).round() as usize;
 
-    // 2. Channel conversation history metrics
-    let history = fetch_channel_history(ctx, channel_id).await.unwrap_or_default();
-    let total_messages = history.len();
+    // 2. Channel conversation history metrics (filtered using the same rules as ask.rs)
+    let history = tokio::time::timeout(
+        std::time::Duration::from_secs(4),
+        fetch_channel_history(ctx, channel_id),
+    )
+    .await
+    .ok()
+    .and_then(Result::ok)
+    .unwrap_or_default();
     let mut user_messages = 0;
     let mut bot_messages = 0;
     let mut history_chars = 0;
 
     for msg in &history {
+        let trimmed = msg.content.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if msg.author.bot && msg.author.id != bot_id {
+            continue;
+        }
         if msg.author.id == bot_id {
+            if super::ask::is_transient_status(trimmed) {
+                continue;
+            }
             bot_messages += 1;
         } else {
+            if super::ask::is_non_ai_command(trimmed) {
+                continue;
+            }
             user_messages += 1;
         }
-        history_chars += msg.content.chars().count();
+        history_chars += trimmed.chars().count().min(1_500);
     }
+    let total_messages = user_messages + bot_messages;
 
     let history_tokens = (history_chars as f64 / 3.8).round() as usize;
 
@@ -151,7 +172,7 @@ pub async fn create_context_embed(ctx: &Context, channel_id: Id<ChannelMarker>) 
         value: format!(
             "• **Model:** `{model_name}`\n\
              • **Total Context:** `{}` tokens (max `{}` predicted)\n\
-             • **Memory:** GPU VRAM (weights & active cache) + System RAM (context overflow)\n\
+             • **Memory:** 100% GPU VRAM (weights & KV cache resident)\n\
              • **Queue Status:** {queue_status}",
             format_num(max_window),
             format_num(num_predict as usize)
@@ -178,7 +199,7 @@ fn format_num(n: usize) -> String {
     let mut result = String::new();
     let chars: Vec<char> = s.chars().collect();
     for (i, c) in chars.iter().enumerate() {
-        if i > 0 && (chars.len() - i) % 3 == 0 {
+        if i > 0 && (chars.len() - i).is_multiple_of(3) {
             result.push(',');
         }
         result.push(*c);

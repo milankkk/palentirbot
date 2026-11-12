@@ -32,7 +32,7 @@ pub struct Queue;
 pub async fn build_queue_embed(ctx: &Context) -> EmbedBuilder {
     let queue_guard = ctx.replay_queue.queue.lock().await;
     let queue_guard: &std::collections::VecDeque<crate::core::replay_queue::ReplayData> =
-        &*queue_guard;
+        &queue_guard;
 
     let status = *ctx.replay_queue.status.lock().await;
 
@@ -148,7 +148,7 @@ pub fn spawn_queue_updater(
             let (is_empty, status) = {
                 let is_empty = {
                     let q = ctx.replay_queue.queue.lock().await;
-                    let q: &std::collections::VecDeque<crate::core::ReplayData> = &*q;
+                    let q: &std::collections::VecDeque<crate::core::ReplayData> = &q;
                     q.is_empty()
                 };
                 let status = *ctx.replay_queue.status.lock().await;
@@ -179,7 +179,7 @@ async fn slash_queue(ctx: Arc<Context>, command: InteractionCommand) -> Result<(
     let is_active = {
         let is_empty = {
             let q = ctx.replay_queue.queue.lock().await;
-            let q: &std::collections::VecDeque<crate::core::ReplayData> = &*q;
+            let q: &std::collections::VecDeque<crate::core::ReplayData> = &q;
             q.is_empty()
         };
         let status = *ctx.replay_queue.status.lock().await;
