@@ -964,7 +964,7 @@ impl StdError for MapsetDownloadError {
     }
 }
 
-async fn download_mapset(ctx: &Context, mapset_id: u32) -> Result<()> {
+pub(crate) async fn download_mapset(ctx: &Context, mapset_id: u32) -> Result<()> {
     const MAX_UNCOMPRESSED_MAPSET_BYTES: u64 = 500 * 1024 * 1024;
     let bytes = request_mapset(ctx, mapset_id).await?;
     let mut out_path = BotConfig::get().paths.songs();

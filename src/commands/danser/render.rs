@@ -1,27 +1,19 @@
 use std::{convert::TryFrom, sync::Arc};
 
 use command_macros::SlashCommand;
-use eyre::{Context as _, Result};
-use osu_db::{Mode, Replay};
-use tokio::{fs::File, io::AsyncWriteExt};
-use twilight_interactions::command::{
-    AutocompleteValue, CommandModel, CreateCommand,
-};
+use eyre::Result;
+use twilight_interactions::command::{AutocompleteValue, CommandModel, CreateCommand};
 use twilight_model::channel::Attachment;
 
 use super::render_score::{
     build_queue_added_message, check_render_access, check_user_queue_limit, finalize_enqueue,
-    parse_osu_score_url, prepare_score_by_id, sanitize_filename, ScorePrepareOutcome,
+    parse_osu_score_url, prepare_attachment_replay_data, prepare_score_by_id,
+    ScorePrepareOutcome,
 };
 use super::settings::{autocomplete_skins, resolve_skin_name};
 use crate::{
-    core::{
-        replay_queue::{is_lazer_replay, RenderOptions, ReplaySlim},
-        BotConfig, Context, ReplayData, TimePoints,
-    },
-    util::{
-        interaction::InteractionCommand, Authored, InteractionCommandExt,
-    },
+    core::{replay_queue::RenderOptions, Context, TimePoints},
+    util::{interaction::InteractionCommand, Authored, InteractionCommandExt},
 };
 
 #[derive(CreateCommand, SlashCommand)]
@@ -237,65 +229,25 @@ pub async fn slash_render(ctx: Arc<Context>, mut command: InteractionCommand) ->
         force_rerender: force.unwrap_or(false),
     };
 
-    let mut replay_data = if let Some(att) = attachment {
-        let bytes = match ctx.client().get_discord_attachment(&att).await {
-            Ok(bytes) => bytes,
-            Err(err) => {
-                command.error(&ctx, "Failed to download attachment").await?;
-                return Err(err);
-            }
-        };
-
-        let replay = match Replay::from_bytes(&bytes) {
-            Ok(replay) => replay,
-            Err(err) => {
-                command
-                    .error(
-                        &ctx,
-                        "Failed to parse the .osr file. Did you give a valid replay file?",
-                    )
-                    .await?;
-                return Err(err).context("failed to parse .osr file");
-            }
-        };
-
-        if replay.mode != Mode::Standard {
-            command
-                .error(&ctx, "danser only accepts osu!standard plays, sorry :(")
-                .await?;
-            return Ok(());
-        }
-
-        let config = BotConfig::get();
-        let mut replay_file = config.paths.downloads();
-        let safe_filename = sanitize_filename(&att.filename);
-        replay_file.push(format!("{}_{safe_filename}", command.id));
-
-        let mut file = match File::create(&replay_file).await {
-            Ok(file) => file,
-            Err(err) => {
-                command.error(&ctx, "Failed to store replay file").await?;
-                return Err(err).with_context(|| format!("failed to create file `{replay_file:?}`"));
-            }
-        };
-
-        if let Err(err) = file.write_all(&bytes).await {
-            command.error(&ctx, "Failed to store replay file").await?;
-            return Err(err).with_context(|| format!("failed writing to file `{replay_file:?}`"));
-        }
-
-        let is_lazer = is_lazer_replay(replay.version);
-        let mut data = ReplayData::from_options(
+    let mut replay_data = if let Some(ref att) = attachment {
+        match prepare_attachment_replay_data(
+            &ctx,
+            att,
+            command.id,
             command.channel_id,
             output_channel,
-            replay_file,
-            ReplaySlim::from(replay),
             user,
-            is_lazer,
+            Some(command.username()?.to_string()),
             opts,
-        );
-        data.player_name = Some(command.username()?.to_string());
-        data
+        )
+        .await
+        {
+            Ok(data) => data,
+            Err(err_msg) => {
+                command.error(&ctx, err_msg).await?;
+                return Ok(());
+            }
+        }
     } else if let Some(score_id) = parsed_score_id {
         match prepare_score_by_id(
             &ctx,

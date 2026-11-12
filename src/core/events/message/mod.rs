@@ -84,8 +84,8 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
         "render" => {
             use crate::commands::danser::render_score::{
                 build_queue_added_message, check_render_access, check_user_queue_limit,
-                finalize_enqueue, parse_prefix_render_args, prepare_score_by_id,
-                render_score_from_message, sanitize_filename, EmbedRenderOutcome,
+                finalize_enqueue, parse_prefix_render_args, prepare_attachment_replay_data,
+                prepare_score_by_id, render_score_from_message, EmbedRenderOutcome,
                 ScorePrepareOutcome,
             };
 
@@ -120,78 +120,24 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
             let (mut replay_data, warning): (_, Option<&'static str>) = if let Some(attachment) =
                 msg.attachments.first()
             {
-                if !matches!(attachment.filename.rsplit('.').next(), Some(ext) if ext.eq_ignore_ascii_case("osr"))
-                {
-                    let _ = msg
-                        .error(&ctx, "The attachment must be a `.osr` file!")
-                        .await;
-                    return;
-                }
-
-                let bytes = match ctx.client().get_discord_attachment(attachment).await {
-                    Ok(b) => b,
-                    Err(err) => {
-                        tracing::error!(?err, "failed to download attachment");
-                        let _ = msg.error(&ctx, "Failed to download attachment.").await;
-                        return;
-                    }
-                };
-
-                use osu_db::{Mode, Replay};
-                let replay = match Replay::from_bytes(&bytes) {
-                    Ok(r) => r,
-                    Err(err) => {
-                        tracing::error!(?err, "failed to parse .osr");
-                        let _ = msg
-                            .error(
-                                &ctx,
-                                "Failed to parse the `.osr` file. Is it a valid replay?",
-                            )
-                            .await;
-                        return;
-                    }
-                };
-                if replay.mode != Mode::Standard {
-                    let _ = msg
-                        .error(&ctx, "danser only accepts osu!standard plays, sorry")
-                        .await;
-                    return;
-                }
-
-                let config = crate::core::BotConfig::get();
-                let mut replay_file = config.paths.downloads();
-                let safe_filename = sanitize_filename(&attachment.filename);
-                replay_file.push(format!("{}_{safe_filename}", msg.id));
-                use tokio::io::AsyncWriteExt as _;
-                match tokio::fs::File::create(&replay_file).await {
-                    Ok(mut f) => {
-                        if let Err(e) = f.write_all(&bytes).await {
-                            tracing::error!(?e);
-                            let _ = msg.error(&ctx, "Failed to save replay.").await;
-                            return;
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!(?e);
-                        let _ = msg.error(&ctx, "Failed to save replay.").await;
-                        return;
-                    }
-                }
-
-                use crate::core::replay_queue::{is_lazer_replay, ReplayData, ReplaySlim};
-                let is_lazer = is_lazer_replay(replay.version);
-                (
-                    ReplayData::from_options(
-                        msg.channel_id,
-                        output_channel,
-                        replay_file,
-                        ReplaySlim::from(replay),
-                        msg.author.id,
-                        is_lazer,
-                        opts,
-                    ),
-                    None,
+                match prepare_attachment_replay_data(
+                    &ctx,
+                    attachment,
+                    msg.id,
+                    msg.channel_id,
+                    output_channel,
+                    msg.author.id,
+                    Some(msg.author.name.clone()),
+                    opts,
                 )
+                .await
+                {
+                    Ok(data) => (data, None),
+                    Err(err_msg) => {
+                        let _ = msg.error(&ctx, err_msg).await;
+                        return;
+                    }
+                }
             } else if let Some(score_id) = score_id_opt {
                 match prepare_score_by_id(
                     &ctx,
@@ -266,6 +212,12 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
             finalize_enqueue(ctx, replay_data, queue_msg).await;
         }
 
+        // ── screenshot ────────────────────────────────────────────────────────
+        "ss" | "screenshot" => {
+            crate::commands::danser::screenshot::handle_prefix_screenshot(ctx, &msg, args_str)
+                .await;
+        }
+
         // ── queue ─────────────────────────────────────────────────────────────
         "queue" => {
             use crate::util::builder::MessageBuilder;
@@ -292,6 +244,7 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
                  `{p}aicontext` — Show context window usage & engine stats (aliases: `{p}context`, `{p}aic`)\n\
                  `{p}ping` — Check latency\n\
                  `{p}render` — Render a replay (attach `.osr`, pass an osu! score URL, or reply to a score embed). Args: `start=MM:SS` `end=MM:SS` `pitch=<float>` `skin=\"<name>\"` `skip` `offset=<ms>` `force`\n\
+                 `{p}ss <time>` — Snap a PNG screenshot from an `.osr`, score URL, or replied score embed (`{p}screenshot`)\n\
                  `{p}queue` — Show the render queue\n\
                  `{p}skinlist` — List available skins\n\
                  `{p}invite` — Bot invite link\n\

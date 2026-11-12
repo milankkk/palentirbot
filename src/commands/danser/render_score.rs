@@ -13,8 +13,9 @@ use crate::{
 };
 use command_macros::msg_command;
 use eyre::{Context as _, Report, Result};
-use osu_db::Replay;
+use osu_db::{Mode, Replay};
 use rosu_v2::prelude::{GameMode, Score};
+use tokio::{fs::File, io::AsyncWriteExt as _};
 use twilight_interactions::command::CommandInputData;
 use twilight_model::{
     channel::{
@@ -23,7 +24,7 @@ use twilight_model::{
             embed::Embed,
             Component,
         },
-        Message,
+        Attachment, Message,
     },
     id::{
         marker::{ChannelMarker, GuildMarker, UserMarker},
@@ -166,7 +167,7 @@ pub struct RawPrefixRenderArgs {
     pub score_id: Option<u64>,
 }
 
-fn split_quoted_tokens(input: &str) -> std::result::Result<Vec<String>, String> {
+pub(crate) fn split_quoted_tokens(input: &str) -> std::result::Result<Vec<String>, String> {
     let mut tokens = Vec::new();
     let mut current = String::new();
     let mut quote: Option<char> = None;
@@ -497,6 +498,68 @@ async fn prepare_score_replay_data(
     data.difficulty_name = Some(diff_name.to_owned());
 
     Ok(ScorePrepareOutcome::Ready(Box::new(data)))
+}
+
+/// Download a Discord `.osr` attachment, validate osu!standard mode, save to disk, and build `ReplayData`.
+#[allow(clippy::too_many_arguments)]
+pub async fn prepare_attachment_replay_data(
+    ctx: &Context,
+    att: &Attachment,
+    tx_id: impl std::fmt::Display,
+    input_channel: Id<ChannelMarker>,
+    output_channel: Id<ChannelMarker>,
+    user: Id<UserMarker>,
+    player_hint: Option<String>,
+    opts: RenderOptions,
+) -> std::result::Result<ReplayData, String> {
+    if !matches!(att.filename.rsplit('.').next(), Some(ext) if ext.eq_ignore_ascii_case("osr")) {
+        return Err("The attachment must be a `.osr` file!".to_owned());
+    }
+
+    let bytes = ctx
+        .client()
+        .get_discord_attachment(att)
+        .await
+        .map_err(|err| {
+            tracing::error!(?err, "failed to download replay attachment");
+            "Failed to download attachment.".to_owned()
+        })?;
+
+    let replay = Replay::from_bytes(&bytes).map_err(|err| {
+        tracing::warn!(?err, "failed to parse .osr attachment");
+        "Failed to parse the `.osr` file. Is it a valid replay?".to_owned()
+    })?;
+
+    if replay.mode != Mode::Standard {
+        return Err("danser only accepts osu!standard plays, sorry :(".to_owned());
+    }
+
+    let mut replay_file = BotConfig::get().paths.downloads();
+    let safe_filename = sanitize_filename(&att.filename);
+    replay_file.push(format!("{tx_id}_{safe_filename}"));
+
+    let mut file = File::create(&replay_file).await.map_err(|err| {
+        tracing::error!(?err, ?replay_file, "failed to create replay file");
+        "Failed to store replay file.".to_owned()
+    })?;
+    if let Err(err) = file.write_all(&bytes).await {
+        tracing::error!(?err, ?replay_file, "failed writing replay file");
+        let _ = tokio::fs::remove_file(&replay_file).await;
+        return Err("Failed to store replay file.".to_owned());
+    }
+
+    let is_lazer = crate::core::replay_queue::is_lazer_replay(replay.version);
+    let mut data = ReplayData::from_options(
+        input_channel,
+        output_channel,
+        replay_file,
+        ReplaySlim::from(replay),
+        user,
+        is_lazer,
+        opts,
+    );
+    data.player_name = player_hint;
+    Ok(data)
 }
 
 #[msg_command(name = "Render score", dm_permission = false)]

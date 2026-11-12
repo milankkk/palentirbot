@@ -49,6 +49,7 @@ impl Commands {
                     Ping => PING_SLASH,
                     Queue => QUEUE_SLASH,
                     Render => RENDER_SLASH,
+                    Screenshot => SCREENSHOT_SLASH,
                     Setup => SETUP_SLASH,
                     Skin => SKIN_SLASH,
                     Settings => SETTINGS_SLASH,

@@ -3,7 +3,7 @@ use std::{mem, sync::Arc};
 use eyre::Context as _;
 
 use crate::{
-    commands::danser::{slash_render, slash_settings},
+    commands::danser::{slash_render, slash_screenshot, slash_settings},
     core::{events::EventLocation, Context},
     util::{interaction::InteractionCommand, Authored},
 };
@@ -23,6 +23,7 @@ pub async fn handle_autocomplete(ctx: Arc<Context>, mut command: InteractionComm
 
     let res = match name.as_str() {
         "render" => slash_render(ctx, command).await,
+        "screenshot" => slash_screenshot(ctx, command).await,
         "settings" => slash_settings(ctx, command).await,
         _ => return error!("unknown autocomplete command `{name}`"),
     };
