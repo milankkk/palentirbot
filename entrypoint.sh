@@ -9,7 +9,7 @@ DANSER_EXEC="${DATA_DIR}/danser"
 # 1. Download and extract Danser if not present
 if [ ! -f "${DANSER_EXEC}" ]; then
     echo "[palentirbot] Danser binary not found in ${DATA_DIR}. Downloading latest release..."
-    LATEST_URL=$(curl -sL https://api.github.com/repos/Wieku/danser-go/releases/latest 2>/dev/null | grep -o 'https://[^"]*linux\.zip' | head -n 1 || true)
+    LATEST_URL=$(curl -fsSL https://api.github.com/repos/Wieku/danser-go/releases/latest 2>/dev/null | grep -o 'https://[^"]*linux\.zip' | head -n 1 || true)
     if [ -z "${LATEST_URL}" ]; then
         LATEST_URL="https://github.com/Wieku/danser-go/releases/download/0.12.1/danser-0.12.1-linux.zip"
     fi
@@ -67,15 +67,14 @@ CREDENTIALS_FILE="${DATA_DIR}/settings/credentials.json"
 if [ -n "${OSU_CLIENT_ID:-}" ] && [ -n "${OSU_CLIENT_SECRET:-}" ]; then
     if [ ! -f "${CREDENTIALS_FILE}" ] || [ ! -s "${CREDENTIALS_FILE}" ]; then
         echo "[palentirbot] Pre-configuring settings/credentials.json from environment variables..."
-        cat <<EOF > "${CREDENTIALS_FILE}"
-{
-    "ClientId": "${OSU_CLIENT_ID}",
-    "ClientSecret": "${OSU_CLIENT_SECRET}"
-}
-EOF
+        esc_id=${OSU_CLIENT_ID//\\/\\\\}
+        esc_id=${esc_id//\"/\\\"}
+        esc_secret=${OSU_CLIENT_SECRET//\\/\\\\}
+        esc_secret=${esc_secret//\"/\\\"}
+        printf '{\n    "ClientId": "%s",\n    "ClientSecret": "%s"\n}\n' "${esc_id}" "${esc_secret}" > "${CREDENTIALS_FILE}"
     fi
 fi
 
-# 4. Start the bot
+# 5. Start the bot
 echo "[palentirbot] Starting Discord Bot..."
 exec xvfb-run -a -s "-screen 0 1920x1080x24" /app/palentirbot "$@"

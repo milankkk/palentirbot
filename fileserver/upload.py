@@ -39,6 +39,11 @@ if SECRET == "palentir_replay_secret_key":
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
+@app.route("/health", methods=["GET"])
+def health():
+    return jsonify({"ok": True}), 200
+
+
 @app.route("/upload", methods=["POST"])
 def upload():
     secret_val = request.form.get("secret", "")
@@ -49,12 +54,27 @@ def upload():
         return jsonify({"error": 400, "text": "Missing video file"}), 400
 
     f = request.files["video"]
-    if not f.filename.lower().endswith(".mp4"):
+    if not f.filename or not f.filename.lower().endswith(".mp4"):
         return jsonify({"error": 400, "text": "Only .mp4 video files are accepted"}), 400
 
-    safe_name = secure_filename(f.filename) or "replay.mp4"
+    safe_name = secure_filename(f.filename)
+    if not safe_name or not safe_name.lower().endswith(".mp4"):
+        return jsonify({"error": 400, "text": "Invalid .mp4 filename"}), 400
+
     filename = f"{uuid.uuid4()}_{safe_name}"
-    f.save(os.path.join(UPLOAD_DIR, filename))
+    final_path = os.path.join(UPLOAD_DIR, filename)
+    tmp_path = os.path.join(UPLOAD_DIR, f".{filename}.tmp")
+    try:
+        f.save(tmp_path)
+        os.chmod(tmp_path, 0o644)
+        os.replace(tmp_path, final_path)
+    except Exception:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+        raise
 
     watch_base = BASE_URL if BASE_URL.endswith("/watch") else f"{BASE_URL}/watch"
     url = f"{watch_base}/{filename}"

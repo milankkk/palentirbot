@@ -12,7 +12,7 @@ services:
       postgres:
         condition: service_healthy
       fileserver:
-        condition: service_started
+        condition: service_healthy
       ollama:
         condition: service_started
     env_file:
@@ -82,7 +82,7 @@ services:
     volumes:
       - uploaded_replays:/uploads
     healthcheck:
-      test: ["CMD-SHELL", "python -c 'import urllib.request; urllib.request.urlopen(\"http://127.0.0.1:5555/\")' || exit 0"]
+      test: ["CMD", "python", "-c", "import os, urllib.request; urllib.request.urlopen(f'http://127.0.0.1:{os.environ.get(\"UPLOAD_PORT\", 5555)}/health', timeout=3)"]
       interval: 10s
       timeout: 5s
       retries: 3

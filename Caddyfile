@@ -1,23 +1,27 @@
 {$CADDY_SITE_ADDRESS::80} {
-    root * /srv/replays
-    encode zstd gzip
+	root * /srv/replays
+	encode zstd gzip
 
-    # Redirect /watch/filename.mp4 to /watch/filename
-    @watchmp4 path_regexp watchmp4 ^(/watch/.+)\.mp4$
-    redir @watchmp4 {re.watchmp4.1} 301
+	# Redirect /watch/filename.mp4 to /watch/filename
+	@watchmp4 path_regexp watchmp4 ^(/watch/[A-Za-z0-9._-]+)\.mp4$
+	redir @watchmp4 {re.watchmp4.1} 301
 
-    # Discord video embed watch page
-    @watchpage path_regexp watchpage ^/watch/(.+)$
-    handle @watchpage {
-        header Content-Type "text/html; charset=utf-8"
-        header Cache-Control "no-store"
-        respond `<!DOCTYPE html>
-<html>
+	# Discord video embed watch page
+	@watchpage path_regexp watchpage ^/watch/([A-Za-z0-9._-]+)$
+	handle @watchpage {
+		header Content-Type "text/html; charset=utf-8"
+		header Cache-Control "no-store"
+		respond `<!DOCTYPE html>
+<html lang="en">
 <head>
-    <meta property="og:title" content="osu! Replay" />
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>{re.watchpage.1}</title>
+    <meta property="og:title" content="{re.watchpage.1}" />
     <meta property="og:description" content="Rendered osu! replay video" />
     <meta property="og:site_name" content="Replay Server" />
     <meta property="og:type" content="video.other" />
+    <meta property="og:url" content="{scheme}://{host}/watch/{re.watchpage.1}" />
     <meta property="og:image" content="{scheme}://{host}/{re.watchpage.1}.jpg" />
     <meta property="og:image:width" content="1280" />
     <meta property="og:image:height" content="720" />
@@ -41,8 +45,8 @@
     </div>
 </body>
 </html>` 200
-    }
+	}
 
-    # Serve static replay files
-    file_server
+	# Serve static replay files
+	file_server
 }
