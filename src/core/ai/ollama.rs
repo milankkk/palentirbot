@@ -70,13 +70,18 @@ impl AiThinkDepth {
     pub fn prompt_instruction(self) -> &'static str {
         match self {
             Self::Low => {
-                "THINKING DEPTH (Quick): Briefly sanity-check your facts inside internal reasoning before replying."
+                "REASONING DEPTH (LOW — QUICK): Keep internal thinking brief and lightweight (1-3 quick sentences to check obvious facts), then immediately output your final Discord reply."
             }
             Self::Medium => {
-                "THINKING DEPTH (Balanced): Think through the steps and verify your facts internally before replying."
+                "REASONING DEPTH (MEDIUM — BALANCED): Inside your internal thinking, outline the key facts step by step, check for obvious errors or missing context, decide if tools help, and draft a crisp reply."
             }
             Self::High => {
-                "THINKING DEPTH (Extended): Take your time inside your internal thinking process to reason deeply, systematically, and thoroughly before answering. Break complex problems into sub-steps, double-check calculations, edge cases, and chat context, and question your first intuition internally—while still keeping your final visible Discord reply natural without dumping raw scratchpad notes."
+                "REASONING DEPTH (HIGH — DEEP ANALYSIS, MANDATORY): Use your internal thinking block extensively BEFORE replying. Deliberate thoroughly through at least 4 distinct steps internally:\n\
+                 1. Deconstruct the user's question, implicit nuances, and relevant chat context.\n\
+                 2. Explore the underlying concepts, causes, mechanisms, or multiple angles carefully.\n\
+                 3. Verify every fact, edge case, or calculation step-by-step and question your first intuition.\n\
+                 4. Evaluate whether web search, finding/attaching a relevant picture (`image_search` + `attach_image`), or attaching a clean code/text file (`attach_file`) would make the answer stronger, then polish your reply tone.\n\
+                 Do NOT rush or stop thinking after a couple sentences—take full time to reason deeply internally while keeping your final visible Discord reply concise and punchy."
             }
         }
     }
@@ -171,8 +176,46 @@ struct OllamaOptions {
     min_p: f32,
 }
 
-static AI_TOOLS: once_cell::sync::Lazy<[serde_json::Value; 4]> = once_cell::sync::Lazy::new(|| {
+#[derive(Clone, Debug)]
+pub struct AiAttachmentFile {
+    pub filename: String,
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct AiReply {
+    pub content: String,
+    pub attachments: Vec<AiAttachmentFile>,
+}
+
+const MAX_AI_ATTACHMENTS: usize = 8;
+const MAX_AI_REMOTE_IMAGES: usize = 3;
+const MAX_ATTACH_IMAGE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_ATTACH_TEXT_BYTES: usize = 512 * 1024;
+
+static AI_TOOLS: once_cell::sync::Lazy<[serde_json::Value; 7]> = once_cell::sync::Lazy::new(|| {
     [
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "attach_file",
+                "description": "Attach a downloadable text or code file (e.g. script.py, main.rs, config.json, notes.md, data.csv) to your Discord reply. Use this when sharing full scripts, code snippets longer than ~10 lines, configs, diffs, or long structured text.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "filename": {
+                            "type": "string",
+                            "description": "Clean filename with extension, such as solver.py or notes.txt"
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "Complete UTF-8 text contents of the file"
+                        }
+                    },
+                    "required": ["filename", "content"]
+                }
+            }
+        }),
         serde_json::json!({
             "type": "function",
             "function": {
@@ -194,13 +237,51 @@ static AI_TOOLS: once_cell::sync::Lazy<[serde_json::Value; 4]> = once_cell::sync
             "type": "function",
             "function": {
                 "name": "browse_url",
-                "description": "Fetch readable text content from a specific public HTTP/HTTPS URL",
+                "description": "Fetch readable text content and notable image URLs from a specific public HTTP/HTTPS URL",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "url": {
                             "type": "string",
                             "description": "The full http:// or https:// URL to fetch"
+                        }
+                    },
+                    "required": ["url"]
+                }
+            }
+        }),
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "image_search",
+                "description": "Search the web for relevant pictures, diagrams, memes, or reference photos and return direct image URLs. Follow with `attach_image` to include a picture in your Discord reply.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Descriptive image search query"
+                        }
+                    },
+                    "required": ["query"]
+                }
+            }
+        }),
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "attach_image",
+                "description": "Download a verified direct image URL (PNG/JPEG/GIF/WebP from image_search or browse_url) and attach the picture to your Discord message",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "url": {
+                            "type": "string",
+                            "description": "Direct http:// or https:// image URL returned by image_search or browse_url"
+                        },
+                        "filename": {
+                            "type": "string",
+                            "description": "Optional filename without directory separators"
                         }
                     },
                     "required": ["url"]
@@ -540,15 +621,76 @@ impl OllamaClient {
 
     fn tools_for(search_mode: SearchMode, has_osu: bool) -> Option<&'static [serde_json::Value]> {
         match search_mode {
-            SearchMode::Off | SearchMode::Force => None,
-            SearchMode::Auto => {
+            SearchMode::Off => Some(&AI_TOOLS[..1]),
+            SearchMode::Auto | SearchMode::Force => {
                 if has_osu {
                     Some(&AI_TOOLS[..])
                 } else {
-                    Some(&AI_TOOLS[..2])
+                    Some(&AI_TOOLS[..5])
                 }
             }
         }
+    }
+
+    fn sanitize_attachment_filename(raw: &str, fallback_ext: &str) -> String {
+        const BLOCKED_EXTS: &[&str] = &[
+            "exe", "bat", "cmd", "msi", "scr", "vbs", "com", "pif", "lnk", "hta", "dll", "so",
+            "dylib", "dmg", "apk",
+        ];
+        let base = std::path::Path::new(raw.trim())
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .trim_start_matches('.');
+        let mut cleaned: String = base
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        while cleaned.contains("..") {
+            cleaned = cleaned.replace("..", ".");
+        }
+        cleaned = cleaned.trim_matches(|c| c == '.' || c == '_').chars().take(64).collect();
+        if cleaned.is_empty() {
+            return format!("attachment.{fallback_ext}");
+        }
+        if let Some((_, ext)) = cleaned.rsplit_once('.') {
+            if BLOCKED_EXTS.iter().any(|b| b.eq_ignore_ascii_case(ext)) || ext.is_empty() {
+                format!("{cleaned}.{fallback_ext}")
+            } else {
+                cleaned
+            }
+        } else {
+            format!("{cleaned}.{fallback_ext}")
+        }
+    }
+
+    fn dedupe_filename(existing: &[AiAttachmentFile], candidate: String) -> String {
+        if !existing
+            .iter()
+            .any(|f| f.filename.eq_ignore_ascii_case(&candidate))
+        {
+            return candidate;
+        }
+        let (stem, ext) = candidate
+            .rsplit_once('.')
+            .map_or((candidate.as_str(), ""), |(s, e)| (s, e));
+        for n in 2..=20 {
+            let next = if ext.is_empty() {
+                format!("{stem}_{n}")
+            } else {
+                format!("{stem}_{n}.{ext}")
+            };
+            if !existing.iter().any(|f| f.filename.eq_ignore_ascii_case(&next)) {
+                return next;
+            }
+        }
+        candidate
     }
 
     fn emit_status(tx: Option<&UnboundedSender<AiStreamEvent>>, msg: impl Into<String>) {
@@ -557,15 +699,55 @@ impl OllamaClient {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn run_single_tool(
         &self,
         channel_id: Id<ChannelMarker>,
         name: &str,
         args: &serde_json::Value,
+        search_mode: SearchMode,
         osu: Option<&Osu>,
+        attachments: &mut Vec<AiAttachmentFile>,
+        remote_images_count: &mut usize,
         stream_tx: Option<&UnboundedSender<AiStreamEvent>>,
     ) -> Option<String> {
+        if search_mode == SearchMode::Off && name != "attach_file" {
+            return Some(format!("[{name} unavailable while web search is disabled]"));
+        }
+
         match name {
+            "attach_file" => {
+                if attachments.len() >= MAX_AI_ATTACHMENTS {
+                    return Some(format!(
+                        "[attach_file limit reached: max {MAX_AI_ATTACHMENTS} attachments per reply]"
+                    ));
+                }
+                let raw_name = Self::extract_arg(args, "filename");
+                let content = match args.get("content").and_then(|v| v.as_str()) {
+                    Some(c) => c,
+                    None => return Some("[attach_file error: missing `content` string]".to_owned()),
+                };
+                if content.contains('\0') {
+                    return Some("[attach_file error: binary NUL bytes are not allowed in text files]".to_owned());
+                }
+                if content.len() > MAX_ATTACH_TEXT_BYTES {
+                    return Some(format!(
+                        "[attach_file error: file exceeds {MAX_ATTACH_TEXT_BYTES} byte limit]"
+                    ));
+                }
+                let sanitized = Self::sanitize_attachment_filename(&raw_name, "txt");
+                let filename = Self::dedupe_filename(attachments, sanitized);
+                tracing::info!(%channel_id, %filename, bytes = content.len(), "Attaching AI text/code file");
+                Self::emit_status(stream_tx, format!("📎 Creating file `{filename}`..."));
+                attachments.push(AiAttachmentFile {
+                    filename: filename.clone(),
+                    bytes: content.as_bytes().to_vec(),
+                });
+                Some(format!(
+                    "[attach_file: attached `{filename}` ({} bytes) to your Discord reply]",
+                    content.len()
+                ))
+            }
             "web_search" => {
                 let query = Self::extract_arg(args, "query");
                 if query.is_empty() {
@@ -601,6 +783,75 @@ impl OllamaClient {
                     }
                 })
             }
+            "image_search" => {
+                let query = Self::extract_arg(args, "query");
+                if query.is_empty() {
+                    return None;
+                }
+                tracing::info!(%channel_id, %query, "Executing AI image search");
+                Self::emit_status(stream_tx, format!("🖼️ Searching images for `{query}`..."));
+                Some(match self.search.search_images(&query).await {
+                    Ok(results) => sanitize_llm_text(&super::search::format_image_search_results(
+                        &query, &results, 5,
+                    )),
+                    Err(err) => {
+                        tracing::warn!(%channel_id, %query, ?err, "image_search failed");
+                        format!("[image_search error for `{query}`: {err}]")
+                    }
+                })
+            }
+            "attach_image" => {
+                if attachments.len() >= MAX_AI_ATTACHMENTS
+                    || *remote_images_count >= MAX_AI_REMOTE_IMAGES
+                {
+                    return Some(format!(
+                        "[attach_image limit reached: max {MAX_AI_REMOTE_IMAGES} remote images per reply]"
+                    ));
+                }
+                let url = Self::extract_arg(args, "url");
+                if url.is_empty() {
+                    return Some("[attach_image error: missing `url` argument]".to_owned());
+                }
+                tracing::info!(%channel_id, %url, "Downloading AI image attachment");
+                Self::emit_status(stream_tx, "🖼️ Fetching image to attach...");
+                Some(
+                    match self.search.download_image(&url, MAX_ATTACH_IMAGE_BYTES).await {
+                        Ok((derived_name, bytes)) => {
+                            let requested = Self::extract_arg(args, "filename");
+                            let verified_ext = derived_name
+                                .rsplit_once('.')
+                                .map_or("png", |(_, ext)| ext)
+                                .to_owned();
+                            let raw_target = if requested.is_empty() {
+                                derived_name
+                            } else {
+                                let base = requested
+                                    .rsplit_once('.')
+                                    .map_or(requested.as_str(), |(s, _)| s);
+                                format!("{base}.{verified_ext}")
+                            };
+                            let sanitized =
+                                Self::sanitize_attachment_filename(&raw_target, &verified_ext);
+                            let filename = Self::dedupe_filename(attachments, sanitized);
+                            let size = bytes.len();
+                            attachments.push(AiAttachmentFile {
+                                filename: filename.clone(),
+                                bytes,
+                            });
+                            *remote_images_count += 1;
+                            format!(
+                                "[attach_image: attached `{filename}` ({size} bytes) to your Discord reply]"
+                            )
+                        }
+                        Err(err) => {
+                            tracing::warn!(%channel_id, %url, ?err, "attach_image failed");
+                            format!(
+                                "[attach_image error for {url}: {err} — pick a direct image URL or run `image_search`]"
+                            )
+                        }
+                    },
+                )
+            }
             "osu_player" => {
                 let Some(osu) = osu else {
                     return Some("[osu_player unavailable]".to_owned());
@@ -630,8 +881,10 @@ impl OllamaClient {
         search_mode: SearchMode,
         osu: Option<&Osu>,
         stream_tx: Option<UnboundedSender<AiStreamEvent>>,
-    ) -> Result<String> {
+    ) -> Result<AiReply> {
         let mut working_messages = messages.to_vec();
+        let mut attachments = Vec::new();
+        let mut remote_images_count = 0usize;
 
         // 1. Pre-fetch direct http/https links unless tools are disabled
         if search_mode != SearchMode::Off {
@@ -677,8 +930,8 @@ impl OllamaClient {
             }
         }
 
-        // 2. Agentic tool loop (up to 3 tool rounds, then forced final answer without tools)
-        const MAX_TOOL_ROUNDS: usize = 3;
+        // 2. Agentic tool loop (up to 5 tool rounds, then forced final answer without tools)
+        const MAX_TOOL_ROUNDS: usize = 5;
         const MAX_TOOLS_PER_ROUND: usize = 3;
         let base_tools = Self::tools_for(search_mode, osu.is_some());
         let mut last_response: Option<OllamaResponse> = None;
@@ -704,11 +957,6 @@ impl OllamaClient {
                 .await?;
             self.record_stats(channel_id, &resp).await;
 
-            if search_mode == SearchMode::Off {
-                last_response = Some(resp);
-                break;
-            }
-
             let mut executed = Vec::new();
             let native_calls = resp.message.tool_calls.as_deref().unwrap_or(&[]);
             for call in native_calls.iter().take(MAX_TOOLS_PER_ROUND) {
@@ -717,7 +965,10 @@ impl OllamaClient {
                         channel_id,
                         call.function.name.as_str(),
                         &call.function.arguments,
+                        search_mode,
                         osu,
+                        &mut attachments,
+                        &mut remote_images_count,
                         stream_tx.as_ref(),
                     )
                     .await
@@ -726,7 +977,7 @@ impl OllamaClient {
                 }
             }
 
-            if executed.len() < MAX_TOOLS_PER_ROUND {
+            if search_mode != SearchMode::Off && executed.len() < MAX_TOOLS_PER_ROUND {
                 let combined_text = format!(
                     "{}\n{}",
                     resp.message.thinking.as_deref().unwrap_or(""),
@@ -746,7 +997,16 @@ impl OllamaClient {
                         }
                     };
                     if let Some(out) = self
-                        .run_single_tool(channel_id, tool_name, &args_val, osu, stream_tx.as_ref())
+                        .run_single_tool(
+                            channel_id,
+                            tool_name,
+                            &args_val,
+                            search_mode,
+                            osu,
+                            &mut attachments,
+                            &mut remote_images_count,
+                            stream_tx.as_ref(),
+                        )
                         .await
                     {
                         executed.push(out);
@@ -777,7 +1037,10 @@ impl OllamaClient {
 
         if let Some(resp) = last_response {
             if !resp.message.content.trim().is_empty() {
-                return Ok(resp.message.content);
+                return Ok(AiReply {
+                    content: resp.message.content,
+                    attachments,
+                });
             }
             if let Some(thinking) = resp
                 .message
@@ -793,7 +1056,7 @@ impl OllamaClient {
             }
         } else {
             working_messages.push(AiMessage::user(
-                "Using only the verified facts from the tool results above, answer the user's question in your normal Discord voice.",
+                "Using only the verified facts and tool results above, answer the user's question in your normal Discord voice.",
             ));
         }
 
@@ -808,7 +1071,10 @@ impl OllamaClient {
             )
             .await?;
         self.record_stats(channel_id, &fallback).await;
-        Ok(fallback.message.content)
+        Ok(AiReply {
+            content: fallback.message.content,
+            attachments,
+        })
     }
 
     async fn record_stats(&self, channel_id: Id<ChannelMarker>, response: &OllamaResponse) {
@@ -1175,5 +1441,30 @@ mod tests {
         let legacy: RuntimeAiConfig = serde_json::from_str(legacy_json).expect("legacy deserialize");
         assert_eq!(legacy.think_depth, AiThinkDepth::High);
         assert_eq!(legacy.num_predict, DEFAULT_NUM_PREDICT);
+    }
+
+    #[test]
+    fn test_tools_for_and_attachment_filename_sanitization() {
+        assert_eq!(OllamaClient::tools_for(SearchMode::Off, false).unwrap().len(), 1);
+        assert_eq!(OllamaClient::tools_for(SearchMode::Auto, false).unwrap().len(), 5);
+        assert_eq!(OllamaClient::tools_for(SearchMode::Auto, true).unwrap().len(), 7);
+        assert_eq!(OllamaClient::tools_for(SearchMode::Force, false).unwrap().len(), 5);
+
+        assert_eq!(
+            OllamaClient::sanitize_attachment_filename("../../etc/passwd", "txt"),
+            "passwd.txt"
+        );
+        assert_eq!(
+            OllamaClient::sanitize_attachment_filename("solver.py", "txt"),
+            "solver.py"
+        );
+        assert_eq!(
+            OllamaClient::sanitize_attachment_filename("evil.exe", "txt"),
+            "evil.exe.txt"
+        );
+        assert_eq!(
+            OllamaClient::sanitize_attachment_filename("", "txt"),
+            "attachment.txt"
+        );
     }
 }

@@ -15,9 +15,29 @@ pub struct SearchResultItem {
 }
 
 #[derive(Deserialize, Debug, Clone, Default)]
+pub struct ImageSearchItem {
+    pub title: String,
+    pub image_url: String,
+    pub source_url: String,
+}
+
+#[derive(Deserialize, Debug, Clone, Default)]
 struct SearxResponse {
     #[serde(default)]
     pub results: Vec<SearchResultItem>,
+}
+
+#[derive(Deserialize, Debug, Clone, Default)]
+struct SearxImageItem {
+    pub title: Option<String>,
+    pub url: Option<String>,
+    pub img_src: Option<String>,
+}
+
+#[derive(Deserialize, Debug, Clone, Default)]
+struct SearxImageResponse {
+    #[serde(default)]
+    pub results: Vec<SearxImageItem>,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -28,6 +48,7 @@ pub enum AiSearchAction {
 
 const MAX_BROWSE_BODY_BYTES: usize = 256 * 1024;
 const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36";
+const WIKIMEDIA_USER_AGENT: &str = "PalentirBot/1.0 (Discord assistant image lookup)";
 
 pub struct WebSearchClient {
     client: Client,
@@ -136,9 +157,13 @@ impl WebSearchClient {
         Ok(results)
     }
 
-    /// Fetch and extract readable plain text from a URL, following up to 3 SSRF-validated redirects
-    /// with DNS-pinned per-request resolution to prevent DNS rebinding TOCTOU.
-    pub async fn browse_url(&self, raw_url: &str, max_chars: usize) -> Result<String> {
+    /// Fetch raw bytes from a URL using up to 3 SSRF-validated redirects and DNS-pinned lookup.
+    async fn fetch_ssrf_safe_bytes(
+        &self,
+        raw_url: &str,
+        accept: &str,
+        max_bytes: usize,
+    ) -> Result<(reqwest::Url, Option<String>, Vec<u8>)> {
         let mut current = validate_and_resolve_url(raw_url).await?;
 
         for _ in 0..4 {
@@ -146,13 +171,10 @@ impl WebSearchClient {
             let mut res = client
                 .get(current.url.clone())
                 .header(reqwest::header::USER_AGENT, USER_AGENT)
-                .header(
-                    reqwest::header::ACCEPT,
-                    "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.5",
-                )
+                .header(reqwest::header::ACCEPT, accept)
                 .send()
                 .await
-                .context("failed to fetch webpage")?;
+                .context("failed to fetch remote URL")?;
 
             if res.status().is_redirection() {
                 if let Some(loc) = res.headers().get(reqwest::header::LOCATION) {
@@ -169,30 +191,438 @@ impl WebSearchClient {
             }
 
             if !res.status().is_success() {
-                eyre::bail!("webpage returned HTTP {}", res.status());
+                eyre::bail!("remote server returned HTTP {}", res.status());
             }
+
+            if let Some(len) = res.content_length() {
+                if len as usize > max_bytes {
+                    eyre::bail!("remote file is too large ({len} bytes > {max_bytes} byte limit)");
+                }
+            }
+
+            let content_type = res
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_ascii_lowercase());
 
             let mut buf = Vec::new();
-            while let Some(chunk) = res.chunk().await.context("failed to read webpage chunk")? {
-                let remaining = MAX_BROWSE_BODY_BYTES.saturating_sub(buf.len());
-                if remaining == 0 {
+            while let Some(chunk) = res.chunk().await.context("failed to read response chunk")? {
+                if buf.len().saturating_add(chunk.len()) > max_bytes {
+                    if accept.starts_with("image/") {
+                        eyre::bail!("image exceeds {max_bytes} byte limit");
+                    }
+                    let remaining = max_bytes.saturating_sub(buf.len());
+                    buf.extend_from_slice(&chunk[..remaining]);
                     break;
                 }
-                let take = chunk.len().min(remaining);
-                buf.extend_from_slice(&chunk[..take]);
-                if buf.len() >= MAX_BROWSE_BODY_BYTES {
-                    break;
-                }
+                buf.extend_from_slice(&chunk);
             }
 
-            let html = String::from_utf8_lossy(&buf);
-            let extracted = extract_article_text(&html);
-            let truncated: String = extracted.chars().take(max_chars).collect();
-            return Ok(truncated);
+            return Ok((current.url, content_type, buf));
         }
 
         eyre::bail!("too many redirects")
     }
+
+    /// Fetch and extract readable plain text (plus notable page images) from a URL safely.
+    pub async fn browse_url(&self, raw_url: &str, max_chars: usize) -> Result<String> {
+        let (final_url, _, buf) = self
+            .fetch_ssrf_safe_bytes(
+                raw_url,
+                "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.5",
+                MAX_BROWSE_BODY_BYTES,
+            )
+            .await?;
+
+        let html = String::from_utf8_lossy(&buf);
+        let extracted = extract_article_text(&html);
+        let mut out: String = extracted.chars().take(max_chars).collect();
+        let page_images = extract_page_image_urls(&html, &final_url);
+        if !page_images.is_empty() {
+            out.push_str("\n\n[Page images found:\n");
+            for img in page_images {
+                out.push_str("- ");
+                out.push_str(&img);
+                out.push('\n');
+            }
+            out.push(']');
+        }
+        Ok(out)
+    }
+
+    /// Download a remote PNG/JPEG/GIF/WebP image with SSRF protection and magic-byte verification.
+    pub async fn download_image(&self, raw_url: &str, max_bytes: usize) -> Result<(String, Vec<u8>)> {
+        let (final_url, content_type, bytes) = self
+            .fetch_ssrf_safe_bytes(
+                raw_url,
+                "image/png,image/jpeg,image/webp,image/gif,image/*;q=0.8,*/*;q=0.1",
+                max_bytes,
+            )
+            .await?;
+
+        if let Some(ref ct) = content_type {
+            let main_type = ct.split(';').next().unwrap_or("").trim();
+            if main_type.starts_with("text/")
+                || main_type.contains("json")
+                || main_type.contains("svg")
+            {
+                eyre::bail!("URL returned `{main_type}` instead of a raster image");
+            }
+        }
+
+        let Some(ext) = detect_image_extension(&bytes) else {
+            eyre::bail!("URL bytes are not a valid PNG, JPEG, GIF, or WebP image");
+        };
+
+        let filename = derive_image_filename(&final_url, ext);
+        Ok((filename, bytes))
+    }
+
+    /// Search the web for relevant images using SearXNG (if configured), Bing Images, and Wikimedia Commons.
+    pub async fn search_images(&self, query: &str) -> Result<Vec<ImageSearchItem>> {
+        let clean_query = query.trim();
+        if clean_query.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        if let Some(base_url) = self.searxng_url.as_deref() {
+            let url = format!("{base_url}/search");
+            if let Ok(resp) = self
+                .client
+                .get(&url)
+                .query(&[
+                    ("q", clean_query),
+                    ("categories", "images"),
+                    ("format", "json"),
+                    ("safesearch", "1"),
+                ])
+                .send()
+                .await
+            {
+                if resp.status().is_success() {
+                    if let Ok(parsed) = resp.json::<SearxImageResponse>().await {
+                        let items: Vec<ImageSearchItem> = parsed
+                            .results
+                            .into_iter()
+                            .filter_map(|r| {
+                                let img = r.img_src.filter(|u| is_http_url(u))?;
+                                Some(ImageSearchItem {
+                                    title: r.title.unwrap_or_else(|| "Image".to_owned()),
+                                    image_url: img,
+                                    source_url: r.url.unwrap_or_default(),
+                                })
+                            })
+                            .take(6)
+                            .collect();
+                        if !items.is_empty() {
+                            return Ok(items);
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Ok(bing) = self.search_bing_images(clean_query).await {
+            if !bing.is_empty() {
+                return Ok(bing);
+            }
+        }
+
+        self.search_wikimedia_images(clean_query).await
+    }
+
+    async fn search_bing_images(&self, query: &str) -> Result<Vec<ImageSearchItem>> {
+        let res = self
+            .client
+            .get("https://www.bing.com/images/search")
+            .query(&[("q", query), ("form", "HDRSC3"), ("adlt", "moderate")])
+            .header(reqwest::header::USER_AGENT, USER_AGENT)
+            .header(
+                reqwest::header::ACCEPT,
+                "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            )
+            .send()
+            .await
+            .context("failed to query Bing Images")?;
+
+        if !res.status().is_success() {
+            eyre::bail!("Bing Images returned HTTP {}", res.status());
+        }
+
+        let body = res.text().await.context("failed to read Bing Images HTML")?;
+        Ok(parse_bing_image_results(&body))
+    }
+
+    async fn search_wikimedia_images(&self, query: &str) -> Result<Vec<ImageSearchItem>> {
+        #[derive(Deserialize, Default)]
+        struct WikiResp {
+            query: Option<WikiQuery>,
+        }
+        #[derive(Deserialize, Default)]
+        struct WikiQuery {
+            #[serde(default)]
+            pages: std::collections::HashMap<String, WikiPage>,
+        }
+        #[derive(Deserialize, Default)]
+        struct WikiPage {
+            title: Option<String>,
+            #[serde(default)]
+            imageinfo: Vec<WikiImageInfo>,
+        }
+        #[derive(Deserialize, Default)]
+        struct WikiImageInfo {
+            url: Option<String>,
+            thumburl: Option<String>,
+            mime: Option<String>,
+        }
+
+        let res = self
+            .client
+            .get("https://commons.wikimedia.org/w/api.php")
+            .query(&[
+                ("action", "query"),
+                ("generator", "search"),
+                ("gsrsearch", query),
+                ("gsrnamespace", "6"),
+                ("gsrlimit", "6"),
+                ("prop", "imageinfo"),
+                ("iiprop", "url|mime|size"),
+                ("iiurlwidth", "1200"),
+                ("format", "json"),
+            ])
+            .header(reqwest::header::USER_AGENT, WIKIMEDIA_USER_AGENT)
+            .send()
+            .await
+            .context("failed to query Wikimedia Commons")?;
+
+        if !res.status().is_success() {
+            eyre::bail!("Wikimedia Commons returned HTTP {}", res.status());
+        }
+
+        let parsed: WikiResp = res
+            .json()
+            .await
+            .context("failed to parse Wikimedia Commons response")?;
+
+        let mut items = Vec::new();
+        if let Some(q) = parsed.query {
+            for page in q.pages.into_values() {
+                let Some(info) = page.imageinfo.into_iter().next() else {
+                    continue;
+                };
+                let mime = info.mime.as_deref().unwrap_or("");
+                if !matches!(mime, "image/png" | "image/jpeg" | "image/webp" | "image/gif") {
+                    continue;
+                }
+                let Some(img_url) = info.thumburl.or(info.url).filter(|u| is_http_url(u)) else {
+                    continue;
+                };
+                let title = page
+                    .title
+                    .unwrap_or_else(|| "Wikimedia image".to_owned())
+                    .trim_start_matches("File:")
+                    .to_owned();
+                items.push(ImageSearchItem {
+                    title,
+                    image_url: img_url,
+                    source_url: "https://commons.wikimedia.org".to_owned(),
+                });
+                if items.len() >= 6 {
+                    break;
+                }
+            }
+        }
+        Ok(items)
+    }
+}
+
+fn is_http_url(raw: &str) -> bool {
+    raw.starts_with("https://") || raw.starts_with("http://")
+}
+
+pub fn detect_image_extension(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]) {
+        Some("png")
+    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some("jpg")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some("gif")
+    } else if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        Some("webp")
+    } else {
+        None
+    }
+}
+
+pub fn derive_image_filename(url: &reqwest::Url, ext: &str) -> String {
+    let raw_stem = url
+        .path_segments()
+        .and_then(|mut s| s.rfind(|seg| !seg.is_empty()))
+        .unwrap_or("image");
+    let stem = raw_stem.rsplit_once('.').map_or(raw_stem, |(base, _)| base);
+    let mut clean: String = stem
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+        .take(40)
+        .collect();
+    if clean.is_empty() {
+        clean = "image".to_owned();
+    }
+    format!("{clean}.{ext}")
+}
+
+pub fn format_image_search_results(query: &str, results: &[ImageSearchItem], max_items: usize) -> String {
+    if results.is_empty() {
+        return format!("Image search `{query}` returned no results.\n");
+    }
+    let mut out = format!("Image search results for `{query}`:\n");
+    for (idx, item) in results.iter().take(max_items).enumerate() {
+        let source_note = if item.source_url.is_empty() {
+            String::new()
+        } else {
+            format!(" (source: {})", item.source_url)
+        };
+        out.push_str(&format!(
+            "{}. {} — {}{}\n",
+            idx + 1,
+            item.title,
+            item.image_url,
+            source_note
+        ));
+    }
+    out.push_str("Call `attach_image` with a direct image URL above to attach a picture to your Discord message.\n");
+    out
+}
+
+fn take_bounded_utf8(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+pub fn parse_bing_image_results(html: &str) -> Vec<ImageSearchItem> {
+    let mut items = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut remaining = html;
+
+    while let Some(pos) = remaining.find("murl&quot;:&quot;") {
+        let after = &remaining[pos + "murl&quot;:&quot;".len()..];
+        let Some(end) = after.find("&quot;") else {
+            break;
+        };
+        let raw_url = decode_html_entities(&after[..end]);
+        let window = take_bounded_utf8(&remaining[pos..], 600);
+        let title = window
+            .split("&quot;t&quot;:&quot;")
+            .nth(1)
+            .and_then(|s| s.split("&quot;").next())
+            .map(decode_html_entities)
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "Image".to_owned());
+
+        if is_http_url(&raw_url)
+            && !raw_url.to_ascii_lowercase().contains(".svg")
+            && seen.insert(raw_url.clone())
+        {
+            items.push(ImageSearchItem {
+                title,
+                image_url: raw_url,
+                source_url: String::new(),
+            });
+            if items.len() >= 6 {
+                break;
+            }
+        }
+        remaining = &after[end..];
+    }
+
+    items
+}
+
+pub fn extract_page_image_urls(html: &str, base_url: &reqwest::Url) -> Vec<String> {
+    let mut urls = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let lower = html.to_ascii_lowercase();
+
+    for marker in ["og:image", "twitter:image"] {
+        if let Some(pos) = lower.find(marker) {
+            let window = take_bounded_utf8(&html[pos..], 400);
+            let window_lower = take_bounded_utf8(&lower[pos..], 400);
+            if let Some(cpos) = window_lower.find("content=") {
+                if let Some(extracted) = extract_quoted_attr(&window[cpos + "content=".len()..]) {
+                    if let Some(resolved) = normalize_candidate_image_url(&extracted, base_url) {
+                        if seen.insert(resolved.clone()) {
+                            urls.push(resolved);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let mut offset = 0usize;
+    while urls.len() < 3 {
+        let Some(img_rel) = lower[offset..].find("<img") else {
+            break;
+        };
+        let tag_start = offset + img_rel;
+        let Some(tag_end_rel) = html[tag_start..].find('>') else {
+            break;
+        };
+        let tag = &html[tag_start..tag_start + tag_end_rel + 1];
+        let tag_lower = &lower[tag_start..tag_start + tag_end_rel + 1];
+        if let Some(src_pos) = tag_lower.find("src=") {
+            if let Some(raw_src) = extract_quoted_attr(&tag[src_pos + 4..]) {
+                if let Some(resolved) = normalize_candidate_image_url(&raw_src, base_url) {
+                    if seen.insert(resolved.clone()) {
+                        urls.push(resolved);
+                    }
+                }
+            }
+        }
+        offset = tag_start + tag_end_rel + 1;
+    }
+
+    urls.truncate(3);
+    urls
+}
+
+fn extract_quoted_attr(after_eq: &str) -> Option<String> {
+    let trimmed = after_eq.trim_start();
+    let quote = trimmed.chars().next()?;
+    if quote != '"' && quote != '\'' {
+        return None;
+    }
+    let inner = &trimmed[quote.len_utf8()..];
+    let end = inner.find(quote)?;
+    Some(decode_html_entities(&inner[..end]))
+}
+
+fn normalize_candidate_image_url(raw: &str, base_url: &reqwest::Url) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.starts_with("data:") {
+        return None;
+    }
+    let resolved = base_url.join(trimmed).ok()?;
+    if resolved.scheme() != "http" && resolved.scheme() != "https" {
+        return None;
+    }
+    let lower = resolved.as_str().to_ascii_lowercase();
+    if lower.contains(".svg")
+        || lower.contains("favicon")
+        || lower.contains("sprite")
+        || lower.contains("1x1")
+        || lower.contains("pixel.")
+    {
+        return None;
+    }
+    Some(resolved.into())
 }
 
 fn is_duckduckgo_challenge_html(body: &str) -> bool {
@@ -637,5 +1067,37 @@ mod tests {
     fn test_detects_ddg_challenge() {
         assert!(is_duckduckgo_challenge_html("<form id=\"challenge-form\">Please verify</form>"));
         assert!(!is_duckduckgo_challenge_html("<div class=\"result__title\">Normal result</div>"));
+    }
+
+    #[test]
+    fn test_image_magic_bytes_and_filename_derivation() {
+        assert_eq!(detect_image_extension(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]), Some("png"));
+        assert_eq!(detect_image_extension(&[0xFF, 0xD8, 0xFF, 0xE0]), Some("jpg"));
+        assert_eq!(detect_image_extension(b"GIF89a..."), Some("gif"));
+        assert_eq!(detect_image_extension(b"RIFF1234WEBP"), Some("webp"));
+        assert_eq!(detect_image_extension(b"<html><body>404</body></html>"), None);
+
+        let url = reqwest::Url::parse("https://example.com/photos/cool_cat-2026.jpeg?size=lg").unwrap();
+        assert_eq!(derive_image_filename(&url, "jpg"), "cool_cat-2026.jpg");
+    }
+
+    #[test]
+    fn test_extract_bing_and_page_images() {
+        let bing_html = r#"<a m="{"murl":"x"}" mad="murl&quot;:&quot;https://example.com/a.jpg&quot;,&quot;t&quot;:&quot;Funny Cat&quot;">"#;
+        let bing = parse_bing_image_results(bing_html);
+        assert_eq!(bing.len(), 1);
+        assert_eq!(bing[0].image_url, "https://example.com/a.jpg");
+        assert_eq!(bing[0].title, "Funny Cat");
+
+        let base = reqwest::Url::parse("https://example.com/post/1").unwrap();
+        let page = r#"<html><head><meta property="og:image" content="/hero.png"></head><body><img src="data:image/png;base64,abc"><img src="/icon.svg"><img src="https://cdn.example.com/chart.webp"></body></html>"#;
+        let imgs = extract_page_image_urls(page, &base);
+        assert_eq!(
+            imgs,
+            vec![
+                "https://example.com/hero.png".to_owned(),
+                "https://cdn.example.com/chart.webp".to_owned(),
+            ]
+        );
     }
 }

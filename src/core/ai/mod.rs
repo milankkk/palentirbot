@@ -1,9 +1,12 @@
-use std::collections::HashMap;
+use std::collections::{hash_map::Entry, HashMap, VecDeque};
 
 use eyre::{Context as _, Result};
 use serde::Serialize;
 use tokio::sync::{Mutex, RwLock};
-use twilight_model::id::{marker::ChannelMarker, Id};
+use twilight_model::id::{
+    marker::{ChannelMarker, MessageMarker},
+    Id,
+};
 
 mod ollama;
 pub mod osu_tools;
@@ -11,8 +14,8 @@ mod queue;
 pub mod search;
 
 pub use ollama::{
-    normalize_num_predict, AiPersonaMode, AiStreamEvent, AiThinkDepth, LastGenerationStats,
-    OllamaClient, RuntimeAiConfig,
+    normalize_num_predict, AiAttachmentFile, AiPersonaMode, AiReply, AiStreamEvent, AiThinkDepth,
+    LastGenerationStats, OllamaClient, RuntimeAiConfig,
 };
 pub use osu_tools::text_mentions_osu;
 pub use queue::{AiQueue, DEFAULT_MAX_AI_QUEUE_SIZE};
@@ -140,6 +143,16 @@ pub struct AiClient {
     /// "clearing" the context for that channel.
     context_cutoffs: RwLock<HashMap<Id<ChannelMarker>, i64>>,
     cutoffs_save_lock: Mutex<()>,
+    /// Bounded FIFO cache mapping `/ask` reply message IDs to their initiating
+    /// user prompt (Discord does not store slash command text in channel history).
+    slash_turns: RwLock<SlashTurnHistory>,
+}
+
+const MAX_SLASH_TURNS: usize = 256;
+
+struct SlashTurnHistory {
+    prompts: HashMap<Id<MessageMarker>, String>,
+    order: VecDeque<Id<MessageMarker>>,
 }
 
 impl AiClient {
@@ -166,6 +179,10 @@ impl AiClient {
             cached_prompt: RwLock::new(prompt),
             context_cutoffs: RwLock::new(cutoffs),
             cutoffs_save_lock: Mutex::new(()),
+            slash_turns: RwLock::new(SlashTurnHistory {
+                prompts: HashMap::new(),
+                order: VecDeque::new(),
+            }),
         }
     }
 
@@ -186,7 +203,7 @@ impl AiClient {
         search_mode: SearchMode,
         osu: Option<&rosu_v2::Osu>,
         stream_tx: Option<tokio::sync::mpsc::UnboundedSender<AiStreamEvent>>,
-    ) -> Result<String> {
+    ) -> Result<AiReply> {
         self.ollama
             .ask_with_stream(channel_id, messages, search_mode, osu, stream_tx)
             .await
@@ -245,6 +262,34 @@ impl AiClient {
         let new_prompt = Self::load_prompt_from_disk().await?;
         *self.cached_prompt.write().await = new_prompt;
         Ok(())
+    }
+
+    /// Record the initiating user prompt for a public `/ask` reply message so
+    /// subsequent requests in the channel see both sides of the exchange.
+    pub async fn record_slash_turn(&self, reply_msg_id: Id<MessageMarker>, user_prompt: String) {
+        if user_prompt.trim().is_empty() {
+            return;
+        }
+        let mut guard = self.slash_turns.write().await;
+        match guard.prompts.entry(reply_msg_id) {
+            Entry::Vacant(slot) => {
+                slot.insert(user_prompt);
+                guard.order.push_back(reply_msg_id);
+                while guard.order.len() > MAX_SLASH_TURNS {
+                    if let Some(oldest) = guard.order.pop_front() {
+                        guard.prompts.remove(&oldest);
+                    }
+                }
+            }
+            Entry::Occupied(mut slot) => {
+                slot.insert(user_prompt);
+            }
+        }
+    }
+
+    /// Snapshot recorded `/ask` user prompts keyed by bot reply message ID.
+    pub async fn snapshot_slash_turns(&self) -> HashMap<Id<MessageMarker>, String> {
+        self.slash_turns.read().await.prompts.clone()
     }
 
     /// Mark a cutoff for a channel — messages older than or equal to `now` will be ignored.

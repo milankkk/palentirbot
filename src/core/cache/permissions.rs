@@ -32,7 +32,15 @@ impl Cache {
             Err(_) => return (Permissions::empty(), RolesLookup::NotFound),
         };
 
-        let mut permissions = Permissions::empty();
+        // Discord excludes the @everyone role (id == guild_id) from member.roles,
+        // so seed base permissions from it before merging explicit roles.
+        let mut permissions = self
+            .role(guild.cast(), |r| r.permissions)
+            .unwrap_or_else(|_| Permissions::empty());
+
+        if permissions.contains(Permissions::ADMINISTRATOR) {
+            return (Permissions::all(), RolesLookup::Found(member_roles));
+        }
 
         for &role in &member_roles {
             if let Ok(role_permissions) = self.role(role, |r| r.permissions) {
@@ -64,9 +72,18 @@ impl Cache {
             return Permissions::all();
         }
 
-        if let Ok(Some(permission_overwrites)) =
-            self.channel(channel, |c| c.permission_overwrites.clone())
+        let permission_overwrites = match self
+            .channel(channel, |c| (c.permission_overwrites.clone(), c.parent_id))
         {
+            Ok((Some(overwrites), _)) => Some(overwrites),
+            Ok((None, Some(parent_id))) => self
+                .channel(parent_id, |c| c.permission_overwrites.clone())
+                .ok()
+                .flatten(),
+            _ => None,
+        };
+
+        if let Some(permission_overwrites) = permission_overwrites {
             let member_roles = match roles {
                 RolesLookup::Found(roles) => Some(roles),
                 RolesLookup::NotChecked => self.member(guild, user, |m| m.roles().to_owned()).ok(),

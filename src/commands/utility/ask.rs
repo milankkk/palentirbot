@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use command_macros::SlashCommand;
 use eyre::Result;
@@ -19,8 +19,8 @@ use twilight_model::{
 use crate::{
     core::{
         ai::{
-            base64_encode, sanitize_llm_text, text_mentions_osu, AiMessage, AiPersonaMode,
-            AiStreamEvent, SearchMode,
+            base64_encode, sanitize_llm_text, text_mentions_osu, AiAttachmentFile, AiMessage,
+            AiPersonaMode, AiStreamEvent, SearchMode,
         },
         Context,
     },
@@ -76,6 +76,11 @@ impl From<SlashSearchMode> for SearchMode {
             SlashSearchMode::Off => Self::Off,
         }
     }
+}
+
+pub struct AiQuestionOutput {
+    pub chunks: Vec<String>,
+    pub attachments: Vec<AiAttachmentFile>,
 }
 
 pub struct AiQuestionOptions<'a> {
@@ -378,8 +383,8 @@ async fn slash_ask(ctx: Arc<Context>, mut command: InteractionCommand) -> Result
 
     let _ = updater_handle.await;
 
-    let chunks = match res {
-        Ok(chunks) => chunks,
+    let output = match res {
+        Ok(output) => output,
         Err(err) => {
             tracing::error!(
                 ?err,
@@ -396,11 +401,31 @@ async fn slash_ask(ctx: Arc<Context>, mut command: InteractionCommand) -> Result
         }
     };
 
-    let mut iter = chunks.into_iter();
+    let attachment_pairs: Vec<(String, Vec<u8>)> = output
+        .attachments
+        .into_iter()
+        .map(|a| (a.filename, a.bytes))
+        .collect();
+    let mut iter = output.chunks.into_iter();
     if let Some(first) = iter.next() {
-        command
-            .update(&ctx, &MessageBuilder::new().content(first))
-            .await?;
+        let mut builder = MessageBuilder::new().content(first);
+        if !attachment_pairs.is_empty() {
+            builder = builder.attachments(attachment_pairs);
+        }
+        let sent_msg = command.update(&ctx, &builder).await?;
+        if !is_ephemeral {
+            let prompt_text = truncate_history_message(question.trim());
+            let author_name = sanitize_llm_text(&user.name);
+            let clean_q = sanitize_llm_text(&prompt_text);
+            if !clean_q.is_empty() {
+                ctx.ai()
+                    .record_slash_turn(
+                        sent_msg.id,
+                        format!("{author_name} (Discord ID {}): {clean_q}", user.id),
+                    )
+                    .await;
+            }
+        }
     }
     let interaction = ctx.interaction();
     for chunk in iter {
@@ -560,21 +585,32 @@ pub async fn handle_prefix_ask(
     }
 
     match result {
-        Ok(chunks) => {
-            let mut iter = chunks.into_iter();
+        Ok(output) => {
+            let attachment_pairs: Vec<(String, Vec<u8>)> = output
+                .attachments
+                .into_iter()
+                .map(|a| (a.filename, a.bytes))
+                .collect();
+            let mut iter = output.chunks.into_iter();
             if let Some(first) = iter.next() {
+                let mut builder = MessageBuilder::new().content(first);
+                if !attachment_pairs.is_empty() {
+                    builder = builder.attachments(attachment_pairs);
+                }
                 let updated = if let Some(ref ph) = placeholder {
-                    ph.update(&ctx, &MessageBuilder::new().content(first.clone()))
-                        .await
-                        .is_ok()
+                    match ph.update(&ctx, &builder).await {
+                        Ok(_) => true,
+                        Err(err) => {
+                            tracing::debug!(?err, "placeholder update failed; sending fresh reply");
+                            false
+                        }
+                    }
                 } else {
                     false
                 };
                 if !updated {
-                    let _ = msg
-                        .channel_id
-                        .create_message(&ctx, &MessageBuilder::new().content(first).reply(msg.id))
-                        .await;
+                    builder = builder.reply(msg.id);
+                    let _ = msg.channel_id.create_message(&ctx, &builder).await;
                 }
             }
             for chunk in iter {
@@ -609,7 +645,9 @@ pub(crate) fn bot_has_channel_perms(
     let Ok(Some(guild_id)) = ctx.cache.channel(channel_id, |c| c.guild_id) else {
         return true;
     };
-    if ctx.cache.member(guild_id, bot_id, |_| ()).is_err() {
+    if ctx.cache.member(guild_id, bot_id, |_| ()).is_err()
+        || ctx.cache.role(guild_id.cast(), |_| ()).is_err()
+    {
         return true;
     }
     ctx.cache
@@ -746,7 +784,7 @@ pub async fn execute_ai_question_with_options(
     username: &str,
     question: &str,
     opts: AiQuestionOptions<'_>,
-) -> Result<Vec<String>> {
+) -> Result<AiQuestionOutput> {
     let bot_id = ctx
         .cache
         .current_user(|user| user.id)
@@ -788,91 +826,97 @@ pub async fn execute_ai_question_with_options(
         );
     }
 
-    if runtime_cfg.think_enabled {
-        system_prompt.push_str("\n\n");
-        system_prompt.push_str(runtime_cfg.think_depth.prompt_instruction());
+    system_prompt.push_str(
+        "\n\nFILE ATTACHMENTS: When writing scripts, multi-line code, configs, or long structured text, call `attach_file` (`filename`, `content`) to attach a clean downloadable file alongside a short Discord summary instead of pasting huge code walls.",
+    );
+    if opts.search_mode != SearchMode::Off {
+        system_prompt.push_str(
+            "\nVISUAL CONTEXT (IMAGES): If a picture, diagram, meme, or reference image would genuinely add helpful context or the user asks for pictures, call `image_search` (or pick a verified image URL returned by `browse_url`) and call `attach_image` so the image embeds directly with your message. NEVER fabricate image URLs.",
+        );
     }
 
     let current_user_msg = format!(
         "{clean_username} (Discord ID {user_id}): {clean_question}"
     );
 
-    let history = if bot_has_channel_perms(
-        ctx,
-        channel_id,
-        bot_id,
-        Permissions::VIEW_CHANNEL | Permissions::READ_MESSAGE_HISTORY,
-    ) {
-        if let Some(ref tx) = opts.stream_tx {
-            let _ = tx.send(AiStreamEvent::Status("📚 Reading channel context...".into()));
+    if let Some(ref tx) = opts.stream_tx {
+        let _ = tx.send(AiStreamEvent::Status("📚 Reading channel context...".into()));
+    }
+    let history = match tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        get_history(ctx, channel_id, opts.exclude_message_id),
+    )
+    .await
+    {
+        Ok(Ok(history)) => history,
+        Ok(Err(err)) => {
+            tracing::debug!(?err, %channel_id, "failed to fetch channel history for AI; continuing without it");
+            Vec::new()
         }
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            get_history(ctx, channel_id, opts.exclude_message_id),
-        )
-        .await
-        {
-            Ok(Ok(history)) => history,
-            Ok(Err(err)) => {
-                tracing::debug!(?err, %channel_id, "failed to fetch channel history for AI; continuing without it");
-                Vec::new()
-            }
-            Err(_) => {
-                tracing::warn!(%channel_id, "timed out fetching channel history for AI; continuing without it");
-                Vec::new()
-            }
+        Err(_) => {
+            tracing::warn!(%channel_id, "timed out fetching channel history for AI; continuing without it");
+            Vec::new()
         }
-    } else {
-        tracing::debug!(%channel_id, "skipping history fetch: bot lacks cached READ_MESSAGE_HISTORY/VIEW_CHANNEL");
-        Vec::new()
     };
 
-    let mut history_messages = if let Some(replied) = opts.referenced_msg {
-        if replied.author.id == bot_id && is_conversational_ai_message(replied) {
-            let ai_content = sanitize_llm_text(&clean_ai_response(&truncate_history_message(&replied.content)));
+    let slash_turns = ctx.ai().snapshot_slash_turns().await;
 
-            let history_before_ai = if let Some(idx) = history.iter().position(|m| m.id == replied.id) {
-                history[..idx].to_vec()
-            } else {
-                history.into_iter().filter(|m| m.id != replied.id).collect()
-            };
+    let mut history_messages = if let Some(replied) = opts
+        .referenced_msg
+        .filter(|r| r.author.id == bot_id && is_conversational_ai_message(r))
+    {
+        let ai_content = sanitize_llm_text(&clean_ai_response(&truncate_history_message(&replied.content)));
 
-            let history_slice = if history_before_ai.len() > 8 {
-                history_before_ai[history_before_ai.len() - 8..].to_vec()
-            } else {
-                history_before_ai
-            };
+        let history_before_ai = if let Some(idx) = history.iter().position(|m| m.id == replied.id) {
+            history[..idx].to_vec()
+        } else {
+            history.into_iter().filter(|m| m.id != replied.id).collect()
+        };
 
-            let mut msgs = convert_history(history_slice, bot_id, guild_prefix.as_deref());
+        let history_slice = if history_before_ai.len() > 8 {
+            history_before_ai[history_before_ai.len() - 8..].to_vec()
+        } else {
+            history_before_ai
+        };
 
-            if !ai_content.is_empty() {
-                if let Some(last) = msgs.last_mut() {
-                    if last.role == "assistant" {
-                        *last = AiMessage::assistant(ai_content);
-                    } else {
-                        msgs.push(AiMessage::assistant(ai_content));
-                    }
+        let mut msgs = convert_history(
+            history_slice,
+            bot_id,
+            guild_prefix.as_deref(),
+            &slash_turns,
+        );
+
+        if let Some(slash_prompt) = slash_turns.get(&replied.id) {
+            push_coalesced_message(&mut msgs, AiMessage::user(slash_prompt.clone()));
+        }
+
+        if !ai_content.is_empty() {
+            if let Some(last) = msgs.last_mut() {
+                if last.role == "assistant" {
+                    *last = AiMessage::assistant(ai_content);
                 } else {
                     msgs.push(AiMessage::assistant(ai_content));
                 }
+            } else {
+                msgs.push(AiMessage::assistant(ai_content));
             }
-
-            system_prompt.push_str(
-                "\n\nCONVERSATION CONTEXT: The user is directly replying to your previous statement above. Focus your response specifically on addressing what they said in direct relation to your statement. Do NOT repeat or regurgitate what you already said—simply answer their reply directly."
-            );
-            msgs
-        } else {
-            system_prompt.push_str(
-                "\n\nRecent messages from this specific Discord chat are provided for conversational context. Answer the current question directly. If the latest question introduces a new topic, focus entirely on the new topic—do NOT repeat previous answers or equations from earlier in the chat!"
-            );
-            convert_history(history, bot_id, guild_prefix.as_deref())
         }
+
+        system_prompt.push_str(
+            "\n\nCONVERSATION CONTEXT: The user is directly replying to your previous statement above. Focus your response specifically on addressing what they said in direct relation to your statement. Do NOT repeat or regurgitate what you already said—simply answer their reply directly."
+        );
+        msgs
     } else {
         system_prompt.push_str(
             "\n\nRecent messages from this specific Discord chat are provided for conversational context. Answer the current question directly. If the latest question introduces a new topic, focus entirely on the new topic—do NOT repeat previous answers or equations from earlier in the chat!"
         );
-        convert_history(history, bot_id, guild_prefix.as_deref())
+        convert_history(history, bot_id, guild_prefix.as_deref(), &slash_turns)
     };
+
+    if runtime_cfg.think_enabled {
+        system_prompt.push_str("\n\n");
+        system_prompt.push_str(runtime_cfg.think_depth.prompt_instruction());
+    }
 
     trim_history_to_budget(
         &mut history_messages,
@@ -887,7 +931,7 @@ pub async fn execute_ai_question_with_options(
     messages.extend(history_messages);
     push_or_coalesce_user_message(&mut messages, current_user_msg, opts.images);
 
-    let answer = ctx
+    let reply = ctx
         .ai()
         .ask_with_stream(
             channel_id,
@@ -898,12 +942,19 @@ pub async fn execute_ai_question_with_options(
         )
         .await?;
 
-    let mut answer = clean_ai_response(&answer);
+    let mut answer = clean_ai_response(&reply.content);
     if answer.trim().is_empty() {
-        answer = "*(blinks blankly... no thoughts head empty)*".to_owned();
+        answer = if reply.attachments.is_empty() {
+            "*(blinks blankly... no thoughts head empty)*".to_owned()
+        } else {
+            "📎 Attached:".to_owned()
+        };
     }
 
-    Ok(split_discord_response(&answer, DISCORD_RESPONSE_CHAR_LIMIT))
+    Ok(AiQuestionOutput {
+        chunks: split_discord_response(&answer, DISCORD_RESPONSE_CHAR_LIMIT),
+        attachments: reply.attachments,
+    })
 }
 
 /// Retrieve the previous Discord messages for the AI's conversation context.
@@ -995,7 +1046,10 @@ pub(crate) fn is_transient_status(content: &str) -> bool {
         "⚡ Writing",
         "⚡ Generating",
         "🖼️ Thinking",
+        "🖼️ Searching",
+        "🖼️ Fetching",
         "🖼️ Downloading",
+        "📎 Creating",
         "✍️ Thinking",
         "⚠️ ",
         "❌ ",
@@ -1065,10 +1119,22 @@ pub(crate) fn is_non_ai_command(content: &str) -> bool {
     is_non_ai_command_with_prefix(content, None)
 }
 
+fn push_coalesced_message(messages: &mut Vec<AiMessage>, msg: AiMessage) {
+    if let Some(last) = messages.last_mut() {
+        if last.role == msg.role {
+            last.content.push('\n');
+            last.content.push_str(&msg.content);
+            return;
+        }
+    }
+    messages.push(msg);
+}
+
 fn convert_history(
     history: Vec<Message>,
     bot_id: Id<UserMarker>,
     guild_prefix: Option<&str>,
+    slash_turns: &HashMap<Id<MessageMarker>, String>,
 ) -> Vec<AiMessage> {
     let mut raw_messages: Vec<AiMessage> = Vec::with_capacity(history.len());
 
@@ -1084,6 +1150,9 @@ fn convert_history(
             }
             let cleaned = clean_ai_response(&content);
             if !cleaned.is_empty() {
+                if let Some(slash_prompt) = slash_turns.get(&message.id) {
+                    raw_messages.push(AiMessage::user(slash_prompt.clone()));
+                }
                 raw_messages.push(AiMessage::assistant(cleaned));
             }
         } else if message.author.bot {
@@ -1109,14 +1178,7 @@ fn convert_history(
 
     let mut coalesced: Vec<AiMessage> = Vec::with_capacity(raw_messages.len());
     for msg in raw_messages {
-        if let Some(last) = coalesced.last_mut() {
-            if last.role == msg.role {
-                last.content.push('\n');
-                last.content.push_str(&msg.content);
-                continue;
-            }
-        }
-        coalesced.push(msg);
+        push_coalesced_message(&mut coalesced, msg);
     }
 
     coalesced
@@ -1628,5 +1690,66 @@ mod tests {
             "Visible answer ▌"
         );
         assert_eq!(format_streaming_preview("<think>still thinking..."), "");
+    }
+
+    #[test]
+    fn test_convert_history_with_slash_turns() {
+        let make_msg = |id: u64, author_id: u64, author_name: &str, bot: bool, content: &str| {
+            serde_json::from_value::<Message>(serde_json::json!({
+                "id": id.to_string(),
+                "channel_id": "10",
+                "author": {
+                    "id": author_id.to_string(),
+                    "username": author_name,
+                    "discriminator": "0000",
+                    "bot": bot
+                },
+                "content": content,
+                "timestamp": twilight_model::util::Timestamp::from_secs(1_767_225_600)
+                    .expect("valid timestamp"),
+                "tts": false,
+                "mention_everyone": false,
+                "mentions": [],
+                "mention_roles": [],
+                "attachments": [],
+                "embeds": [],
+                "pinned": false,
+                "type": 0
+            }))
+            .expect("valid test Discord message")
+        };
+
+        let bot_id = Id::new(999);
+        let slash_reply_id = Id::new(2);
+        let mut slash_turns = HashMap::new();
+        slash_turns.insert(
+            slash_reply_id,
+            "alice (Discord ID 101): my favorite color is cyan".to_owned(),
+        );
+
+        let history = vec![
+            make_msg(1, 999, "Palentir", true, "💭 Thinking..."),
+            make_msg(2, 999, "Palentir", true, "Cyan is a great color!"),
+            make_msg(3, 102, "bob", false, "!ask what did alice say?"),
+            make_msg(4, 102, "bob", false, "just chatting"),
+            make_msg(5, 999, "Palentir", true, "She picked cyan."),
+        ];
+
+        let converted = convert_history(history, bot_id, Some("!"), &slash_turns);
+        assert_eq!(converted.len(), 4);
+        assert_eq!(converted[0].role, "user");
+        assert_eq!(
+            converted[0].content,
+            "alice (Discord ID 101): my favorite color is cyan"
+        );
+        assert_eq!(converted[1].role, "assistant");
+        assert_eq!(converted[1].content, "Cyan is a great color!");
+        assert_eq!(converted[2].role, "user");
+        assert_eq!(
+            converted[2].content,
+            "bob (Discord ID 102): what did alice say?\nbob (Discord ID 102): just chatting"
+        );
+        assert_eq!(converted[3].role, "assistant");
+        assert_eq!(converted[3].content, "She picked cyan.");
     }
 }

@@ -29,6 +29,9 @@ impl MessageExt for (Id<MessageMarker>, Id<ChannelMarker>) {
         if let Some(ref components) = builder.components {
             req = req.components(Some(components));
         }
+        if !builder.attachments.is_empty() {
+            req = req.attachments(&builder.attachments);
+        }
 
         Ok(req.await?.model().await?)
     }

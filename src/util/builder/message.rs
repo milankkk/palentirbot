@@ -11,7 +11,7 @@ use super::EmbedBuilder;
 pub struct MessageBuilder<'c> {
     pub content: Option<Cow<'c, str>>,
     pub embed: Option<Embed>,
-    pub attachment: Option<Attachment>,
+    pub attachments: Vec<Attachment>,
     pub components: Option<Vec<Component>>,
     pub reply: Option<Id<MessageMarker>>,
 }
@@ -34,7 +34,21 @@ impl<'c> MessageBuilder<'c> {
     }
 
     pub fn attachment(mut self, name: impl Into<String>, bytes: Vec<u8>) -> Self {
-        self.attachment = Some(Attachment::from_bytes(name.into(), bytes, 1));
+        let id = u64::try_from(self.attachments.len() + 1).unwrap_or(1);
+        self.attachments
+            .push(Attachment::from_bytes(name.into(), bytes, id));
+
+        self
+    }
+
+    pub fn attachments<I>(mut self, files: I) -> Self
+    where
+        I: IntoIterator<Item = (String, Vec<u8>)>,
+    {
+        for (name, bytes) in files {
+            let id = u64::try_from(self.attachments.len() + 1).unwrap_or(1);
+            self.attachments.push(Attachment::from_bytes(name, bytes, id));
+        }
 
         self
     }

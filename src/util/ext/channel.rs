@@ -32,8 +32,8 @@ impl ChannelExt for Id<ChannelMarker> {
         if let Some(components) = builder.components.as_deref() {
             req = req.components(components);
         }
-        if let Some(ref attachment) = builder.attachment {
-            req = req.attachments(slice::from_ref(attachment));
+        if !builder.attachments.is_empty() {
+            req = req.attachments(&builder.attachments);
         }
         if let Some(reply_id) = builder.reply {
             req = req.reply(reply_id);

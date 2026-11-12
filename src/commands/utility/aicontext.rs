@@ -4,13 +4,10 @@ use command_macros::SlashCommand;
 use eyre::Result;
 use twilight_interactions::command::{CommandModel, CreateCommand};
 use twilight_model::{
-    channel::{
-        message::{
-            embed::{Embed, EmbedField},
-            Message,
-        },
+    channel::message::{
+        embed::{Embed, EmbedField},
+        Message,
     },
-    guild::Permissions,
     id::{marker::ChannelMarker, Id},
 };
 
@@ -60,23 +57,15 @@ pub async fn create_context_embed(ctx: &Context, channel_id: Id<ChannelMarker>) 
         .and_then(|gid| ctx.guild_settings(gid, |s| s.effective_prefix().to_owned()));
 
     // 2. Channel conversation history metrics (filtered using the same rules as ask.rs)
-    let history = if super::ask::bot_has_channel_perms(
-        ctx,
-        channel_id,
-        bot_id,
-        Permissions::VIEW_CHANNEL | Permissions::READ_MESSAGE_HISTORY,
-    ) {
-        tokio::time::timeout(
-            std::time::Duration::from_secs(4),
-            fetch_channel_history(ctx, channel_id),
-        )
-        .await
-        .ok()
-        .and_then(Result::ok)
-        .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
+    let history = tokio::time::timeout(
+        std::time::Duration::from_secs(4),
+        fetch_channel_history(ctx, channel_id),
+    )
+    .await
+    .ok()
+    .and_then(Result::ok)
+    .unwrap_or_default();
+    let slash_turns = ctx.ai().snapshot_slash_turns().await;
     let mut user_messages = 0;
     let mut bot_messages = 0;
     let mut history_chars = 0;
@@ -95,6 +84,10 @@ pub async fn create_context_embed(ctx: &Context, channel_id: Id<ChannelMarker>) 
                 continue;
             }
             bot_messages += 1;
+            if let Some(slash_prompt) = slash_turns.get(&msg.id) {
+                user_messages += 1;
+                history_chars += slash_prompt.chars().count().min(1_500);
+            }
         } else {
             if super::ask::is_non_ai_command_with_prefix(trimmed, guild_prefix.as_deref()) {
                 continue;

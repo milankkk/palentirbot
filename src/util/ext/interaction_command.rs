@@ -130,8 +130,8 @@ impl InteractionCommandExt for InteractionCommand {
             req = req.components(Some(components));
         }
 
-        if let Some(ref attachment) = builder.attachment {
-            req = req.attachments(slice::from_ref(attachment));
+        if !builder.attachments.is_empty() {
+            req = req.attachments(&builder.attachments);
         }
 
         Ok(req.await?.model().await? as twilight_model::channel::Message)
