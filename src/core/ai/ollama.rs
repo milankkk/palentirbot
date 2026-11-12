@@ -22,16 +22,71 @@ pub const DEFAULT_MODEL: &str = "huihui_ai/qwen3.5-abliterated:9b";
 pub const DEFAULT_NUM_CTX: u32 = 12_288;
 /// How long Ollama keeps the model resident after a request.
 pub const DEFAULT_KEEP_ALIVE: &str = "30m";
-pub const DEFAULT_REPEAT_PENALTY: f32 = 1.15;
+pub const DEFAULT_REPEAT_PENALTY: f32 = 1.05;
 pub const DEFAULT_REPEAT_LAST_N: i32 = 256;
-pub const DEFAULT_PRESENCE_PENALTY: f32 = 0.3;
-pub const DEFAULT_FREQUENCY_PENALTY: f32 = 0.1;
+pub const DEFAULT_PRESENCE_PENALTY: f32 = 0.05;
+pub const DEFAULT_FREQUENCY_PENALTY: f32 = 0.0;
 pub const DEFAULT_TEMPERATURE: f32 = 0.6;
 pub const DEFAULT_TOP_P: f32 = 0.95;
-pub const DEFAULT_NUM_PREDICT: i32 = 2048;
+/// Shared budget across thinking + visible answer tokens; needs plenty of room so reasoning isn't truncated.
+pub const DEFAULT_NUM_PREDICT: i32 = 6_144;
 pub const DEFAULT_TOP_K: u32 = 20;
 pub const DEFAULT_MIN_P: f32 = 0.0;
+const DEFAULT_TIMEOUT_SECS: u64 = 300;
 const AI_RUNTIME_FILE_PATH: &str = "data/ai_runtime.json";
+
+fn default_num_predict() -> i32 {
+    DEFAULT_NUM_PREDICT
+}
+
+pub fn normalize_num_predict(val: i32) -> i32 {
+    if val < 0 {
+        -1
+    } else if val == 0 {
+        DEFAULT_NUM_PREDICT
+    } else {
+        val.clamp(256, 32_768)
+    }
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AiThinkDepth {
+    Low,
+    Medium,
+    #[default]
+    High,
+}
+
+impl AiThinkDepth {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high (extended)",
+        }
+    }
+
+    pub fn prompt_instruction(self) -> &'static str {
+        match self {
+            Self::Low => {
+                "THINKING DEPTH (Quick): Briefly sanity-check your facts inside internal reasoning before replying."
+            }
+            Self::Medium => {
+                "THINKING DEPTH (Balanced): Think through the steps and verify your facts internally before replying."
+            }
+            Self::High => {
+                "THINKING DEPTH (Extended): Take your time inside your internal thinking process to reason deeply, systematically, and thoroughly before answering. Break complex problems into sub-steps, double-check calculations, edge cases, and chat context, and question your first intuition internally—while still keeping your final visible Discord reply natural without dumping raw scratchpad notes."
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for AiThinkDepth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
+}
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -56,8 +111,12 @@ impl std::fmt::Display for AiPersonaMode {
 pub struct RuntimeAiConfig {
     pub model: String,
     pub think_enabled: bool,
+    #[serde(default)]
+    pub think_depth: AiThinkDepth,
     pub temperature: f32,
     pub num_ctx: u32,
+    #[serde(default = "default_num_predict")]
+    pub num_predict: i32,
     #[serde(default)]
     pub channel_modes: HashMap<String, AiPersonaMode>,
 }
@@ -74,7 +133,6 @@ pub struct LastGenerationStats {
 pub struct OllamaClient {
     client: Client,
     url: String,
-    num_predict: i32,
     repeat_penalty: f32,
     repeat_last_n: i32,
     presence_penalty: f32,
@@ -314,7 +372,7 @@ impl OllamaClient {
         let timeout_secs = std::env::var("OLLAMA_TIMEOUT_SECS")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(180);
+            .unwrap_or(DEFAULT_TIMEOUT_SECS);
 
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(10))
@@ -327,8 +385,10 @@ impl OllamaClient {
         let default_runtime = RuntimeAiConfig {
             model,
             think_enabled,
+            think_depth: AiThinkDepth::default(),
             temperature,
             num_ctx,
+            num_predict: normalize_num_predict(num_predict),
             channel_modes: HashMap::new(),
         };
         let runtime_cfg = std::fs::read(AI_RUNTIME_FILE_PATH)
@@ -340,6 +400,7 @@ impl OllamaClient {
                 }
                 loaded.temperature = loaded.temperature.clamp(0.0, 2.0);
                 loaded.num_ctx = loaded.num_ctx.clamp(2_048, 131_072);
+                loaded.num_predict = normalize_num_predict(loaded.num_predict);
                 loaded
             })
             .unwrap_or(default_runtime);
@@ -347,7 +408,6 @@ impl OllamaClient {
         Self {
             client,
             url,
-            num_predict,
             repeat_penalty,
             repeat_last_n,
             presence_penalty,
@@ -380,7 +440,10 @@ impl OllamaClient {
     }
 
     pub fn num_predict(&self) -> i32 {
-        self.num_predict
+        self.runtime
+            .read()
+            .expect("ai runtime RwLock poisoned")
+            .num_predict
     }
 
     pub fn model_name(&self) -> String {
@@ -411,6 +474,7 @@ impl OllamaClient {
             f(&mut guard);
             guard.temperature = guard.temperature.clamp(0.0, 2.0);
             guard.num_ctx = guard.num_ctx.clamp(2_048, 131_072);
+            guard.num_predict = normalize_num_predict(guard.num_predict);
             guard.clone()
         };
 
@@ -619,10 +683,12 @@ impl OllamaClient {
         let base_tools = Self::tools_for(search_mode, osu.is_some());
         let mut last_response: Option<OllamaResponse> = None;
 
-        let think_enabled = self.snapshot_config().think_enabled;
+        let cfg = self.snapshot_config();
+        let think_enabled = cfg.think_enabled;
+        let num_predict = cfg.num_predict;
 
         for round in 0..MAX_TOOL_ROUNDS {
-            let pass_think = if round == 0 { think_enabled } else { false };
+            let pass_think = think_enabled;
             let pass_tools = base_tools;
             if round == 0 {
                 Self::emit_status(stream_tx.as_ref(), "🧠 Waiting for AI model...");
@@ -632,7 +698,7 @@ impl OllamaClient {
                     &working_messages,
                     pass_think,
                     pass_tools,
-                    self.num_predict,
+                    num_predict,
                     stream_tx.as_ref(),
                 )
                 .await?;
@@ -737,7 +803,7 @@ impl OllamaClient {
                 &working_messages,
                 false,
                 None,
-                self.num_predict,
+                num_predict,
                 stream_tx.as_ref(),
             )
             .await?;
@@ -1084,15 +1150,30 @@ mod tests {
         let cfg = RuntimeAiConfig {
             model: "qwen3.5:9b".to_owned(),
             think_enabled: false,
+            think_depth: AiThinkDepth::High,
             temperature: 0.4,
             num_ctx: 16_384,
+            num_predict: 8_192,
             channel_modes: modes,
         };
         let raw = serde_json::to_string(&cfg).expect("serialize");
         let parsed: RuntimeAiConfig = serde_json::from_str(&raw).expect("deserialize");
         assert_eq!(parsed.model, "qwen3.5:9b");
         assert!(!parsed.think_enabled);
+        assert_eq!(parsed.think_depth, AiThinkDepth::High);
         assert_eq!(parsed.num_ctx, 16_384);
+        assert_eq!(parsed.num_predict, 8_192);
         assert_eq!(parsed.channel_modes.get("123456").copied(), Some(AiPersonaMode::Helpful));
+
+        let legacy_json = r#"{
+            "model": "huihui_ai/qwen3.5-abliterated:9b",
+            "think_enabled": true,
+            "temperature": 0.6,
+            "num_ctx": 12288,
+            "channel_modes": {}
+        }"#;
+        let legacy: RuntimeAiConfig = serde_json::from_str(legacy_json).expect("legacy deserialize");
+        assert_eq!(legacy.think_depth, AiThinkDepth::High);
+        assert_eq!(legacy.num_predict, DEFAULT_NUM_PREDICT);
     }
 }

@@ -765,6 +765,8 @@ pub async fn execute_ai_question_with_options(
         .replace("{username}", &clean_username)
         .replace("{user_id}", &user_id.to_string());
 
+    let runtime_cfg = ctx.ai().runtime_config();
+
     match ctx.ai().channel_mode(channel_id) {
         AiPersonaMode::Default => {}
         AiPersonaMode::Helpful => system_prompt.push_str(
@@ -773,6 +775,11 @@ pub async fn execute_ai_question_with_options(
         AiPersonaMode::Brainrot => system_prompt.push_str(
             "\n\nCHANNEL PERSONA OVERRIDE (Brainrot Mode): Lean heavily into chaotic Discord banter and unhinged humor while still reporting verified tool facts accurately.",
         ),
+    }
+
+    if runtime_cfg.think_enabled {
+        system_prompt.push_str("\n\n");
+        system_prompt.push_str(runtime_cfg.think_depth.prompt_instruction());
     }
 
     let current_user_msg = format!(
@@ -1277,7 +1284,12 @@ fn trim_history_to_budget(
     num_ctx: u32,
     num_predict: i32,
 ) {
-    let reserve_output = if num_predict > 0 { num_predict as usize } else { 2_048 };
+    // Cap history reservation so larger num_predict budgets (for long thinking) don't wipe out chat context.
+    let reserve_output = if num_predict > 0 {
+        (num_predict as usize).clamp(512, 3_072)
+    } else {
+        3_072
+    };
     let used_fixed_tokens = ((system_prompt.chars().count() + current_user_msg.chars().count()) as f64 / 3.5).ceil() as usize;
     let overhead_tokens = reserve_output + used_fixed_tokens + 1_200; // leave headroom for tools/framing
     let available_tokens = (num_ctx as usize).saturating_sub(overhead_tokens).max(800);

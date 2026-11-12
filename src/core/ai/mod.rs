@@ -11,7 +11,8 @@ mod queue;
 pub mod search;
 
 pub use ollama::{
-    AiPersonaMode, AiStreamEvent, LastGenerationStats, OllamaClient, RuntimeAiConfig,
+    normalize_num_predict, AiPersonaMode, AiStreamEvent, AiThinkDepth, LastGenerationStats,
+    OllamaClient, RuntimeAiConfig,
 };
 pub use queue::{AiQueue, DEFAULT_MAX_AI_QUEUE_SIZE};
 #[allow(unused_imports)]

@@ -11,7 +11,7 @@ use twilight_model::{
 
 use crate::{
     core::{
-        ai::{AiPersonaMode, RuntimeAiConfig},
+        ai::{normalize_num_predict, AiPersonaMode, AiThinkDepth, RuntimeAiConfig},
         BotConfig, Context,
     },
     util::{
@@ -31,6 +31,10 @@ pub enum OwnerAi {
     Model(OwnerAiModel),
     #[command(name = "think")]
     Think(OwnerAiThink),
+    #[command(name = "depth")]
+    Depth(OwnerAiDepth),
+    #[command(name = "predict")]
+    Predict(OwnerAiPredict),
     #[command(name = "temp")]
     Temp(OwnerAiTemp),
     #[command(name = "ctx")]
@@ -50,6 +54,10 @@ pub enum OwnerAiParsable {
     Model(OwnerAiModelAutocomplete),
     #[command(name = "think")]
     Think(OwnerAiThink),
+    #[command(name = "depth")]
+    Depth(OwnerAiDepth),
+    #[command(name = "predict")]
+    Predict(OwnerAiPredict),
     #[command(name = "temp")]
     Temp(OwnerAiTemp),
     #[command(name = "ctx")]
@@ -86,6 +94,43 @@ pub struct OwnerAiModelAutocomplete {
 pub struct OwnerAiThink {
     /// Whether extended thinking is enabled before responding
     pub enabled: bool,
+}
+
+#[derive(Clone, Copy, CommandOption, CreateOption)]
+pub enum SlashThinkDepth {
+    #[option(name = "Low (quick sanity check)", value = "low")]
+    Low,
+    #[option(name = "Medium (balanced reasoning)", value = "medium")]
+    Medium,
+    #[option(name = "High (extended deep thinking)", value = "high")]
+    High,
+}
+
+impl From<SlashThinkDepth> for AiThinkDepth {
+    fn from(depth: SlashThinkDepth) -> Self {
+        match depth {
+            SlashThinkDepth::Low => Self::Low,
+            SlashThinkDepth::Medium => Self::Medium,
+            SlashThinkDepth::High => Self::High,
+        }
+    }
+}
+
+#[derive(CommandModel, CreateCommand)]
+#[command(name = "depth")]
+/// Set how deeply the AI thinks internally when thinking is enabled
+pub struct OwnerAiDepth {
+    /// Desired internal reasoning depth
+    pub level: SlashThinkDepth,
+}
+
+#[derive(CommandModel, CreateCommand)]
+#[command(name = "predict")]
+/// Set max generated tokens (thinking + answer combined; -1 for unlimited)
+pub struct OwnerAiPredict {
+    #[command(min_value = -1, max_value = 32768)]
+    /// Token budget (256-32768, or -1 for unlimited)
+    pub tokens: i64,
 }
 
 #[derive(CommandModel, CreateCommand)]
@@ -142,9 +187,15 @@ pub struct OwnerAiChannelMode {
 }
 
 fn format_runtime_summary(cfg: &RuntimeAiConfig, channel_mode: AiPersonaMode, queue_len: usize, prompt_chars: usize) -> String {
+    let predict_display = if cfg.num_predict < 0 {
+        "unlimited".to_owned()
+    } else {
+        format!("{} tokens", cfg.num_predict)
+    };
     format!(
         "• **Model:** `{}`\n\
-         • **Thinking:** `{}`\n\
+         • **Thinking:** `{}` (depth: `{}`)\n\
+         • **Max Output Budget (`num_predict`):** `{predict_display}`\n\
          • **Temperature:** `{:.2}`\n\
          • **Context Window (`num_ctx`):** `{}` tokens\n\
          • **This Channel Mode:** `{channel_mode}`\n\
@@ -153,6 +204,7 @@ fn format_runtime_summary(cfg: &RuntimeAiConfig, channel_mode: AiPersonaMode, qu
          • **Queue:** `{queue_len}` waiting/active",
         cfg.model,
         if cfg.think_enabled { "Enabled" } else { "Disabled" },
+        cfg.think_depth,
         cfg.temperature,
         cfg.num_ctx,
         cfg.channel_modes.len(),
@@ -225,6 +277,41 @@ pub async fn handle_owner_ai(
                 &command,
                 "AI Thinking Updated",
                 format!("Reasoning (`think`) is now **{}**.", if cfg.think_enabled { "Enabled" } else { "Disabled" }),
+                None,
+            )
+            .await
+        }
+        OwnerAi::Depth(OwnerAiDepth { level }) => {
+            let next_depth: AiThinkDepth = level.into();
+            let cfg = ctx
+                .ai()
+                .update_runtime_config(|c| c.think_depth = next_depth)
+                .await?;
+            reply_embed(
+                &ctx,
+                &command,
+                "AI Thinking Depth Updated",
+                format!("Internal reasoning depth set to **{}**.", cfg.think_depth),
+                None,
+            )
+            .await
+        }
+        OwnerAi::Predict(OwnerAiPredict { tokens }) => {
+            let normalized = normalize_num_predict(i32::try_from(tokens).unwrap_or(32_768));
+            let cfg = ctx
+                .ai()
+                .update_runtime_config(|c| c.num_predict = normalized)
+                .await?;
+            let display = if cfg.num_predict < 0 {
+                "unlimited".to_owned()
+            } else {
+                format!("`{}` tokens", cfg.num_predict)
+            };
+            reply_embed(
+                &ctx,
+                &command,
+                "AI Generation Budget Updated",
+                format!("`num_predict` (thinking + reply budget) set to {display}."),
                 None,
             )
             .await
