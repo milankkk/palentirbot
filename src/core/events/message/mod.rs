@@ -33,8 +33,31 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
     let content = match msg.content.strip_prefix(prefix.as_str()) {
         Some(rest) => rest.trim_start(),
         None => {
-            if is_reply_to_bot && !msg.content.trim().is_empty() {
-                // Direct response to the AI without command prefix
+            let trimmed = msg.content.trim();
+            if is_reply_to_bot && (!trimmed.is_empty() || !msg.attachments.is_empty()) {
+                crate::commands::utility::handle_prefix_ask(ctx, &msg, &msg.content, &prefix).await;
+                return;
+            }
+            if let Some(stripped) =
+                bot_id.and_then(|id| crate::commands::utility::strip_bot_mention(&msg.content, id))
+            {
+                if !crate::commands::utility::is_non_ai_command_with_prefix(&stripped, Some(&prefix))
+                {
+                    crate::commands::utility::handle_prefix_ask(ctx, &msg, &stripped, &prefix)
+                        .await;
+                }
+                return;
+            }
+            let is_dm = msg.guild_id.is_none();
+            let is_ai_channel = msg
+                .guild_id
+                .and_then(|gid| ctx.guild_settings(gid, |s| s.ai_channel))
+                .flatten()
+                == Some(msg.channel_id);
+            if (is_dm || is_ai_channel)
+                && (!trimmed.is_empty() || !msg.attachments.is_empty())
+                && !crate::commands::utility::is_non_ai_command_with_prefix(trimmed, Some(&prefix))
+            {
                 crate::commands::utility::handle_prefix_ask(ctx, &msg, &msg.content, &prefix).await;
             }
             return;
@@ -240,7 +263,7 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
 
             let description = format!(
                 "**Prefix commands** (current prefix: `{p}`)\n\n\
-                 `{p}ask <question>` — Ask the AI a question (aliases: `{p}ai`, `{p}a`)\n\
+                 `{p}ask <question>` — Ask the AI (also works by `@mention`, DM, reply, or in `/setup aichannel`)\n\
                  `{p}aicontext` — Show context window usage & engine stats (aliases: `{p}context`, `{p}aic`)\n\
                  `{p}ping` — Check latency\n\
                  `{p}render` — Render a replay (attach `.osr`, pass an osu! score URL, or reply to a score embed). Args: `start=MM:SS` `end=MM:SS` `pitch=<float>` `skin=\"<name>\"` `skip` `offset=<ms>` `force`\n\
@@ -250,7 +273,7 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
                  `{p}invite` — Bot invite link\n\
                  `{p}help` — Show this message\n\n\
                  Slash commands are also available — type `/` to browse them.\n\
-                 Server admins can change the prefix with `/setup setprefix`."
+                 Server admins can configure prefix/AI channel with `/setup`."
             );
             let embed = EmbedBuilder::new()
                 .title("Help")

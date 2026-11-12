@@ -23,6 +23,7 @@ pub struct Server {
     pub input_channels: HashSet<Id<ChannelMarker>, IntBuildHasher>,
     pub output_channel: Option<Id<ChannelMarker>>,
     pub prefix: Option<String>,
+    pub ai_channel: Option<Id<ChannelMarker>>,
 }
 
 impl Server {
@@ -59,6 +60,8 @@ mod servers {
         output_channel: Option<Id<ChannelMarker>>,
         #[serde(default)]
         prefix: Option<String>,
+        #[serde(default)]
+        ai_channel: Option<Id<ChannelMarker>>,
     }
 
     struct ServersVisitor;
@@ -83,12 +86,14 @@ mod servers {
                         input_channels,
                         output_channel,
                         prefix,
+                        ai_channel,
                     } = raw;
 
                     let server = Server {
                         input_channels,
                         output_channel,
                         prefix,
+                        ai_channel,
                     };
 
                     guard.insert(server_id, server);
@@ -110,12 +115,13 @@ mod servers {
 
     impl Serialize for BorrowedRawServer<'_> {
         fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-            let mut raw = s.serialize_struct("RawServer", 4)?;
+            let mut raw = s.serialize_struct("RawServer", 5)?;
 
             raw.serialize_field("server_id", &self.server_id)?;
             raw.serialize_field("input_channels", &self.server.input_channels)?;
             raw.serialize_field("output_channel", &self.server.output_channel)?;
             raw.serialize_field("prefix", &self.server.prefix)?;
+            raw.serialize_field("ai_channel", &self.server.ai_channel)?;
             raw.end()
         }
     }

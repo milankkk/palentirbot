@@ -6,10 +6,11 @@ use tokio::sync::{Mutex, RwLock};
 use twilight_model::id::{marker::ChannelMarker, Id};
 
 mod ollama;
+pub mod osu_tools;
 mod queue;
 pub mod search;
 
-pub use ollama::{LastGenerationStats, OllamaClient};
+pub use ollama::{AiStreamEvent, LastGenerationStats, OllamaClient};
 pub use queue::{AiQueue, DEFAULT_MAX_AI_QUEUE_SIZE};
 #[allow(unused_imports)]
 pub use search::WebSearchClient;
@@ -28,6 +29,8 @@ pub struct AiMessage {
     pub content: String,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub images: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub tool_calls: Vec<serde_json::Value>,
 }
 
 impl AiMessage {
@@ -36,6 +39,7 @@ impl AiMessage {
             role: "system".to_owned(),
             content: content.into(),
             images: Vec::new(),
+            tool_calls: Vec::new(),
         }
     }
 
@@ -44,6 +48,7 @@ impl AiMessage {
             role: "user".to_owned(),
             content: content.into(),
             images: Vec::new(),
+            tool_calls: Vec::new(),
         }
     }
 
@@ -52,6 +57,7 @@ impl AiMessage {
             role: "user".to_owned(),
             content: content.into(),
             images,
+            tool_calls: Vec::new(),
         }
     }
 
@@ -60,6 +66,19 @@ impl AiMessage {
             role: "assistant".to_owned(),
             content: content.into(),
             images: Vec::new(),
+            tool_calls: Vec::new(),
+        }
+    }
+
+    pub fn assistant_with_tool_calls(
+        content: impl Into<String>,
+        tool_calls: Vec<serde_json::Value>,
+    ) -> Self {
+        Self {
+            role: "assistant".to_owned(),
+            content: content.into(),
+            images: Vec::new(),
+            tool_calls,
         }
     }
 
@@ -68,6 +87,7 @@ impl AiMessage {
             role: "tool".to_owned(),
             content: content.into(),
             images: Vec::new(),
+            tool_calls: Vec::new(),
         }
     }
 }
@@ -155,14 +175,16 @@ impl AiClient {
         self.queue.len().await
     }
 
-    pub async fn ask_with_search(
+    pub async fn ask_with_stream(
         &self,
         channel_id: Id<ChannelMarker>,
         messages: &[AiMessage],
         search_mode: SearchMode,
+        osu: Option<&rosu_v2::Osu>,
+        stream_tx: Option<tokio::sync::mpsc::UnboundedSender<AiStreamEvent>>,
     ) -> Result<String> {
         self.ollama
-            .ask_with_options(channel_id, messages, search_mode)
+            .ask_with_stream(channel_id, messages, search_mode, osu, stream_tx)
             .await
     }
 

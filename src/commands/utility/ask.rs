@@ -1,7 +1,8 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use command_macros::SlashCommand;
 use eyre::Result;
+use tokio::sync::mpsc::{self, UnboundedSender};
 use twilight_interactions::command::{CommandModel, CommandOption, CreateCommand, CreateOption};
 use twilight_model::{
     channel::{
@@ -17,7 +18,7 @@ use twilight_model::{
 
 use crate::{
     core::{
-        ai::{base64_encode, sanitize_llm_text, AiMessage, SearchMode},
+        ai::{base64_encode, sanitize_llm_text, AiMessage, AiStreamEvent, SearchMode},
         Context,
     },
     util::{
@@ -79,6 +80,7 @@ pub struct AiQuestionOptions<'a> {
     pub referenced_msg: Option<&'a Message>,
     pub images: Vec<String>,
     pub search_mode: SearchMode,
+    pub stream_tx: Option<UnboundedSender<AiStreamEvent>>,
 }
 
 impl Default for AiQuestionOptions<'_> {
@@ -88,8 +90,116 @@ impl Default for AiQuestionOptions<'_> {
             referenced_msg: None,
             images: Vec::new(),
             search_mode: SearchMode::Auto,
+            stream_tx: None,
         }
     }
+}
+
+enum StreamTarget {
+    Message {
+        ctx: Arc<Context>,
+        msg_id: Id<MessageMarker>,
+        channel_id: Id<ChannelMarker>,
+    },
+    Interaction {
+        ctx: Arc<Context>,
+        token: String,
+    },
+}
+
+fn format_streaming_preview(raw: &str) -> String {
+    let cleaned = clean_ai_response(raw);
+    let trimmed = cleaned.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let truncated = truncate_chars(trimmed, 1_940);
+    format!("{truncated} ▌")
+}
+
+fn apply_stream_event(latest_display: &mut Option<String>, ev: AiStreamEvent) {
+    match ev {
+        AiStreamEvent::Status(status) => {
+            *latest_display = Some(status);
+        }
+        AiStreamEvent::Content(raw) => {
+            let preview = format_streaming_preview(&raw);
+            if !preview.is_empty() {
+                *latest_display = Some(preview);
+            }
+        }
+    }
+}
+
+async fn send_stream_edit(target: &StreamTarget, content: &str) {
+    match target {
+        StreamTarget::Message {
+            ctx,
+            msg_id,
+            channel_id,
+        } => {
+            let _ = ctx
+                .http
+                .update_message(*channel_id, *msg_id)
+                .content(Some(content))
+                .await;
+        }
+        StreamTarget::Interaction { ctx, token } => {
+            let client = ctx.interaction();
+            let _ = client
+                .update_response(token)
+                .content(Some(content))
+                .await;
+        }
+    }
+}
+
+fn spawn_stream_updater(
+    target: StreamTarget,
+) -> (UnboundedSender<AiStreamEvent>, tokio::task::JoinHandle<()>) {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let handle = tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_millis(1_150));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        tick.tick().await; // skip immediate tick at t=0 so status stabilizes before first edit
+
+        let mut latest_display: Option<String> = None;
+        let mut last_sent = String::new();
+
+        loop {
+            tokio::select! {
+                maybe_ev = rx.recv() => {
+                    match maybe_ev {
+                        Some(ev) => apply_stream_event(&mut latest_display, ev),
+                        None => break,
+                    }
+                }
+                _ = tick.tick() => {
+                    while let Ok(ev) = rx.try_recv() {
+                        apply_stream_event(&mut latest_display, ev);
+                    }
+                    if let Some(ref text) = latest_display {
+                        if text != &last_sent && !text.is_empty() {
+                            send_stream_edit(&target, text).await;
+                            last_sent = text.clone();
+                        }
+                    }
+                }
+            }
+        }
+    });
+    (tx, handle)
+}
+
+/// Remove `<@bot_id>` / `<@!bot_id>` mentions if present in content, returning `None` if unmentioned.
+pub fn strip_bot_mention(content: &str, bot_id: Id<UserMarker>) -> Option<String> {
+    let plain = format!("<@{bot_id}>");
+    let nick = format!("<@!{bot_id}>");
+    if !content.contains(&plain) && !content.contains(&nick) {
+        return None;
+    }
+    let cleaned = content.replace(&plain, "").replace(&nick, "");
+    Some(cleaned.trim().to_owned())
 }
 
 async fn slash_ask(ctx: Arc<Context>, mut command: InteractionCommand) -> Result<()> {
@@ -150,7 +260,12 @@ async fn slash_ask(ctx: Arc<Context>, mut command: InteractionCommand) -> Result
     // Get the person currently talking to the AI.
     let user = command.user()?;
 
-    let chunks = match execute_ai_question_with_options(
+    let (stream_tx, updater_handle) = spawn_stream_updater(StreamTarget::Interaction {
+        ctx: Arc::clone(&ctx),
+        token: command.token.clone(),
+    });
+
+    let res = execute_ai_question_with_options(
         &ctx,
         command.guild_id,
         command.channel_id,
@@ -160,11 +275,15 @@ async fn slash_ask(ctx: Arc<Context>, mut command: InteractionCommand) -> Result
         AiQuestionOptions {
             images,
             search_mode: search.map(Into::into).unwrap_or(SearchMode::Auto),
+            stream_tx: Some(stream_tx),
             ..Default::default()
         },
     )
-    .await
-    {
+    .await;
+
+    let _ = updater_handle.await;
+
+    let chunks = match res {
         Ok(chunks) => chunks,
         Err(err) => {
             tracing::error!(
@@ -314,6 +433,14 @@ pub async fn handle_prefix_ask(
 
     let _ = ctx.http.create_typing_trigger(msg.channel_id).await;
 
+    let (stream_tx, updater_handle) = placeholder.as_ref().map(|ph| {
+        spawn_stream_updater(StreamTarget::Message {
+            ctx: Arc::clone(&ctx),
+            msg_id: ph.id,
+            channel_id: ph.channel_id,
+        })
+    }).map_or((None, None), |(tx, h)| (Some(tx), Some(h)));
+
     let result = execute_ai_question_with_options(
         &ctx,
         msg.guild_id,
@@ -326,9 +453,14 @@ pub async fn handle_prefix_ask(
             referenced_msg: msg.referenced_message.as_deref(),
             images,
             search_mode: SearchMode::Auto,
+            stream_tx,
         },
     )
     .await;
+
+    if let Some(handle) = updater_handle {
+        let _ = handle.await;
+    }
 
     match result {
         Ok(chunks) => {
@@ -630,7 +762,13 @@ pub async fn execute_ai_question_with_options(
 
     let answer = ctx
         .ai()
-        .ask_with_search(channel_id, &messages, opts.search_mode)
+        .ask_with_stream(
+            channel_id,
+            &messages,
+            opts.search_mode,
+            Some(ctx.osu()),
+            opts.stream_tx,
+        )
         .await?;
 
     let mut answer = clean_ai_response(&answer);
@@ -720,6 +858,9 @@ pub(crate) fn is_transient_status(content: &str) -> bool {
         || content.starts_with("✍️ Thinking")
         || content.starts_with("⚡ Generating")
         || content.starts_with("💭 Generating")
+        || content.starts_with("🔍 Searching")
+        || content.starts_with("🎮 Checking osu!")
+        || content.starts_with("🗺️ Calculating beatmap")
         || content.starts_with("⚠️ ")
         || content.starts_with("🧹 ")
         || content.starts_with("🔄 ")
@@ -734,7 +875,7 @@ pub(crate) fn is_transient_status(content: &str) -> bool {
         || content.contains("Started replay processing")
 }
 
-pub(crate) fn is_non_ai_command_with_prefix(content: &str, guild_prefix: Option<&str>) -> bool {
+pub fn is_non_ai_command_with_prefix(content: &str, guild_prefix: Option<&str>) -> bool {
     let trimmed = content.trim();
     if trimmed.is_empty() {
         return false;
@@ -1299,5 +1440,15 @@ mod tests {
         for c in &chunks {
             assert!(c.chars().count() <= 120, "chunk too long: {}", c.chars().count());
         }
+
+        let bot_id = Id::new(999);
+        assert_eq!(strip_bot_mention("hello world", bot_id), None);
+        assert_eq!(strip_bot_mention("<@999> check mrekk", bot_id).as_deref(), Some("check mrekk"));
+        assert_eq!(strip_bot_mention("<@!999>", bot_id).as_deref(), Some(""));
+        assert_eq!(
+            format_streaming_preview("<think>secret</think>Visible answer"),
+            "Visible answer ▌"
+        );
+        assert_eq!(format_streaming_preview("<think>still thinking..."), "");
     }
 }

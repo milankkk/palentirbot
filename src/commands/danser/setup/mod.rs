@@ -10,8 +10,9 @@ use crate::{
     Context,
 };
 
-use self::{input::*, output::*, view::*};
+use self::{aichannel::*, input::*, output::*, view::*};
 
+mod aichannel;
 mod input;
 mod output;
 mod setprefix;
@@ -30,6 +31,8 @@ pub enum Setup {
     Output(SetupOutput),
     #[command(name = "setprefix")]
     SetPrefix(SetupSetPrefix),
+    #[command(name = "aichannel")]
+    AiChannel(SetupAiChannel),
 }
 
 #[derive(CommandModel, CreateCommand)]
@@ -71,11 +74,20 @@ pub struct SetupSetPrefix {
     pub prefix: String,
 }
 
+#[derive(CommandModel, CreateCommand)]
+#[command(name = "aichannel")]
+/// Set a dedicated AI chat channel where no prefix is required (omit to clear)
+pub struct SetupAiChannel {
+    /// Channel for prefixless AI chat (leave empty to clear)
+    pub channel: Option<Id<ChannelMarker>>,
+}
+
 async fn slash_setup(ctx: Arc<Context>, mut command: InteractionCommand) -> Result<()> {
     match Setup::from_interaction(command.input_data())? {
         Setup::Input(args) => input(ctx, command, args).await,
         Setup::Output(args) => output(ctx, command, args).await,
         Setup::View(_) => view(ctx, command).await,
         Setup::SetPrefix(args) => setprefix::set_prefix(ctx, command, args).await,
+        Setup::AiChannel(args) => aichannel(ctx, command, args).await,
     }
 }
