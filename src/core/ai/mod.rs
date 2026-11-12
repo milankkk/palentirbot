@@ -14,10 +14,20 @@ pub use queue::{AiQueue, DEFAULT_MAX_AI_QUEUE_SIZE};
 #[allow(unused_imports)]
 pub use search::WebSearchClient;
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
+pub enum SearchMode {
+    #[default]
+    Auto,
+    Force,
+    Off,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct AiMessage {
     pub role: String,
     pub content: String,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub images: Vec<String>,
 }
 
 impl AiMessage {
@@ -25,6 +35,7 @@ impl AiMessage {
         Self {
             role: "system".to_owned(),
             content: content.into(),
+            images: Vec::new(),
         }
     }
 
@@ -32,6 +43,15 @@ impl AiMessage {
         Self {
             role: "user".to_owned(),
             content: content.into(),
+            images: Vec::new(),
+        }
+    }
+
+    pub fn user_with_images(content: impl Into<String>, images: Vec<String>) -> Self {
+        Self {
+            role: "user".to_owned(),
+            content: content.into(),
+            images,
         }
     }
 
@@ -39,6 +59,7 @@ impl AiMessage {
         Self {
             role: "assistant".to_owned(),
             content: content.into(),
+            images: Vec::new(),
         }
     }
 
@@ -46,8 +67,27 @@ impl AiMessage {
         Self {
             role: "tool".to_owned(),
             content: content.into(),
+            images: Vec::new(),
         }
     }
+}
+
+/// Encode bytes as standard RFC 4648 base64 for multimodal vision payloads.
+pub fn base64_encode(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0] as usize;
+        let b1 = chunk.get(1).copied().unwrap_or(0) as usize;
+        let b2 = chunk.get(2).copied().unwrap_or(0) as usize;
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+
+        out.push(TABLE[(triple >> 18) & 0x3F] as char);
+        out.push(TABLE[(triple >> 12) & 0x3F] as char);
+        out.push(if chunk.len() > 1 { TABLE[(triple >> 6) & 0x3F] as char } else { '=' });
+        out.push(if chunk.len() > 2 { TABLE[triple & 0x3F] as char } else { '=' });
+    }
+    out
 }
 
 /// Sanitize untrusted text before inserting into LLM prompts by stripping null
@@ -115,8 +155,15 @@ impl AiClient {
         self.queue.len().await
     }
 
-    pub async fn ask(&self, channel_id: Id<ChannelMarker>, messages: &[AiMessage]) -> Result<String> {
-        self.ollama.ask(channel_id, messages).await
+    pub async fn ask_with_search(
+        &self,
+        channel_id: Id<ChannelMarker>,
+        messages: &[AiMessage],
+        search_mode: SearchMode,
+    ) -> Result<String> {
+        self.ollama
+            .ask_with_options(channel_id, messages, search_mode)
+            .await
     }
 
     /// Return statistics from the most recent generation evaluated by Ollama for this channel.
@@ -214,5 +261,19 @@ impl AiClient {
         } else {
             Ok(source)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_base64_encode() {
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"f"), "Zg==");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
+        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
     }
 }

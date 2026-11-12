@@ -82,7 +82,8 @@ pub async fn create_context_embed(ctx: &Context, channel_id: Id<ChannelMarker>) 
     let mut history_chars = 0;
 
     for msg in &history {
-        let trimmed = msg.content.trim();
+        let formatted = super::ask::format_message_text_and_embeds(msg);
+        let trimmed = formatted.trim();
         if trimmed.is_empty() {
             continue;
         }

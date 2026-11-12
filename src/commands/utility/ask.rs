@@ -2,9 +2,12 @@ use std::sync::Arc;
 
 use command_macros::SlashCommand;
 use eyre::Result;
-use twilight_interactions::command::{CommandModel, CreateCommand};
+use twilight_interactions::command::{CommandModel, CommandOption, CreateCommand, CreateOption};
 use twilight_model::{
-    channel::Message,
+    channel::{
+        message::{embed::Embed, MessageFlags},
+        Attachment, Message,
+    },
     guild::Permissions,
     id::{
         marker::{ChannelMarker, GuildMarker, MessageMarker, UserMarker},
@@ -14,7 +17,7 @@ use twilight_model::{
 
 use crate::{
     core::{
-        ai::{sanitize_llm_text, AiMessage},
+        ai::{base64_encode, sanitize_llm_text, AiMessage, SearchMode},
         Context,
     },
     util::{
@@ -28,13 +31,13 @@ const DEFAULT_HISTORY_LIMIT: u16 = 25;
 /// Hard ceiling for history messages.
 const MAX_HISTORY_LIMIT: u16 = 50;
 /// Maximum number of characters taken from a single historical message.
-///
-/// This prevents a handful of enormous Discord messages from consuming the
-/// model's entire context window.
 const HISTORY_MESSAGE_CHAR_LIMIT: usize = 1_500;
-
+/// Max image size (8 MB) and count (3) per request for local vision VLM.
+const MAX_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_IMAGES_PER_REQUEST: usize = 3;
 /// Keep some room below Discord's 2,000-character message limit.
 const DISCORD_RESPONSE_CHAR_LIMIT: usize = 1_900;
+const MAX_DISCORD_CHUNKS: usize = 5;
 
 #[derive(CommandModel, CreateCommand, SlashCommand)]
 #[command(name = "ask")]
@@ -43,16 +46,78 @@ const DISCORD_RESPONSE_CHAR_LIMIT: usize = 1_900;
 pub struct Ask {
     /// What you want to ask
     question: String,
+    /// Optional image attachment for vision analysis
+    image: Option<Attachment>,
+    /// Keep the reply private to you (ephemeral)
+    ephemeral: Option<bool>,
+    /// Override web search behavior for this question
+    search: Option<SlashSearchMode>,
+}
+
+#[derive(Clone, Copy, CommandOption, CreateOption)]
+pub enum SlashSearchMode {
+    #[option(name = "Auto (model decides)", value = "auto")]
+    Auto,
+    #[option(name = "Force web search", value = "force")]
+    Force,
+    #[option(name = "Off (local knowledge only)", value = "off")]
+    Off,
+}
+
+impl From<SlashSearchMode> for SearchMode {
+    fn from(mode: SlashSearchMode) -> Self {
+        match mode {
+            SlashSearchMode::Auto => Self::Auto,
+            SlashSearchMode::Force => Self::Force,
+            SlashSearchMode::Off => Self::Off,
+        }
+    }
+}
+
+pub struct AiQuestionOptions<'a> {
+    pub exclude_message_id: Option<Id<MessageMarker>>,
+    pub referenced_msg: Option<&'a Message>,
+    pub images: Vec<String>,
+    pub search_mode: SearchMode,
+}
+
+impl Default for AiQuestionOptions<'_> {
+    fn default() -> Self {
+        Self {
+            exclude_message_id: None,
+            referenced_msg: None,
+            images: Vec::new(),
+            search_mode: SearchMode::Auto,
+        }
+    }
 }
 
 async fn slash_ask(ctx: Arc<Context>, mut command: InteractionCommand) -> Result<()> {
-    // Parse the slash command.
-    let Ask { question } = Ask::from_interaction(command.input_data())?;
+    let Ask {
+        question,
+        image,
+        ephemeral,
+        search,
+    } = Ask::from_interaction(command.input_data())?;
+    let is_ephemeral = ephemeral.unwrap_or(false);
 
-    // AI generation can take a while, especially when running locally.
-    //
-    // Defer immediately so Discord doesn't consider the interaction timed out.
-    command.defer(&ctx, false).await?;
+    command.defer(&ctx, is_ephemeral).await?;
+
+    let images = if let Some(ref att) = image {
+        collect_images_from_attachments(&ctx, std::slice::from_ref(att)).await
+    } else {
+        Vec::new()
+    };
+
+    if image.is_some() && images.is_empty() {
+        command
+            .error(
+                &ctx,
+                "Supported images: PNG/JPEG/WebP up to 8 MB.",
+            )
+            .await?;
+        return Ok(());
+    }
 
     // Enter the fair FIFO AI queue to avoid overloading the backend
     let ticket = match ctx.ai().queue().enter().await {
@@ -85,19 +150,22 @@ async fn slash_ask(ctx: Arc<Context>, mut command: InteractionCommand) -> Result
     // Get the person currently talking to the AI.
     let user = command.user()?;
 
-    let answer = match execute_ai_question(
+    let chunks = match execute_ai_question_with_options(
         &ctx,
         command.guild_id,
         command.channel_id,
         user.id,
         &user.name,
         &question,
-        None,
-        None,
+        AiQuestionOptions {
+            images,
+            search_mode: search.map(Into::into).unwrap_or(SearchMode::Auto),
+            ..Default::default()
+        },
     )
     .await
     {
-        Ok(answer) => answer,
+        Ok(chunks) => chunks,
         Err(err) => {
             tracing::error!(
                 ?err,
@@ -114,8 +182,20 @@ async fn slash_ask(ctx: Arc<Context>, mut command: InteractionCommand) -> Result
         }
     };
 
-    let builder = MessageBuilder::new().content(answer);
-    command.update(&ctx, &builder).await?;
+    let mut iter = chunks.into_iter();
+    if let Some(first) = iter.next() {
+        command
+            .update(&ctx, &MessageBuilder::new().content(first))
+            .await?;
+    }
+    let interaction = ctx.interaction();
+    for chunk in iter {
+        let mut req = interaction.create_followup(&command.token).content(&chunk);
+        if is_ephemeral {
+            req = req.flags(MessageFlags::EPHEMERAL);
+        }
+        let _ = req.await;
+    }
 
     Ok(())
 }
@@ -145,29 +225,40 @@ pub async fn handle_prefix_ask(
         }
     }
 
+    // Collect image attachments from both this message and any replied message
+    let mut attachments: Vec<Attachment> = msg.attachments.clone();
+    if let Some(replied) = msg.referenced_message.as_deref() {
+        attachments.extend(replied.attachments.iter().cloned());
+    }
+    let images = collect_images_from_attachments(&ctx, &attachments).await;
+
     let is_reply_to_ai = msg
         .referenced_message
         .as_deref()
         .map(|r| Some(r.author.id) == bot_id && is_conversational_ai_message(r))
         .unwrap_or(false);
 
-    // If the message is a reply to another human message (not the AI), include that as context
+    // If the message is a reply to another message/embed (not the AI), include that as context
     if let Some(ref replied) = msg.referenced_message {
         if !is_reply_to_ai {
             let ref_author = sanitize_llm_text(&replied.author.name);
-            let ref_content = sanitize_llm_text(&truncate_history_message(&replied.content));
+            let ref_content = format_message_text_and_embeds(replied);
             if !ref_content.is_empty() {
                 if question.is_empty() {
-                    question = format!("What do you think about what {ref_author} said: \"{ref_content}\"?");
+                    question = format!("What do you think about what {ref_author} posted: \"{ref_content}\"?");
                 } else {
                     question = format!("(In reply to {ref_author}: \"{ref_content}\")\n{question}");
                 }
+            } else if !images.is_empty() && question.is_empty() {
+                question = format!("What do you think about this image posted by {ref_author}?");
             }
         }
     }
 
     if question.is_empty() {
-        if is_reply_to_ai {
+        if !images.is_empty() {
+            question = "What do you see in this image?".to_string();
+        } else if is_reply_to_ai {
             question = "What do you think about what you said?".to_string();
         } else {
             let _ = msg
@@ -223,41 +314,44 @@ pub async fn handle_prefix_ask(
 
     let _ = ctx.http.create_typing_trigger(msg.channel_id).await;
 
-    let result = execute_ai_question(
+    let result = execute_ai_question_with_options(
         &ctx,
         msg.guild_id,
         msg.channel_id,
         msg.author.id,
         &msg.author.name,
         &question,
-        Some(msg.id),
-        msg.referenced_message.as_deref(),
+        AiQuestionOptions {
+            exclude_message_id: Some(msg.id),
+            referenced_msg: msg.referenced_message.as_deref(),
+            images,
+            search_mode: SearchMode::Auto,
+        },
     )
     .await;
 
     match result {
-        Ok(answer) => {
-            if let Some(ref ph) = placeholder {
-                if let Err(err) = ph
-                    .update(&ctx, &MessageBuilder::new().content(answer.clone()))
-                    .await
-                {
-                    tracing::warn!(?err, "failed to update placeholder message, sending new message");
+        Ok(chunks) => {
+            let mut iter = chunks.into_iter();
+            if let Some(first) = iter.next() {
+                let updated = if let Some(ref ph) = placeholder {
+                    ph.update(&ctx, &MessageBuilder::new().content(first.clone()))
+                        .await
+                        .is_ok()
+                } else {
+                    false
+                };
+                if !updated {
                     let _ = msg
                         .channel_id
-                        .create_message(
-                            &ctx,
-                            &MessageBuilder::new().content(answer).reply(msg.id),
-                        )
+                        .create_message(&ctx, &MessageBuilder::new().content(first).reply(msg.id))
                         .await;
                 }
-            } else {
+            }
+            for chunk in iter {
                 let _ = msg
                     .channel_id
-                    .create_message(
-                        &ctx,
-                        &MessageBuilder::new().content(answer).reply(msg.id),
-                    )
+                    .create_message(&ctx, &MessageBuilder::new().content(chunk))
                     .await;
             }
         }
@@ -302,35 +396,135 @@ pub(crate) fn configured_history_limit() -> u16 {
         .clamp(1, MAX_HISTORY_LIMIT)
 }
 
-fn push_or_coalesce_user_message(msgs: &mut Vec<AiMessage>, current_user_msg: String) {
+fn is_supported_image_attachment(att: &Attachment) -> bool {
+    if att.size > MAX_IMAGE_BYTES {
+        return false;
+    }
+    if let Some(ref ct) = att.content_type {
+        let lower = ct.to_ascii_lowercase();
+        if lower == "image/png" || lower == "image/jpeg" || lower == "image/jpg" || lower == "image/webp" {
+            return true;
+        }
+    }
+    matches!(
+        att.filename.rsplit('.').next().map(|s| s.to_ascii_lowercase()).as_deref(),
+        Some("png" | "jpg" | "jpeg" | "webp")
+    )
+}
+
+pub(crate) async fn collect_images_from_attachments(
+    ctx: &Context,
+    attachments: &[Attachment],
+) -> Vec<String> {
+    let mut images = Vec::new();
+    for att in attachments {
+        if images.len() >= MAX_IMAGES_PER_REQUEST {
+            break;
+        }
+        if !is_supported_image_attachment(att) {
+            continue;
+        }
+        match ctx.client().get_discord_attachment(att).await {
+            Ok(bytes) if (bytes.len() as u64) <= MAX_IMAGE_BYTES => {
+                images.push(base64_encode(&bytes));
+            }
+            Ok(_) => {}
+            Err(err) => {
+                tracing::debug!(?err, filename = %att.filename, "failed to download image attachment for vision");
+            }
+        }
+    }
+    images
+}
+
+/// Format a Discord embed concisely for LLM consumption (score cards, rich links, etc.).
+pub fn format_embed_summary(embed: &Embed) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(ref author) = embed.author {
+        let a = sanitize_llm_text(author.name.trim());
+        if !a.is_empty() {
+            parts.push(format!("Author: {a}"));
+        }
+    }
+    if let Some(ref title) = embed.title {
+        let t = sanitize_llm_text(title.trim());
+        if !t.is_empty() {
+            parts.push(format!("Title: {t}"));
+        }
+    }
+    if let Some(ref desc) = embed.description {
+        let d = sanitize_llm_text(desc.trim());
+        if !d.is_empty() {
+            parts.push(truncate_chars(&d, 600));
+        }
+    }
+    for field in embed.fields.iter().take(8) {
+        let k = sanitize_llm_text(field.name.trim());
+        let v = sanitize_llm_text(field.value.trim());
+        if !k.is_empty() || !v.is_empty() {
+            parts.push(format!("{k}: {v}"));
+        }
+    }
+    if let Some(ref footer) = embed.footer {
+        let f = sanitize_llm_text(footer.text.trim());
+        if !f.is_empty() {
+            parts.push(format!("Footer: {f}"));
+        }
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(truncate_chars(&format!("[Embed: {}]", parts.join(" | ")), HISTORY_MESSAGE_CHAR_LIMIT))
+    }
+}
+
+/// Render a Discord message's text plus any embed summaries into sanitized prompt text.
+pub fn format_message_text_and_embeds(msg: &Message) -> String {
+    let mut out = sanitize_llm_text(&truncate_history_message(&msg.content));
+    for embed in msg.embeds.iter().take(2) {
+        if let Some(summary) = format_embed_summary(embed) {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(&summary);
+        }
+    }
+    truncate_history_message(&out)
+}
+
+fn push_or_coalesce_user_message(
+    msgs: &mut Vec<AiMessage>,
+    current_user_msg: String,
+    images: Vec<String>,
+) {
     if let Some(last) = msgs.last_mut() {
         if last.role == "user" {
             last.content.push('\n');
             last.content.push_str(&current_user_msg);
+            last.images.extend(images);
             return;
         }
     }
-    msgs.push(AiMessage::user(current_user_msg));
+    msgs.push(AiMessage::user_with_images(current_user_msg, images));
 }
 
-/// Core function to formulate messages and query the AI backend.
-#[allow(clippy::too_many_arguments)]
-pub async fn execute_ai_question(
+/// Core entry point accepting image attachments and search-mode overrides.
+pub async fn execute_ai_question_with_options(
     ctx: &Context,
     guild_id: Option<Id<GuildMarker>>,
     channel_id: Id<ChannelMarker>,
     user_id: Id<UserMarker>,
     username: &str,
     question: &str,
-    exclude_message_id: Option<Id<MessageMarker>>,
-    referenced_msg: Option<&Message>,
-) -> Result<String> {
+    opts: AiQuestionOptions<'_>,
+) -> Result<Vec<String>> {
     let bot_id = ctx
         .cache
         .current_user(|user| user.id)
         .expect("missing CurrentUser in cache");
 
-    let resolved_guild = guild_id.or_else(|| ctx.cache.channel(channel_id, |c| c.guild_id).ok().flatten());
+    let resolved_guild =
+        guild_id.or_else(|| ctx.cache.channel(channel_id, |c| c.guild_id).ok().flatten());
     let guild_prefix = resolved_guild
         .and_then(|gid| ctx.guild_settings(gid, |s| s.effective_prefix().to_owned()));
 
@@ -355,7 +549,7 @@ pub async fn execute_ai_question(
     ) {
         match tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            get_history(ctx, channel_id, exclude_message_id),
+            get_history(ctx, channel_id, opts.exclude_message_id),
         )
         .await
         {
@@ -374,10 +568,9 @@ pub async fn execute_ai_question(
         Vec::new()
     };
 
-    let messages = if let Some(replied) = referenced_msg {
+    let mut history_messages = if let Some(replied) = opts.referenced_msg {
         if replied.author.id == bot_id && is_conversational_ai_message(replied) {
-            let raw_ai_text = &replied.content;
-            let ai_content = sanitize_llm_text(&clean_ai_response(&truncate_history_message(raw_ai_text)));
+            let ai_content = sanitize_llm_text(&clean_ai_response(&truncate_history_message(&replied.content)));
 
             let history_before_ai = if let Some(idx) = history.iter().position(|m| m.id == replied.id) {
                 history[..idx].to_vec()
@@ -391,70 +584,61 @@ pub async fn execute_ai_question(
                 history_before_ai
             };
 
-            let mut history_messages = convert_history(history_slice, bot_id, guild_prefix.as_deref());
+            let mut msgs = convert_history(history_slice, bot_id, guild_prefix.as_deref());
 
             if !ai_content.is_empty() {
-                if let Some(last) = history_messages.last_mut() {
+                if let Some(last) = msgs.last_mut() {
                     if last.role == "assistant" {
                         *last = AiMessage::assistant(ai_content);
                     } else {
-                        history_messages.push(AiMessage::assistant(ai_content));
+                        msgs.push(AiMessage::assistant(ai_content));
                     }
                 } else {
-                    history_messages.push(AiMessage::assistant(ai_content));
+                    msgs.push(AiMessage::assistant(ai_content));
                 }
             }
 
             system_prompt.push_str(
                 "\n\nCONVERSATION CONTEXT: The user is directly replying to your previous statement above. Focus your response specifically on addressing what they said in direct relation to your statement. Do NOT repeat or regurgitate what you already said—simply answer their reply directly."
             );
-
-            let mut msgs = Vec::with_capacity(history_messages.len() + 2);
-            msgs.push(AiMessage::system(system_prompt));
-            msgs.extend(history_messages);
-            push_or_coalesce_user_message(&mut msgs, current_user_msg);
             msgs
         } else {
-            let history_messages = convert_history(history, bot_id, guild_prefix.as_deref());
-
             system_prompt.push_str(
                 "\n\nRecent messages from this specific Discord chat are provided for conversational context. Answer the current question directly. If the latest question introduces a new topic, focus entirely on the new topic—do NOT repeat previous answers or equations from earlier in the chat!"
             );
-
-            let mut msgs = Vec::with_capacity(history_messages.len() + 2);
-            msgs.push(AiMessage::system(system_prompt));
-            msgs.extend(history_messages);
-            push_or_coalesce_user_message(&mut msgs, current_user_msg);
-            msgs
+            convert_history(history, bot_id, guild_prefix.as_deref())
         }
     } else {
-        let history_messages = convert_history(history, bot_id, guild_prefix.as_deref());
-
         system_prompt.push_str(
             "\n\nRecent messages from this specific Discord chat are provided for conversational context. Answer the current question directly. If the latest question introduces a new topic, focus entirely on the new topic—do NOT repeat previous answers or equations from earlier in the chat!"
         );
-
-        let mut msgs = Vec::with_capacity(history_messages.len() + 2);
-        msgs.push(AiMessage::system(system_prompt));
-        msgs.extend(history_messages);
-        push_or_coalesce_user_message(&mut msgs, current_user_msg);
-        msgs
+        convert_history(history, bot_id, guild_prefix.as_deref())
     };
 
-    // Ask whichever AI backend is configured in AiClient.
-    let answer = ctx.ai().ask(channel_id, &messages).await?;
+    trim_history_to_budget(
+        &mut history_messages,
+        &system_prompt,
+        &current_user_msg,
+        ctx.ai().num_ctx(),
+        ctx.ai().num_predict(),
+    );
 
-    // Remove role prefixes that some local models generate.
-    let answer = clean_ai_response(&answer);
+    let mut messages = Vec::with_capacity(history_messages.len() + 2);
+    messages.push(AiMessage::system(system_prompt));
+    messages.extend(history_messages);
+    push_or_coalesce_user_message(&mut messages, current_user_msg, opts.images);
 
-    // Truncate if exceeding Discord limit.
-    let mut answer = truncate_discord_response(&answer);
+    let answer = ctx
+        .ai()
+        .ask_with_search(channel_id, &messages, opts.search_mode)
+        .await?;
 
-    if answer.is_empty() {
+    let mut answer = clean_ai_response(&answer);
+    if answer.trim().is_empty() {
         answer = "*(blinks blankly... no thoughts head empty)*".to_owned();
     }
 
-    Ok(answer)
+    Ok(split_discord_response(&answer, DISCORD_RESPONSE_CHAR_LIMIT))
 }
 
 /// Retrieve the previous Discord messages for the AI's conversation context.
@@ -608,15 +792,10 @@ fn convert_history(
     let mut raw_messages: Vec<AiMessage> = Vec::with_capacity(history.len());
 
     for message in history {
-        if message.content.trim().is_empty() {
+        let content = format_message_text_and_embeds(&message);
+        if content.trim().is_empty() {
             continue;
         }
-
-        if message.author.bot && message.author.id != bot_id {
-            continue;
-        }
-
-        let content = sanitize_llm_text(&truncate_history_message(&message.content));
 
         if message.author.id == bot_id {
             if is_transient_status(&content) {
@@ -626,6 +805,10 @@ fn convert_history(
             if !cleaned.is_empty() {
                 raw_messages.push(AiMessage::assistant(cleaned));
             }
+        } else if message.author.bot {
+            // Allow other bots' score/news embeds in history as labeled context
+            let bot_name = sanitize_llm_text(&message.author.name);
+            raw_messages.push(AiMessage::user(format!("[Bot {bot_name}]: {content}")));
         } else {
             let trimmed = content.trim();
             if is_non_ai_command_with_prefix(trimmed, guild_prefix) {
@@ -823,20 +1006,132 @@ fn format_server_emojis(content: &str) -> String {
     result
 }
 
-/// Limit the initial AI response so it fits safely inside one Discord message.
-///
-/// Later you can replace this with response chunking and send multiple
-/// follow-up messages instead.
-fn truncate_discord_response(content: &str) -> String {
-    if content.chars().count() <= DISCORD_RESPONSE_CHAR_LIMIT {
-        return content.to_owned();
+/// Trim oldest history messages first so system + history + current prompt stay under `num_ctx`.
+fn trim_history_to_budget(
+    history: &mut Vec<AiMessage>,
+    system_prompt: &str,
+    current_user_msg: &str,
+    num_ctx: u32,
+    num_predict: i32,
+) {
+    let reserve_output = if num_predict > 0 { num_predict as usize } else { 2_048 };
+    let used_fixed_tokens = ((system_prompt.chars().count() + current_user_msg.chars().count()) as f64 / 3.5).ceil() as usize;
+    let overhead_tokens = reserve_output + used_fixed_tokens + 1_200; // leave headroom for tools/framing
+    let available_tokens = (num_ctx as usize).saturating_sub(overhead_tokens).max(800);
+    let max_history_chars = (available_tokens as f64 * 3.5) as usize;
+
+    let mut kept = Vec::with_capacity(history.len());
+    let mut acc_chars = 0usize;
+    for msg in history.drain(..).rev() {
+        let len = msg.content.chars().count() + 16;
+        if !kept.is_empty() && acc_chars + len > max_history_chars {
+            break;
+        }
+        acc_chars += len;
+        kept.push(msg);
+    }
+    kept.reverse();
+    *history = kept;
+}
+
+/// Split long AI responses across multiple Discord messages along natural boundaries (max 5 chunks).
+fn split_discord_response(content: &str, max_chars: usize) -> Vec<String> {
+    if content.chars().count() <= max_chars {
+        return vec![content.to_owned()];
     }
 
-    let mut truncated = truncate_chars(content, DISCORD_RESPONSE_CHAR_LIMIT);
+    let mut chunks = Vec::new();
+    let mut remaining = content;
 
-    truncated.push_str("\n\n[response truncated]");
+    while !remaining.is_empty() && chunks.len() < MAX_DISCORD_CHUNKS {
+        if remaining.chars().count() <= max_chars {
+            chunks.push(remaining.trim_end().to_owned());
+            break;
+        }
 
-    truncated
+        // Last allowed chunk: append ellipsis note if still overflowing
+        let hard_byte_end = remaining
+            .char_indices()
+            .nth(max_chars)
+            .map(|(i, _)| i)
+            .unwrap_or(remaining.len());
+
+        let slice = &remaining[..hard_byte_end];
+        let split_at = slice
+            .rfind("\n\n")
+            .filter(|&i| i >= hard_byte_end / 3)
+            .or_else(|| slice.rfind('\n').filter(|&i| i >= hard_byte_end / 3))
+            .or_else(|| {
+                slice
+                    .rfind(". ")
+                    .or_else(|| slice.rfind("! "))
+                    .or_else(|| slice.rfind("? "))
+                    .map(|i| i + 1)
+                    .filter(|&i| i >= hard_byte_end / 3)
+            })
+            .or_else(|| slice.rfind(' ').filter(|&i| i >= hard_byte_end / 3))
+            .unwrap_or(hard_byte_end);
+
+        let mut chunk = remaining[..split_at].trim_end().to_owned();
+        remaining = remaining[split_at..].trim_start();
+
+        // Balance odd triple-backtick code fences across chunks so formatting stays intact
+        if chunk.matches("```").count() % 2 == 1 {
+            chunk.push_str("\n```");
+            if !remaining.is_empty() && chunks.len() + 1 < MAX_DISCORD_CHUNKS {
+                // Prepend reopening fence cleanly using an owned String loop fallback
+                let mut reopened = String::from("```\n");
+                reopened.push_str(remaining);
+                chunks.push(chunk);
+                // Re-process reopened rest iteratively in place via slice? Wait: let's keep tail bounded!
+                let tail_chunks = split_plain_tail(&reopened, max_chars, MAX_DISCORD_CHUNKS - chunks.len());
+                chunks.extend(tail_chunks);
+                return chunks;
+            }
+        }
+
+        if chunks.len() + 1 == MAX_DISCORD_CHUNKS && !remaining.is_empty() {
+            let mut capped = truncate_chars(&chunk, max_chars.saturating_sub(24));
+            capped.push_str("\n\n[response truncated]");
+            chunks.push(capped);
+            break;
+        }
+
+        chunks.push(chunk);
+    }
+
+    chunks
+}
+
+fn split_plain_tail(text: &str, max_chars: usize, max_chunks: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rem = text;
+    while !rem.is_empty() && out.len() < max_chunks {
+        if rem.chars().count() <= max_chars {
+            out.push(rem.to_owned());
+            break;
+        }
+        let end = rem
+            .char_indices()
+            .nth(max_chars)
+            .map(|(i, _)| i)
+            .unwrap_or(rem.len());
+        let cut = rem[..end]
+            .rfind('\n')
+            .or_else(|| rem[..end].rfind(' '))
+            .filter(|&i| i > end / 3)
+            .unwrap_or(end);
+        let mut piece = rem[..cut].trim_end().to_owned();
+        rem = rem[cut..].trim_start();
+        if out.len() + 1 == max_chunks && !rem.is_empty() {
+            piece = truncate_chars(&piece, max_chars.saturating_sub(24));
+            piece.push_str("\n\n[response truncated]");
+            out.push(piece);
+            break;
+        }
+        out.push(piece);
+    }
+    out
 }
 
 /// UTF-8 safe character truncation using char_indices.
@@ -956,5 +1251,53 @@ mod tests {
         assert!(is_non_ai_command("!ping"));
         assert!(!is_non_ai_command("!ask what is osu?"));
         assert!(!is_non_ai_command("Can you render this map for me?"));
+    }
+
+    #[test]
+    fn test_format_embed_summary_and_trim_and_split() {
+        use twilight_model::channel::message::embed::{EmbedAuthor, EmbedField};
+        let embed = Embed {
+            author: Some(EmbedAuthor {
+                icon_url: None,
+                name: "mrekk".into(),
+                proxy_icon_url: None,
+                url: None,
+            }),
+            color: None,
+            description: Some("99.1% FC".into()),
+            fields: vec![EmbedField {
+                inline: true,
+                name: "PP".into(),
+                value: "1,400pp".into(),
+            }],
+            footer: None,
+            image: None,
+            kind: "rich".into(),
+            provider: None,
+            thumbnail: None,
+            timestamp: None,
+            title: Some("Sidetracked Day".into()),
+            url: None,
+            video: None,
+        };
+        let summary = format_embed_summary(&embed).expect("non-empty embed summary");
+        assert!(summary.contains("mrekk"));
+        assert!(summary.contains("1,400pp"));
+
+        let mut msgs = vec![
+            AiMessage::user("oldest ".repeat(350)),
+            AiMessage::assistant("mid ".repeat(350)),
+            AiMessage::user("latest message"),
+        ];
+        trim_history_to_budget(&mut msgs, "sys", "cur", 4096, 2048);
+        assert!(msgs.last().unwrap().content.contains("latest message"));
+        assert!(msgs.len() <= 2);
+
+        let long_text = format!("{} {}\n\n{}", "alpha".repeat(25), "beta".repeat(25), "gamma".repeat(30));
+        let chunks = split_discord_response(&long_text, 120);
+        assert!(chunks.len() >= 2);
+        for c in &chunks {
+            assert!(c.chars().count() <= 120, "chunk too long: {}", c.chars().count());
+        }
     }
 }
