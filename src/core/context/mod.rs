@@ -131,7 +131,7 @@ impl Context {
             paginations: Arc::new(paginations),
             standby: Standby::new(),
             stats,
-            replay_queue: ReplayQueue::new(),
+            replay_queue: ReplayQueue::load().await,
             skin_list: Arc::new(Mutex::default()),
             ai: AiClient::new().await,
         };

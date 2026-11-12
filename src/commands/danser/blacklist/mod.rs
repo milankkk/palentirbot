@@ -12,6 +12,7 @@ use crate::{
 use self::server::{add, remove};
 
 mod server;
+mod user;
 
 #[derive(CommandModel, CreateCommand, SlashCommand)]
 #[command(name = "blacklist")]
@@ -20,6 +21,8 @@ mod server;
 pub enum Blacklist {
     #[command(name = "server")]
     Server(BlacklistServer),
+    #[command(name = "user")]
+    User(BlacklistUser),
 }
 
 #[derive(CommandModel, CreateCommand)]
@@ -50,9 +53,39 @@ pub struct BlacklistServerRemove {
     guild_id: String,
 }
 
+#[derive(CommandModel, CreateCommand)]
+#[command(name = "user")]
+/// Blacklist a user from rendering replays
+pub enum BlacklistUser {
+    #[command(name = "add")]
+    Add(BlacklistUserAdd),
+    #[command(name = "remove")]
+    Remove(BlacklistUserRemove),
+}
+
+#[derive(CommandModel, CreateCommand)]
+#[command(name = "add")]
+/// Add a user to the blacklist
+pub struct BlacklistUserAdd {
+    /// Discord user ID or mention
+    user: String,
+    /// Reason for the blacklist
+    reason: Option<String>,
+}
+
+#[derive(CommandModel, CreateCommand)]
+#[command(name = "remove")]
+/// Remove a user from the blacklist
+pub struct BlacklistUserRemove {
+    /// Discord user ID or mention
+    user: String,
+}
+
 async fn slash_blacklist(ctx: Arc<Context>, mut command: InteractionCommand) -> Result<()> {
     match Blacklist::from_interaction(command.input_data())? {
         Blacklist::Server(BlacklistServer::Add(args)) => add(ctx, command, args).await,
         Blacklist::Server(BlacklistServer::Remove(args)) => remove(ctx, command, args).await,
+        Blacklist::User(BlacklistUser::Add(args)) => user::add(ctx, command, args).await,
+        Blacklist::User(BlacklistUser::Remove(args)) => user::remove(ctx, command, args).await,
     }
 }

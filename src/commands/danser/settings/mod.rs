@@ -22,11 +22,12 @@ use crate::{
     util::{builder::EmbedBuilder, interaction::InteractionCommand, InteractionCommandExt},
 };
 
-use self::{copy::*, default::*, edit::*, view::*};
+pub use self::{copy::*, default::*, edit::*, preset::*, view::*};
 
 mod copy;
 mod default;
 mod edit;
+mod preset;
 mod view;
 
 #[derive(CreateCommand, SlashCommand)]
@@ -41,6 +42,8 @@ pub enum Settings {
     Default(SettingsDefault),
     #[command(name = "edit")]
     Edit(SettingsEdit),
+    #[command(name = "preset")]
+    Preset(SettingsPreset),
     #[command(name = "view")]
     View(SettingsView),
 }
@@ -53,6 +56,8 @@ pub enum SettingsParsable {
     Default(SettingsDefault),
     #[command(name = "edit")]
     Edit(SettingsEditAutocomplete),
+    #[command(name = "preset")]
+    Preset(SettingsPreset),
     #[command(name = "view")]
     View(SettingsView),
 }
@@ -137,6 +142,12 @@ pub struct SettingsEdit {
     strain_graph_outline: Option<Visibility>,
     /// whether the key overlay should be displayed
     key_overlay: Option<Visibility>,
+    /// Whether motion blur is enabled
+    motion_blur: Option<State>,
+    /// Whether the results screen is shown after a replay
+    results_screen: Option<State>,
+    /// Whether intros/breaks are automatically skipped
+    skip_intro: Option<State>,
 }
 
 impl TryFrom<SettingsEditAutocomplete> for SettingsEdit {
@@ -167,6 +178,9 @@ impl TryFrom<SettingsEditAutocomplete> for SettingsEdit {
             strain_graph,
             strain_graph_outline,
             key_overlay,
+            motion_blur,
+            results_screen,
+            skip_intro,
         } = edit;
 
         let skin = match skin {
@@ -198,6 +212,9 @@ impl TryFrom<SettingsEditAutocomplete> for SettingsEdit {
             strain_graph,
             strain_graph_outline,
             key_overlay,
+            motion_blur,
+            results_screen,
+            skip_intro,
         };
 
         Ok(edit)
@@ -229,6 +246,29 @@ pub struct SettingsEditAutocomplete {
     strain_graph: Option<Visibility>,
     strain_graph_outline: Option<Visibility>,
     key_overlay: Option<Visibility>,
+    motion_blur: Option<State>,
+    results_screen: Option<State>,
+    skip_intro: Option<State>,
+}
+
+#[derive(CreateCommand, CommandModel)]
+#[command(name = "preset")]
+/// Apply a curated render preset to your danser settings
+pub struct SettingsPreset {
+    /// Preset profile to apply
+    preset: PresetChoice,
+}
+
+#[derive(CreateOption, CommandOption)]
+pub enum PresetChoice {
+    #[option(name = "Standard 1080p60 (balanced defaults)", value = "standard")]
+    Standard,
+    #[option(name = "Clean Showcase (minimal HUD)", value = "clean")]
+    CleanRecord,
+    #[option(name = "Fast 720p60 (no storyboard/video)", value = "fast720p")]
+    Performance720p,
+    #[option(name = "Cinematic Motion Blur (1080p60 + blur)", value = "blur")]
+    CinematicBlur,
 }
 
 #[derive(CreateOption, CommandOption)]
@@ -260,6 +300,7 @@ pub async fn slash_settings(ctx: Arc<Context>, mut command: InteractionCommand) 
         SettingsParsable::Copy(args) => copy(ctx, command, args).await,
         SettingsParsable::Default(args) => default(ctx, command, args).await,
         SettingsParsable::Edit(args) => edit(ctx, command, args).await,
+        SettingsParsable::Preset(args) => preset(ctx, command, args).await,
         SettingsParsable::View(args) => view(ctx, command, args).await,
     }
 }
@@ -297,9 +338,25 @@ fn create_settings_embed(user: &User, settings: &DanserSettings) -> Embed {
             name: "Gameplay".to_owned(),
             value: format!(
                 "`leaderboard`: {}\n\
-                `key overlay`: {}",
+                `key overlay`: {}\n\
+                `results screen`: {}\n\
+                `skip intro`: {}",
                 on_off(settings.gameplay.score_board.show),
                 on_off(settings.gameplay.key_overlay.show),
+                on_off(settings.gameplay.show_results_screen),
+                on_off(settings.gameplay.always_skip_intro),
+            ),
+        },
+        EmbedField {
+            inline: false,
+            name: "Recording".to_owned(),
+            value: format!(
+                "`resolution`: {}x{} @ {}fps\n\
+                `motion blur`: {}",
+                settings.recording.frame_width,
+                settings.recording.frame_height,
+                settings.recording.fps,
+                on_off(settings.recording.motion_blur.enabled),
             ),
         },
         EmbedField {

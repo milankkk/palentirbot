@@ -192,15 +192,7 @@ async fn slash_queue(ctx: Arc<Context>, command: InteractionCommand) -> Result<(
     let builder = MessageBuilder::new().embed(embed);
     command.callback(&ctx, builder, false).await?;
 
-    let is_active = {
-        let is_empty = {
-            let q = ctx.replay_queue.queue.lock().await;
-            let q: &std::collections::VecDeque<crate::core::ReplayData> = &q;
-            q.is_empty()
-        };
-        let status = *ctx.replay_queue.status.lock().await;
-        !is_empty || !matches!(status, ReplayStatus::Waiting)
-    };
+    let is_active = ctx.replay_queue.is_active().await;
 
     if !is_active {
         return Ok(());

@@ -1,12 +1,5 @@
 use std::sync::Arc;
 
-use crate::commands::danser::{
-    queue::send_queue_status,
-    render_score::{render_score_from_message, EmbedRenderOutcome},
-};
-
-use crate::util::builder::MessageBuilder;
-
 use twilight_model::channel::Message;
 
 use crate::{core::Context, util::ChannelExt};
@@ -89,96 +82,52 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
 
         // ── render ────────────────────────────────────────────────────────────
         "render" => {
-            if let Some(attachment) = msg.attachments.first() {
-                if !matches!(attachment.filename.rsplit('.').next(), Some(ext) if ext.eq_ignore_ascii_case("osr")) {
+            use crate::commands::danser::render_score::{
+                build_queue_added_message, check_render_access, check_user_queue_limit,
+                finalize_enqueue, parse_prefix_render_args, prepare_score_by_id,
+                render_score_from_message, sanitize_filename, EmbedRenderOutcome,
+                ScorePrepareOutcome,
+            };
+
+            let output_channel = match check_render_access(
+                &ctx,
+                msg.author.id,
+                msg.guild_id,
+                msg.channel_id,
+            )
+            .await
+            {
+                Ok(ch) => ch,
+                Err(err_msg) => {
+                    let _ = msg.error(&ctx, err_msg).await;
+                    return;
+                }
+            };
+
+            if let Err(err_msg) = check_user_queue_limit(&ctx, msg.author.id).await {
+                let _ = msg.error(&ctx, err_msg).await;
+                return;
+            }
+
+            let (opts, score_id_opt) = match parse_prefix_render_args(&ctx, args_str) {
+                Ok(parsed) => parsed,
+                Err(err_msg) => {
+                    let _ = msg.error(&ctx, err_msg).await;
+                    return;
+                }
+            };
+
+            let (mut replay_data, warning): (_, Option<&'static str>) = if let Some(attachment) =
+                msg.attachments.first()
+            {
+                if !matches!(attachment.filename.rsplit('.').next(), Some(ext) if ext.eq_ignore_ascii_case("osr"))
+                {
                     let _ = msg
                         .error(&ctx, "The attachment must be a `.osr` file!")
                         .await;
                     return;
                 }
 
-                // Blacklist & channel check
-                let output_channel = if let Some(guild_id) = msg.guild_id {
-                    let is_allowed = ctx
-                        .guild_settings(guild_id, |s| {
-                            s.input_channels.is_empty() || s.input_channels.contains(&msg.channel_id)
-                        })
-                        .unwrap_or(true);
-
-                    if !is_allowed {
-                        let _ = msg
-                            .error(
-                                &ctx,
-                                "This channel is not an allowed input channel for rendering.",
-                            )
-                            .await;
-                        return;
-                    }
-
-                    match ctx.psql()._is_server_blacklisted(guild_id).await {
-                        Ok((true, reason)) => {
-                            let mut c = String::from("This server has been blacklisted.");
-                            if let Some(r) = reason {
-                                c.push(' ');
-                                c.push_str(&r);
-                            }
-                            let _ = msg.error(&ctx, c).await;
-                            return;
-                        }
-                        Ok((false, _)) => {}
-                        Err(err) => {
-                            tracing::warn!(?err, "failed to check server blacklist");
-                            let _ = msg
-                                .error(&ctx, "Failed to check server status, try again later.")
-                                .await;
-                            return;
-                        }
-                    }
-
-                    ctx.guild_settings(guild_id, |s| s.output_channel)
-                        .flatten()
-                        .unwrap_or(msg.channel_id)
-                } else {
-                    msg.channel_id
-                };
-
-                // Parse optional args: start=MM:SS end=MM:SS pitch=1.5
-                let mut start_secs: u32 = 0;
-                let mut end_secs: u32 = 0;
-                let mut pitch: Option<f64> = None;
-                for token in args_str.split_whitespace() {
-                    if let Some(v) = token.strip_prefix("start=") {
-                        match crate::core::replay_queue::TimePoints::parse_single(v) {
-                            Ok(s) => start_secs = s,
-                            Err(err) => {
-                                let _ = msg.error(&ctx, format!("Invalid `start`: {err}")).await;
-                                return;
-                            }
-                        }
-                    } else if let Some(v) = token.strip_prefix("end=") {
-                        match crate::core::replay_queue::TimePoints::parse_single(v) {
-                            Ok(s) => end_secs = s,
-                            Err(err) => {
-                                let _ = msg.error(&ctx, format!("Invalid `end`: {err}")).await;
-                                return;
-                            }
-                        }
-                    } else if let Some(v) = token.strip_prefix("pitch=") {
-                        match v.parse::<f64>() {
-                            Ok(p) if p.is_finite() && p > 0.0 => {
-                                pitch = Some(p.clamp(0.5, 5.0));
-                            }
-                            _ => {
-                                let _ = msg
-                                    .error(&ctx, "Invalid `pitch`: must be a positive number (e.g. `pitch=1.5`).")
-                                    .await;
-                                return;
-                            }
-                        }
-                    }
-                }
-
-                // Download attachment
                 let bytes = match ctx.client().get_discord_attachment(attachment).await {
                     Ok(b) => b,
                     Err(err) => {
@@ -188,7 +137,6 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
                     }
                 };
 
-                // Parse replay
                 use osu_db::{Mode, Replay};
                 let replay = match Replay::from_bytes(&bytes) {
                     Ok(r) => r,
@@ -210,10 +158,9 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
                     return;
                 }
 
-                // Save to disk
                 let config = crate::core::BotConfig::get();
                 let mut replay_file = config.paths.downloads();
-                let safe_filename = crate::commands::danser::render_score::sanitize_filename(&attachment.filename);
+                let safe_filename = sanitize_filename(&attachment.filename);
                 replay_file.push(format!("{}_{safe_filename}", msg.id));
                 use tokio::io::AsyncWriteExt as _;
                 match tokio::fs::File::create(&replay_file).await {
@@ -231,116 +178,56 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
                     }
                 }
 
-                // Push to queue
-                use crate::core::replay_queue::{is_lazer_replay, ReplayData, ReplaySlim, TimePoints};
+                use crate::core::replay_queue::{is_lazer_replay, ReplayData, ReplaySlim};
                 let is_lazer = is_lazer_replay(replay.version);
-                let was_empty = ctx
-                    .replay_queue
-                    .push(ReplayData {
-                        input_channel: msg.channel_id,
+                (
+                    ReplayData::from_options(
+                        msg.channel_id,
                         output_channel,
-                        pitch,
-                        path: replay_file,
-                        replay: ReplaySlim::from(replay),
-                        time_points: TimePoints {
-                            start: start_secs,
-                            end: end_secs,
-                        },
-                        user: msg.author.id,
-                        title: None,
-                        player_name: None,
-                        map_title: None,
-                        difficulty_name: None,
-                        queue_message: None,
+                        replay_file,
+                        ReplaySlim::from(replay),
+                        msg.author.id,
                         is_lazer,
-                    })
-                    .await;
-
-                use crate::util::builder::MessageBuilder;
-                let _ = msg
-                    .channel_id
-                    .create_message(
-                        &ctx,
-                        &MessageBuilder::new().embed("Replay has been added to the queue!"),
-                    )
-                    .await;
-
-                if was_empty {
-                    let ctx_clone = Arc::clone(&ctx);
-                    tokio::spawn(async move {
-                        let _ = send_queue_status(ctx_clone, output_channel).await;
-                    });
-                }
-            } else if let Some(replied) = msg.referenced_message.as_deref() {
-                let output_channel = if let Some(guild_id) = msg.guild_id {
-                    let is_allowed = ctx
-                        .guild_settings(guild_id, |s| {
-                            s.input_channels.is_empty() || s.input_channels.contains(&msg.channel_id)
-                        })
-                        .unwrap_or(true);
-
-                    if !is_allowed {
+                        opts,
+                    ),
+                    None,
+                )
+            } else if let Some(score_id) = score_id_opt {
+                match prepare_score_by_id(
+                    &ctx,
+                    score_id,
+                    msg.channel_id,
+                    output_channel,
+                    msg.author.id,
+                    opts,
+                )
+                .await
+                {
+                    Ok(ScorePrepareOutcome::Ready(data)) => (*data, None),
+                    Ok(ScorePrepareOutcome::Unavailable(reason)) => {
+                        let _ = msg.error(&ctx, reason).await;
+                        return;
+                    }
+                    Err(err) => {
+                        tracing::warn!(?err, score_id, "failed to fetch score by URL/ID");
                         let _ = msg
-                            .error(
-                                &ctx,
-                                "This channel is not an allowed input channel for rendering.",
-                            )
+                            .error(&ctx, "Could not fetch that score from the osu! API.")
                             .await;
                         return;
                     }
-
-                    match ctx.psql()._is_server_blacklisted(guild_id).await {
-                        Ok((true, reason)) => {
-                            let mut c = String::from("This server has been blacklisted.");
-                            if let Some(r) = reason {
-                                c.push(' ');
-                                c.push_str(&r);
-                            }
-                            let _ = msg.error(&ctx, c).await;
-                            return;
-                        }
-                        Ok((false, _)) => {}
-                        Err(err) => {
-                            tracing::warn!(?err, "failed to check server blacklist");
-                            let _ = msg
-                                .error(&ctx, "Failed to check server status, try again later.")
-                                .await;
-                            return;
-                        }
-                    }
-
-                    ctx.guild_settings(guild_id, |s| s.output_channel)
-                        .flatten()
-                        .unwrap_or(msg.channel_id)
-                } else {
-                    msg.channel_id
-                };
-
+                }
+            } else if let Some(replied) = msg.referenced_message.as_deref() {
                 match render_score_from_message(
                     Arc::clone(&ctx),
                     replied,
                     msg.channel_id,
                     output_channel,
                     msg.author.id,
+                    opts,
                 )
                 .await
                 {
-                    Ok(EmbedRenderOutcome::Enqueued { was_empty }) => {
-                        let _ = msg
-                            .channel_id
-                            .create_message(
-                                &ctx,
-                                &MessageBuilder::new().embed("Replay has been added to the queue!"),
-                            )
-                            .await;
-
-                        if was_empty {
-                            let ctx_clone = Arc::clone(&ctx);
-                            tokio::spawn(async move {
-                                let _ = send_queue_status(ctx_clone, output_channel).await;
-                            });
-                        }
-                    }
+                    Ok(EmbedRenderOutcome::Enqueued { data, warning }) => (*data, warning),
                     Ok(EmbedRenderOutcome::NotScoreEmbed) => {
                         let _ = msg
                             .error(
@@ -348,25 +235,35 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
                                 "Could not recognize a Bathbot/Owobot score embed on that message.",
                             )
                             .await;
+                        return;
                     }
                     Ok(EmbedRenderOutcome::ReplayUnavailable(reason)) => {
                         let _ = msg.error(&ctx, reason).await;
+                        return;
                     }
                     Err(err) => {
                         tracing::error!(?err, "failed to render score from replied embed");
                         let _ = msg
                             .error(&ctx, "Failed to process the replied score embed.")
                             .await;
+                        return;
                     }
                 }
             } else {
                 let _ = msg
                     .error(
                         &ctx,
-                        "Attach a `.osr` replay file, or reply to a Bathbot/Owobot-style score embed with this command.",
+                        "Attach a `.osr` replay file, pass an osu! score URL, or reply to a Bathbot/Owobot-style score embed with this command.",
                     )
                     .await;
-            }
+                return;
+            };
+
+            let job_id = ctx.replay_queue.allocate_job_id();
+            replay_data.job_id = job_id;
+            let builder = build_queue_added_message(job_id, warning);
+            let queue_msg = msg.channel_id.create_message(&ctx, &builder).await.ok();
+            finalize_enqueue(ctx, replay_data, queue_msg).await;
         }
 
         // ── queue ─────────────────────────────────────────────────────────────
@@ -394,7 +291,7 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
                  `{p}ask <question>` — Ask the AI a question (aliases: `{p}ai`, `{p}a`)\n\
                  `{p}aicontext` — Show context window usage & engine stats (aliases: `{p}context`, `{p}aic`)\n\
                  `{p}ping` — Check latency\n\
-                 `{p}render` — Render a replay (attach `.osr`). Args: `start=MM:SS` `end=MM:SS` `pitch=<float>`\n\
+                 `{p}render` — Render a replay (attach `.osr`, pass an osu! score URL, or reply to a score embed). Args: `start=MM:SS` `end=MM:SS` `pitch=<float>` `skin=\"<name>\"` `skip` `offset=<ms>` `force`\n\
                  `{p}queue` — Show the render queue\n\
                  `{p}skinlist` — List available skins\n\
                  `{p}invite` — Bot invite link\n\

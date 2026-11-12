@@ -262,6 +262,7 @@ pub struct Gameplay {
     pub play_username: String,
     #[serde(rename = "UseLazerPP")]
     pub use_lazer_pp: bool,
+    pub always_skip_intro: bool,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }

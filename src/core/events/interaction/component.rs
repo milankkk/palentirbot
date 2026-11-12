@@ -39,19 +39,14 @@ pub async fn handle_component(ctx: Arc<Context>, component: InteractionComponent
         _ if name.starts_with("owner_settings_prop_") => crate::commands::owner::settings::handle_owner_settings_prop(ctx, component).await,
         _ if name.starts_with("oset_applyall_") => crate::commands::owner::settings::handle_owner_settings_applyall(ctx, component).await,
         "oset_skipall" => crate::commands::owner::settings::handle_owner_settings_skipall(ctx, component).await,
+        _ if name.starts_with("render_cancel:") => handle_render_cancel(ctx, component).await,
         _ => {
-            let response = twilight_model::http::interaction::InteractionResponse {
-                kind: twilight_model::http::interaction::InteractionResponseType::ChannelMessageWithSource,
-                data: Some(twilight_model::http::interaction::InteractionResponseData {
-                    content: Some("This interaction is unknown or has expired.".to_owned()),
-                    flags: Some(twilight_model::channel::message::MessageFlags::EPHEMERAL),
-                    ..Default::default()
-                }),
-            };
-            let _ = ctx
-                .interaction()
-                .create_response(component.id, &component.token, &response)
-                .await;
+            let _ = respond_ephemeral(
+                &ctx,
+                &component,
+                "This interaction is unknown or has expired.".to_owned(),
+            )
+            .await;
             return error!("unknown message component `{name}`");
         }
     };
@@ -84,13 +79,23 @@ async fn handle_pp_version_select(ctx: Arc<Context>, component: InteractionCompo
         format!("{}pp *(No Choke: {}pp)* / {}pp", pp, nochoke_pp, max_pp)
     };
 
+    let breakdown = (parts.len() >= 8).then(|| {
+        format!(
+            "Aim: `{}` | Speed: `{}` | Acc: `{}`",
+            parts[5], parts[6], parts[7]
+        )
+    });
+
     let mut message = component.message.clone();
 
     if let Some(embed) = message.embeds.first_mut() {
         for field in &mut embed.fields {
             if field.name == "pp" {
                 field.value = pp_value.clone();
-                break;
+            } else if field.name == "PP Breakdown" {
+                field.value = breakdown
+                    .clone()
+                    .unwrap_or_else(|| "*Not exposed for this rework (see rosu-pp v4)*".to_owned());
             }
         }
     }
@@ -120,6 +125,86 @@ async fn handle_pp_version_select(ctx: Arc<Context>, component: InteractionCompo
 
     let builder = MessageBuilder::new().embed(embed).components(components);
     component.callback(&ctx, builder).await?;
+
+    Ok(())
+}
+
+async fn respond_ephemeral(
+    ctx: &Context,
+    component: &InteractionComponent,
+    content: String,
+) -> eyre::Result<()> {
+    let response = twilight_model::http::interaction::InteractionResponse {
+        kind: twilight_model::http::interaction::InteractionResponseType::ChannelMessageWithSource,
+        data: Some(twilight_model::http::interaction::InteractionResponseData {
+            content: Some(content),
+            flags: Some(twilight_model::channel::message::MessageFlags::EPHEMERAL),
+            ..Default::default()
+        }),
+    };
+    ctx.interaction()
+        .create_response(component.id, &component.token, &response)
+        .await?;
+    Ok(())
+}
+
+async fn handle_render_cancel(
+    ctx: Arc<Context>,
+    component: InteractionComponent,
+) -> eyre::Result<()> {
+    use crate::core::replay_queue::CancelResult;
+    use crate::util::builder::MessageBuilder;
+    use crate::util::ComponentExt;
+
+    let Some(job_id) = component
+        .data
+        .custom_id
+        .strip_prefix("render_cancel:")
+        .and_then(|s| s.parse::<u64>().ok())
+    else {
+        return Ok(());
+    };
+
+    let user_id = component.user_id()?;
+    let channel_id = component.message.channel_id;
+    let is_admin = crate::core::commands::checks::check_authority(
+        &ctx,
+        user_id,
+        channel_id,
+        component.guild_id,
+    )
+    .await
+    .is_none();
+
+    match ctx.replay_queue.cancel_job(job_id, user_id, is_admin).await {
+        CancelResult::CancelledRunning => {
+            respond_ephemeral(&ctx, &component, "🛑 Cancelling active render...".to_owned()).await?;
+        }
+        CancelResult::RemovedQueued(removed) => {
+            let _ = tokio::fs::remove_file(&removed.path).await;
+            let builder = MessageBuilder::new()
+                .embed(format!("🛑 Render cancelled by <@{user_id}>."))
+                .components(vec![]);
+            component.callback(&ctx, builder).await?;
+        }
+        CancelResult::Forbidden => {
+            respond_ephemeral(
+                &ctx,
+                &component,
+                "Only the user who requested this render (or a server admin) can cancel it."
+                    .to_owned(),
+            )
+            .await?;
+        }
+        CancelResult::NotFound => {
+            respond_ephemeral(
+                &ctx,
+                &component,
+                "This render job is already finished or no longer in the queue.".to_owned(),
+            )
+            .await?;
+        }
+    }
 
     Ok(())
 }

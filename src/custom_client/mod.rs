@@ -385,10 +385,26 @@ impl CustomClient {
             format!("failed to deserialize upload response: {text}")
         })
     }
+
+    /// Verify with a quick HEAD request whether a cached replay URL is still reachable.
+    pub async fn check_url_exists(&self, url: &str) -> bool {
+        let Ok(resp) = self
+            .client
+            .head(url)
+            .timeout(Duration::from_secs(3))
+            .send()
+            .await
+        else {
+            return false;
+        };
+        resp.status().is_success()
+    }
 }
 
 #[derive(Deserialize)]
 pub struct UploadResponse {
     pub error: u16,
     pub text: String,
+    #[serde(default)]
+    pub video_url: Option<String>,
 }

@@ -15,7 +15,10 @@ use std::{
     io::Cursor,
     path::{Path, PathBuf},
     process::Stdio,
-    sync::Arc,
+    sync::{
+        atomic::Ordering,
+        Arc,
+    },
 };
 use tokio::process::Command;
 use tokio::time::{sleep, Duration};
@@ -61,9 +64,14 @@ async fn process_single_replay(
     danser_path: &Path,
 ) -> Result<()> {
     let ReplayData {
+        job_id: _,
         input_channel,
         output_channel,
         pitch,
+        skin,
+        skip_intro,
+        offset_ms,
+        force_rerender,
         path,
         replay,
         time_points,
@@ -74,7 +82,17 @@ async fn process_single_replay(
         difficulty_name: _,
         queue_message,
         is_lazer,
+        cancelled,
+        cancel_notify,
     } = data;
+
+    if cancelled.load(Ordering::Acquire) {
+        if let Some((msg_id, channel_id)) = queue_message {
+            let _ = ctx.http.delete_message(channel_id, msg_id).await;
+        }
+        let _ = tokio::fs::remove_file(&path).await;
+        return Ok(());
+    }
 
     let replay_hash = replay.replay_hash.as_deref().unwrap_or("");
 
@@ -141,12 +159,19 @@ async fn process_single_replay(
 
     let mut settings_path = config.paths.danser().to_owned();
     settings_path.push(format!("settings/{user}.json"));
+    let mut default_settings_path = config.paths.danser().to_owned();
+    default_settings_path.push("settings/default.json");
 
-    let settings = if tokio::fs::try_exists(&settings_path).await.unwrap_or(false) {
-        user.to_string()
+    let (settings, active_settings_path) = if tokio::fs::try_exists(&settings_path).await.unwrap_or(false) {
+        (user.to_string(), settings_path)
     } else {
-        "default".to_owned()
+        ("default".to_owned(), default_settings_path)
     };
+    let settings_bytes = tokio::fs::read(&active_settings_path).await.unwrap_or_default();
+    let effective_skip_intro = skip_intro
+        || serde_json::from_slice::<crate::core::settings::DanserSettings>(&settings_bytes)
+            .map(|s| s.gameplay.always_skip_intro)
+            .unwrap_or(false);
 
     let filename_opt = path.file_stem().and_then(OsStr::to_str);
 
@@ -159,117 +184,6 @@ async fn process_single_replay(
             eyre::bail!("replay path `{path:?}` has an unexpected form");
         }
     };
-
-    tracing::warn!(mods = replay.mods, "replay mods being sent to danser");
-
-    let canonical_path = tokio::fs::canonicalize(&path)
-        .await
-        .context("failed to canonicalize replay path")?;
-
-    let mut command = Command::new(danser_path);
-    warn!("danser dir: {:?}", config.paths.danser());
-    warn!("danser path: {:?}", danser_path);
-    command
-        .current_dir(config.paths.danser())
-        .kill_on_drop(true)
-        .arg("-noupdatecheck")
-        .arg("-replay")
-        .arg(&canonical_path)
-        .arg("-record")
-        .arg("-settings")
-        .arg(settings)
-        .arg("-quickstart")
-        .arg("-out")
-        .arg(filename)
-        .arg("-preciseprogress")
-        .stderr(Stdio::piped())
-        .stdout(Stdio::piped());
-
-    if time_points.start > 0 {
-        command.args(["-start", &time_points.start.to_string()]);
-    }
-    if time_points.end > 0 {
-        command.args(["-end", &time_points.end.to_string()]);
-    }
-    if let Some(pitch) = pitch {
-        let pitch_val: f64 = pitch;
-        command.args(["-pitch", &pitch_val.to_string()]);
-    }
-
-    info!("Started replay processing");
-
-    ctx.replay_queue
-        .set_status(ReplayStatus::Rendering(0))
-        .await;
-
-    let mut child = match command.spawn() {
-        Ok(child) => child,
-        Err(err) => {
-            let err = Report::from(err).wrap_err("failed to start danser command");
-            tracing::warn!("{:?}", err);
-            let content = "Failed to run danser on the replay";
-            let _ = input_channel.error(&ctx, content).await;
-            return Err(err);
-        }
-    };
-
-    let stdout = child.stdout.take().expect("missing stdout on child");
-    let stderr = child.stderr.take().expect("missing stderr on child");
-
-    let stdout_reader = tokio::io::BufReader::new(stdout);
-    let stderr_reader = tokio::io::BufReader::new(stderr);
-
-    let ctx1 = Arc::clone(&ctx);
-    let stdout_handle = tokio::spawn(async move {
-        read_danser_progress(ctx1, stdout_reader).await
-    });
-
-    let ctx2 = Arc::clone(&ctx);
-    let stderr_handle = tokio::spawn(async move {
-        read_danser_progress(ctx2, stderr_reader).await
-    });
-
-    let childres = tokio::time::timeout(Duration::from_secs(1800), child.wait()).await;
-    tracing::trace!("Danser finished");
-
-    match childres {
-        Ok(Ok(status)) => {
-            let (out_tail, err_tail) = tokio::join!(stdout_handle, stderr_handle);
-            if !status.success() {
-                warn!(
-                    stdout_tail = ?out_tail.ok(),
-                    stderr_tail = ?err_tail.ok(),
-                    "danser exited with non-zero status: {status}"
-                );
-                let content = "Danser crashed or exited with an error code.";
-                let _ = input_channel.error(&ctx, content).await;
-                eyre::bail!("danser exited with non-zero status: {status}");
-            }
-        }
-        Ok(Err(err)) => {
-            let _ = child.kill().await;
-            let _ = tokio::join!(stdout_handle, stderr_handle);
-            let err = Report::from(err).wrap_err("failed to run danser command");
-            tracing::warn!("{:?}", err);
-            let content = "Failed to run danser on the replay";
-            let _ = input_channel.error(&ctx, content).await;
-            return Err(err);
-        }
-        Err(_) => {
-            let _ = child.kill().await;
-            let _ = tokio::join!(stdout_handle, stderr_handle);
-            let content = "Danser render timed out after 30 minutes.";
-            let _ = input_channel.error(&ctx, content).await;
-            eyre::bail!("danser render timed out after 1800s");
-        }
-    }
-
-    warn!("parsed replay mods bits: {}", replay.mods);
-    warn!(
-        "parsed replay mods: {:?}",
-        GameModsLegacy::from_bits(replay.mods)
-    );
-    info!("Finished replay processing");
 
     let map_osu_file = match find_beatmap_osu_file(mapset_id, map_id, &map_version).await {
         Ok(osu_file) => osu_file,
@@ -307,145 +221,371 @@ async fn process_single_replay(
         }
     };
 
-    // Store the formatted title back so the queue embed can display it
+    // Store the formatted title back early so the queue embed shows it immediately
     if let Some(front) = ctx.replay_queue.queue.lock().await.front_mut() {
         front.title = Some(video_title.clone());
     }
+    ctx.replay_queue.notify.notify_waiters();
 
-    let without_prefix = video_title.trim_start_matches('[');
-    let (stars, rest) = without_prefix
-        .split_once("⭐] ")
-        .unwrap_or(("0.00", without_prefix));
-    let (player, rest) = rest.split_once(" | ").unwrap_or(("Unknown", rest));
+    if cancelled.load(Ordering::Acquire) {
+        if let Some((msg_id, channel_id)) = queue_message {
+            let _ = ctx.http.delete_message(channel_id, msg_id).await;
+        }
+        let _ = tokio::fs::remove_file(&path).await;
+        return Ok(());
+    }
 
-    let (rest, acc) = rest
-        .rsplit_once(" (")
-        .map(|(before, acc_part)| (before, acc_part.trim_end_matches(')').trim_end_matches('%')))
-        .unwrap_or_else(|| {
-            let trimmed = rest.trim_end_matches(')').trim_end_matches('%');
-            trimmed.rsplit_once(' ').unwrap_or((trimmed, "100.00"))
+    let cache_key = crate::core::replay_queue::cache::build_render_cache_key(
+        replay_hash,
+        &settings_bytes,
+        time_points.start,
+        time_points.end,
+        pitch,
+        skin.as_deref(),
+        effective_skip_intro,
+        offset_ms,
+    );
+
+    let cached_hit = if !force_rerender {
+        if let Some(ref key) = cache_key {
+            if let Some(cached) = ctx.replay_queue.cache.get(key).await {
+                if ctx.client().check_url_exists(&cached.watch_url).await {
+                    info!(key = %key, url = %cached.watch_url, "render cache hit");
+                    Some((cached.watch_url, cached.video_url))
+                } else {
+                    ctx.replay_queue.cache.remove(key).await;
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let (link, video_url, rendered_mp4_path) = if let Some((watch_url, vid_url)) = cached_hit {
+        (watch_url, vid_url, None)
+    } else {
+        tracing::warn!(mods = replay.mods, "replay mods being sent to danser");
+
+        let canonical_path = tokio::fs::canonicalize(&path)
+            .await
+            .context("failed to canonicalize replay path")?;
+
+        let mut command = Command::new(danser_path);
+        warn!("danser dir: {:?}", config.paths.danser());
+        warn!("danser path: {:?}", danser_path);
+        command
+            .current_dir(config.paths.danser())
+            .kill_on_drop(true)
+            .arg("-noupdatecheck")
+            .arg("-replay")
+            .arg(&canonical_path)
+            .arg("-record")
+            .arg("-settings")
+            .arg(&settings)
+            .arg("-quickstart")
+            .arg("-out")
+            .arg(filename)
+            .arg("-preciseprogress")
+            .stderr(Stdio::piped())
+            .stdout(Stdio::piped());
+
+        if time_points.start > 0 {
+            command.args(["-start", &time_points.start.to_string()]);
+        }
+        if time_points.end > 0 {
+            command.args(["-end", &time_points.end.to_string()]);
+        }
+        if let Some(pitch_val) = pitch {
+            command.args(["-pitch", &pitch_val.to_string()]);
+        }
+        if let Some(ref skin_name) = skin {
+            command.args(["-skin", skin_name]);
+        }
+        if effective_skip_intro {
+            command.arg("-skip");
+        }
+        if let Some(offset) = offset_ms {
+            command.args(["-offset", &offset.to_string()]);
+        }
+
+        info!("Started replay processing");
+
+        ctx.replay_queue
+            .set_status(ReplayStatus::Rendering(0))
+            .await;
+
+        let cancel_fut = cancel_notify.notified();
+        tokio::pin!(cancel_fut);
+        cancel_fut.as_mut().enable();
+
+        if cancelled.load(Ordering::Acquire) {
+            if let Some((msg_id, channel_id)) = queue_message {
+                let _ = ctx.http.delete_message(channel_id, msg_id).await;
+            }
+            let _ = tokio::fs::remove_file(&path).await;
+            return Ok(());
+        }
+
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(err) => {
+                let err = Report::from(err).wrap_err("failed to start danser command");
+                tracing::warn!("{:?}", err);
+                let content = "Failed to run danser on the replay";
+                let _ = input_channel.error(&ctx, content).await;
+                return Err(err);
+            }
+        };
+
+        let stdout = child.stdout.take().expect("missing stdout on child");
+        let stderr = child.stderr.take().expect("missing stderr on child");
+
+        let stdout_reader = tokio::io::BufReader::new(stdout);
+        let stderr_reader = tokio::io::BufReader::new(stderr);
+
+        let ctx1 = Arc::clone(&ctx);
+        let stdout_handle = tokio::spawn(async move {
+            read_danser_progress(ctx1, stdout_reader).await
         });
 
-    let (map_name, mods) = if let Some((m, md)) = rest.rsplit_once(" +") {
-        (m, md)
-    } else {
-        (rest, "NM")
-    };
+        let ctx2 = Arc::clone(&ctx);
+        let stderr_handle = tokio::spawn(async move {
+            read_danser_progress(ctx2, stderr_reader).await
+        });
 
-    let sanitize = |s: &str| -> String {
-        let mut res = String::new();
-        let mut last_was_underscore = false;
-        for c in s.chars() {
-            if c.is_ascii_alphanumeric() {
-                res.push(c);
-                last_was_underscore = false;
-            } else if c == '-' {
-                res.push('-');
-                last_was_underscore = false;
-            } else if !last_was_underscore {
-                res.push('_');
-                last_was_underscore = true;
+        let mut was_cancelled = false;
+        let mut childres = None;
+
+        tokio::select! {
+            biased;
+            _ = &mut cancel_fut => {
+                was_cancelled = true;
+            }
+            res = tokio::time::timeout(Duration::from_secs(1800), child.wait()) => {
+                childres = Some(res);
             }
         }
-        res.trim_matches(|c| c == '_' || c == '-').to_string()
-    };
 
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
-    let hash_prefix: String = replay_hash.chars().take(8).collect();
-    let safe_filename = format!(
-        "{}-{}-{}-{}-{}_{}_{}",
-        sanitize(stars),
-        sanitize(player),
-        sanitize(map_name),
-        sanitize(mods),
-        sanitize(acc),
-        hash_prefix,
-        timestamp
-    );
-
-    let mut old_filepath = config.paths.replays().clone();
-    old_filepath.push(format!("{}.mp4", filename));
-
-    let mut new_filepath = config.paths.replays().clone();
-    new_filepath.push(format!("{}.mp4", safe_filename));
-
-    if let Err(err) = tokio::fs::rename(&old_filepath, &new_filepath).await {
-        warn!("Failed to rename MP4 file: {:?}", err);
-        new_filepath = old_filepath;
-    }
-
-    info!("Started upload to server");
-    ctx.replay_queue
-        .set_status(ReplayStatus::Uploading(0))
-        .await;
-    let beatmap_link = format!("https://osu.ppy.sh/beatmapsets/{}", mapset_id);
-
-    let upload_hash = if replay_hash.is_empty() {
-        "nohash"
-    } else {
-        replay_hash
-    };
-    let upload_fut = ctx.client().upload_video(
-        &video_title,
-        user,
-        &new_filepath,
-        &beatmap_link,
-        upload_hash,
-    );
-
-    let link = match upload_fut.await {
-        Ok(res) if res.error != 0 => {
-            let err = format!("failed to upload: `{}`", res.text);
-            warn!("{err}");
-            let _ = input_channel.error(&ctx, err).await;
-            let _ = tokio::fs::remove_file(&new_filepath).await;
-            eyre::bail!("upload server returned error {}", res.error);
+        if was_cancelled || cancelled.load(Ordering::Acquire) {
+            let _ = child.kill().await;
+            let _ = tokio::join!(stdout_handle, stderr_handle);
+            if let Some((msg_id, channel_id)) = queue_message {
+                let _ = ctx.http.delete_message(channel_id, msg_id).await;
+            }
+            let _ = tokio::fs::remove_file(&path).await;
+            let mut partial_mp4 = config.paths.replays().clone();
+            partial_mp4.push(format!("{filename}.mp4"));
+            let _ = tokio::fs::remove_file(&partial_mp4).await;
+            let _ = input_channel
+                .create_message(
+                    &ctx,
+                    &MessageBuilder::new().content(format!("🛑 <@{user}> Render cancelled.")),
+                )
+                .await;
+            return Ok(());
         }
-        Ok(res) => res.text,
-        Err(err) => {
-            let err = err.wrap_err("failed to upload file");
-            warn!("{err:?}");
-            let content = "Failed to upload file";
-            let _ = input_channel.error(&ctx, content).await;
-            let _ = tokio::fs::remove_file(&new_filepath).await;
-            return Err(err);
+
+        tracing::trace!("Danser finished");
+
+        match childres.expect("select finished via timeout branch") {
+            Ok(Ok(status)) => {
+                let (out_tail, err_tail) = tokio::join!(stdout_handle, stderr_handle);
+                if !status.success() {
+                    warn!(
+                        stdout_tail = ?out_tail.ok(),
+                        stderr_tail = ?err_tail.ok(),
+                        "danser exited with non-zero status: {status}"
+                    );
+                    let content = "Danser crashed or exited with an error code.";
+                    let _ = input_channel.error(&ctx, content).await;
+                    eyre::bail!("danser exited with non-zero status: {status}");
+                }
+            }
+            Ok(Err(err)) => {
+                let _ = child.kill().await;
+                let _ = tokio::join!(stdout_handle, stderr_handle);
+                let err = Report::from(err).wrap_err("failed to run danser command");
+                tracing::warn!("{:?}", err);
+                let content = "Failed to run danser on the replay";
+                let _ = input_channel.error(&ctx, content).await;
+                return Err(err);
+            }
+            Err(_) => {
+                let _ = child.kill().await;
+                let _ = tokio::join!(stdout_handle, stderr_handle);
+                let content = "Danser render timed out after 30 minutes.";
+                let _ = input_channel.error(&ctx, content).await;
+                eyre::bail!("danser render timed out after 1800s");
+            }
         }
-    };
 
-    info!("Finished upload to server");
-    warn!("upload returned link: {}", link);
+        warn!("parsed replay mods bits: {}", replay.mods);
+        warn!(
+            "parsed replay mods: {:?}",
+            GameModsLegacy::from_bits(replay.mods)
+        );
+        info!("Finished replay processing");
 
-    if let Ok(warmup_msg) = output_channel
-        .create_message(&ctx, &MessageBuilder::new().content(link.clone()))
-        .await
-    {
-        sleep(Duration::from_millis(1200)).await;
-        let _ = warmup_msg.delete(&ctx).await;
-    }
-    let file_size_bytes = tokio::fs::metadata(&new_filepath)
-        .await
-        .map(|m| m.len())
-        .unwrap_or(0);
-    let upload_mbps = ctx.client().upload_speed_mbps();
-    let wait_secs = calculate_warmup_delay_secs(file_size_bytes, upload_mbps);
-    warn!("Wait time for dc cache: {}s (calculated at {:.1} Mbps)", wait_secs, upload_mbps);
+        let without_prefix = video_title.trim_start_matches('[');
+        let (stars, rest) = without_prefix
+            .split_once("⭐] ")
+            .unwrap_or(("0.00", without_prefix));
+        let (player, rest) = rest.split_once(" | ").unwrap_or(("Unknown", rest));
 
-    let mut remaining = wait_secs;
-    while remaining > 0 {
+        let (rest, acc) = rest
+            .rsplit_once(" (")
+            .map(|(before, acc_part)| (before, acc_part.trim_end_matches(')').trim_end_matches('%')))
+            .unwrap_or_else(|| {
+                let trimmed = rest.trim_end_matches(')').trim_end_matches('%');
+                trimmed.rsplit_once(' ').unwrap_or((trimmed, "100.00"))
+            });
+
+        let (map_name, mods) = if let Some((m, md)) = rest.rsplit_once(" +") {
+            (m, md)
+        } else {
+            (rest, "NM")
+        };
+
+        let sanitize = |s: &str| -> String {
+            let mut res = String::new();
+            let mut last_was_underscore = false;
+            for c in s.chars() {
+                if c.is_ascii_alphanumeric() {
+                    res.push(c);
+                    last_was_underscore = false;
+                } else if c == '-' {
+                    res.push('-');
+                    last_was_underscore = false;
+                } else if !last_was_underscore {
+                    res.push('_');
+                    last_was_underscore = true;
+                }
+            }
+            res.trim_matches(|c| c == '_' || c == '-').to_string()
+        };
+
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let hash_prefix: String = replay_hash.chars().take(8).collect();
+        let safe_filename = format!(
+            "{}-{}-{}-{}-{}_{}_{}",
+            sanitize(stars),
+            sanitize(player),
+            sanitize(map_name),
+            sanitize(mods),
+            sanitize(acc),
+            hash_prefix,
+            timestamp
+        );
+
+        let mut old_filepath = config.paths.replays().clone();
+        old_filepath.push(format!("{}.mp4", filename));
+
+        let mut new_filepath = config.paths.replays().clone();
+        new_filepath.push(format!("{}.mp4", safe_filename));
+
+        if let Err(err) = tokio::fs::rename(&old_filepath, &new_filepath).await {
+            warn!("Failed to rename MP4 file: {:?}", err);
+            new_filepath = old_filepath;
+        }
+
+        info!("Started upload to server");
         ctx.replay_queue
-            .set_status(ReplayStatus::Uploading(remaining))
+            .set_status(ReplayStatus::Uploading(0))
             .await;
+        let beatmap_link = format!("https://osu.ppy.sh/beatmapsets/{}", mapset_id);
+
+        let upload_hash = if replay_hash.is_empty() {
+            "nohash"
+        } else {
+            replay_hash
+        };
+        let upload_fut = ctx.client().upload_video(
+            &video_title,
+            user,
+            &new_filepath,
+            &beatmap_link,
+            upload_hash,
+        );
+
+        let (uploaded_link, uploaded_video_url) = match upload_fut.await {
+            Ok(res) if res.error != 0 => {
+                let err = format!("failed to upload: `{}`", res.text);
+                warn!("{err}");
+                let _ = input_channel.error(&ctx, err).await;
+                let _ = tokio::fs::remove_file(&new_filepath).await;
+                eyre::bail!("upload server returned error {}", res.error);
+            }
+            Ok(res) => (res.text, res.video_url),
+            Err(err) => {
+                let err = err.wrap_err("failed to upload file");
+                warn!("{err:?}");
+                let content = "Failed to upload file";
+                let _ = input_channel.error(&ctx, content).await;
+                let _ = tokio::fs::remove_file(&new_filepath).await;
+                return Err(err);
+            }
+        };
+
+        info!("Finished upload to server");
+        warn!("upload returned link: {}", uploaded_link);
+
+        if let Some(ref key) = cache_key {
+            let created_at = time::OffsetDateTime::now_utc().unix_timestamp();
+            ctx.replay_queue
+                .cache
+                .insert(
+                    key.clone(),
+                    crate::core::replay_queue::cache::CachedRender {
+                        watch_url: uploaded_link.clone(),
+                        video_url: uploaded_video_url.clone(),
+                        created_at,
+                    },
+                )
+                .await;
+        }
+
+        if let Ok(warmup_msg) = output_channel
+            .create_message(&ctx, &MessageBuilder::new().content(uploaded_link.clone()))
+            .await
+        {
+            sleep(Duration::from_millis(1200)).await;
+            let _ = warmup_msg.delete(&ctx).await;
+        }
+        let file_size_bytes = tokio::fs::metadata(&new_filepath)
+            .await
+            .map(|m| m.len())
+            .unwrap_or(0);
+        let upload_mbps = ctx.client().upload_speed_mbps();
+        let wait_secs = calculate_warmup_delay_secs(file_size_bytes, upload_mbps);
+        warn!(
+            "Wait time for dc cache: {}s (calculated at {:.1} Mbps)",
+            wait_secs, upload_mbps
+        );
+
+        let mut remaining = wait_secs;
+        while remaining > 0 {
+            ctx.replay_queue
+                .set_status(ReplayStatus::Uploading(remaining))
+                .await;
+            ctx.replay_queue.notify.notify_waiters();
+            sleep(Duration::from_secs(1)).await;
+            remaining = remaining.saturating_sub(1);
+        }
         ctx.replay_queue.notify.notify_waiters();
-        sleep(Duration::from_secs(1)).await;
-        remaining = remaining.saturating_sub(1);
-    }
-    ctx.replay_queue.notify.notify_waiters();
+
+        (uploaded_link, uploaded_video_url, Some(new_filepath))
+    };
 
     let _legacy_mods = GameModsLegacy::from_bits(replay.mods);
     let acc = replay.accuracy();
@@ -488,77 +628,103 @@ async fn process_single_replay(
         None => "Unknown play date".to_string(),
     };
 
+    let (aim_pp, speed_pp, acc_pp) = (
+        active_pp.aim_pp.or(pp_v4.aim_pp),
+        active_pp.speed_pp.or(pp_v4.speed_pp),
+        active_pp.acc_pp.or(pp_v4.acc_pp),
+    );
+
+    let mut embed_fields = vec![
+        EmbedField {
+            inline: true,
+            name: "Rank".to_owned(),
+            value: rank_value,
+        },
+        EmbedField {
+            inline: true,
+            name: "Score".to_owned(),
+            value: score_value,
+        },
+        EmbedField {
+            inline: true,
+            name: "Accuracy".to_owned(),
+            value: format!("{acc}%"),
+        },
+        EmbedField {
+            inline: true,
+            name: "Max Combo".to_owned(),
+            value: format!("{}/{}x", replay.max_combo, max_possible_combo),
+        },
+        EmbedField {
+            inline: true,
+            name: "pp".to_owned(),
+            value: if is_perfect_fc {
+                format!("{:.2}pp / {:.2}pp", display_pp, display_max_pp)
+            } else {
+                format!(
+                    "{:.2}pp *(No Choke: {:.2}pp)* / {:.2}pp",
+                    display_pp, display_nochoke_pp, display_max_pp
+                )
+            },
+        },
+    ];
+
+    if let (Some(aim), Some(speed), Some(acc_val)) = (aim_pp, speed_pp, acc_pp) {
+        embed_fields.push(EmbedField {
+            inline: true,
+            name: "PP Breakdown".to_owned(),
+            value: format!("Aim: `{aim:.1}` | Speed: `{speed:.1}` | Acc: `{acc_val:.1}`"),
+        });
+    }
+
+    embed_fields.extend([
+        EmbedField {
+            inline: false,
+            name: "Hits".to_owned(),
+            value: format!(
+                "{} {} | {} {} | {} {} | {} {}",
+                emojis.hit_300,
+                replay.count_300,
+                emojis.hit_100,
+                replay.count_100,
+                emojis.hit_50,
+                replay.count_50,
+                emojis.hit_miss,
+                replay.count_miss,
+            ),
+        },
+        EmbedField {
+            inline: false,
+            name: "\u{200B}".to_owned(),
+            value: played_field_value,
+        },
+    ]);
+
     let embed_builder = EmbedBuilder::new()
         .color(0x96DFE3)
         .title(video_title)
         .url(format!("https://osu.ppy.sh/beatmaps/{map_id}"))
-        .fields(vec![
-            EmbedField {
-                inline: true,
-                name: "Rank".to_owned(),
-                value: rank_value,
-            },
-            EmbedField {
-                inline: true,
-                name: "Score".to_owned(),
-                value: score_value,
-            },
-            EmbedField {
-                inline: true,
-                name: "Accuracy".to_owned(),
-                value: format!("{acc}%"),
-            },
-            EmbedField {
-                inline: true,
-                name: "Max Combo".to_owned(),
-                value: format!("{}/{}x", replay.max_combo, max_possible_combo),
-            },
-            EmbedField {
-                inline: true,
-                name: "pp".to_owned(),
-                value: if is_perfect_fc {
-                    format!("{:.2}pp / {:.2}pp", display_pp, display_max_pp)
-                } else {
-                    format!(
-                        "{:.2}pp *(No Choke: {:.2}pp)* / {:.2}pp",
-                        display_pp, display_nochoke_pp, display_max_pp
-                    )
-                },
-            },
-            EmbedField {
-                inline: false,
-                name: "Hits".to_owned(),
-                value: format!(
-                    "{} {} | {} {} | {} {} | {} {}",
-                    emojis.hit_300,
-                    replay.count_300,
-                    emojis.hit_100,
-                    replay.count_100,
-                    emojis.hit_50,
-                    replay.count_50,
-                    emojis.hit_miss,
-                    replay.count_miss,
-                ),
-            },
-            EmbedField {
-                inline: false,
-                name: "\u{200B}".to_owned(),
-                value: played_field_value,
-            },
-        ]);
+        .fields(embed_fields);
 
     let embed = embed_builder.build();
     let mut components: Vec<twilight_model::channel::message::Component> = vec![];
 
     let mut options = Vec::new();
     let mut push_opt = |id: &str, label: &str, desc: &str, t: PpTriple, is_default: bool| {
+        let mut value = format!(
+            "{id}|{is_perfect_fc}|{:.2}|{:.2}|{:.2}",
+            t.pp, t.max_pp, t.nochoke_pp
+        );
+        if let (Some(aim), Some(speed), Some(acc_val)) = (t.aim_pp, t.speed_pp, t.acc_pp) {
+            value.push_str(&format!("|{aim:.1}|{speed:.1}|{acc_val:.1}"));
+        }
         options.push(
             twilight_model::channel::message::component::SelectMenuOption {
                 default: is_default,
                 description: Some(desc.to_string()),
                 emoji: None,
                 label: label.to_string(),
-                value: format!("{id}|{is_perfect_fc}|{:.2}|{:.2}|{:.2}", t.pp, t.max_pp, t.nochoke_pp),
+                value,
             },
         );
     };
@@ -635,6 +801,42 @@ async fn process_single_replay(
             ),
         );
     }
+
+    let watch_url = link.strip_suffix(".mp4").unwrap_or(&link).to_string();
+    let mut link_buttons = vec![twilight_model::channel::message::component::Component::Button(
+        twilight_model::channel::message::component::Button {
+            sku_id: None,
+            custom_id: None,
+            disabled: false,
+            emoji: None,
+            label: Some("Watch Replay".to_owned()),
+            style: twilight_model::channel::message::component::ButtonStyle::Link,
+            url: Some(watch_url.clone()),
+        },
+    )];
+    if let Some(ref vid_url) = video_url {
+        if vid_url.starts_with("http") {
+            link_buttons.push(twilight_model::channel::message::component::Component::Button(
+                twilight_model::channel::message::component::Button {
+                    sku_id: None,
+                    custom_id: None,
+                    disabled: false,
+                    emoji: None,
+                    label: Some("Download MP4".to_owned()),
+                    style: twilight_model::channel::message::component::ButtonStyle::Link,
+                    url: Some(vid_url.clone()),
+                },
+            ));
+        }
+    }
+    components.push(
+        twilight_model::channel::message::component::Component::ActionRow(
+            twilight_model::channel::message::component::ActionRow {
+                components: link_buttons,
+            },
+        ),
+    );
+
     let embed_builder = MessageBuilder::new().embed(embed).components(components);
     if let Err(err) = output_channel.create_message(&ctx, &embed_builder).await {
         warn!(
@@ -643,8 +845,7 @@ async fn process_single_replay(
         );
     }
 
-    let link = link.strip_suffix(".mp4").unwrap_or(&link);
-    let content = format!("<@{user}> [Replay]({link})");
+    let content = format!("<@{user}> [Replay]({watch_url})");
 
     let builder = MessageBuilder::new().content(content);
     if let Some((msg_id, channel_id)) = queue_message {
@@ -657,12 +858,14 @@ async fn process_single_replay(
     }
 
     // 1. Delete generated .mp4 from Replays folder
-    if let Err(err) = tokio::fs::remove_file(&new_filepath).await {
-        if err.kind() != std::io::ErrorKind::NotFound {
-            warn!("Failed to delete local MP4 file {:?}: {}", new_filepath, err);
+    if let Some(new_filepath) = rendered_mp4_path {
+        if let Err(err) = tokio::fs::remove_file(&new_filepath).await {
+            if err.kind() != std::io::ErrorKind::NotFound {
+                warn!("Failed to delete local MP4 file {:?}: {}", new_filepath, err);
+            }
+        } else {
+            warn!("Cleaned up local MP4 file at: {:?}.", new_filepath);
         }
-    } else {
-        warn!("Cleaned up local MP4 file at: {:?}.", new_filepath);
     }
 
     // 2. Delete .osr from Downloads folder
@@ -877,7 +1080,7 @@ async fn calc_single_latest_pp(
     max_combo: u32,
     mode: SimulateMode,
     is_lazer: bool,
-) -> Option<f64> {
+) -> Option<(f64, Option<f64>, Option<f64>, Option<f64>)> {
     let mut cmd = tokio::process::Command::new(dotnet_path);
     cmd.env("DOTNET_ROLL_FORWARD", "Major");
     cmd.arg(perf_calc_path);
@@ -953,15 +1156,15 @@ async fn calc_single_latest_pp(
         Ok(Ok(output)) => {
             if output.status.success() {
                 if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
-                    if let Some(pp) = json
-                        .get("performance_attributes")
-                        .and_then(|attrs| attrs.get("pp"))
-                        .and_then(|pp| pp.as_f64())
-                    {
-                        return Some(pp);
-                    } else {
-                        tracing::warn!("Failed to parse PP from JSON: {:?}", json);
+                    if let Some(attrs) = json.get("performance_attributes") {
+                        if let Some(pp) = attrs.get("pp").and_then(|pp| pp.as_f64()) {
+                            let aim = attrs.get("aim").and_then(|v| v.as_f64());
+                            let speed = attrs.get("speed").and_then(|v| v.as_f64());
+                            let acc = attrs.get("accuracy").and_then(|v| v.as_f64());
+                            return Some((pp, aim, speed, acc));
+                        }
                     }
+                    tracing::warn!("Failed to parse PP from JSON: {:?}", json);
                 } else {
                     tracing::warn!(
                         "Failed to parse JSON: {}",
@@ -1068,11 +1271,16 @@ async fn calc_latest_pp(
     );
 
     match (pp, max_pp, nochoke_pp) {
-        (Some(pp), Some(max_pp), Some(nochoke_pp)) => Some(PpTriple {
-            pp,
-            nochoke_pp,
-            max_pp,
-        }),
+        (Some((pp, aim_pp, speed_pp, acc_pp)), Some((max_pp, _, _, _)), Some((nochoke_pp, _, _, _))) => {
+            Some(PpTriple {
+                pp,
+                nochoke_pp,
+                max_pp,
+                aim_pp,
+                speed_pp,
+                acc_pp,
+            })
+        }
         _ => None,
     }
 }
@@ -1117,7 +1325,14 @@ async fn create_title(
         if !is_lazer && score_val > 0 {
             perf = perf.legacy_total_score(score_val);
         }
-        let pp = perf.calculate().pp();
+        let actual_attrs = perf.calculate();
+        let pp = actual_attrs.pp();
+        let (aim_pp, speed_pp, acc_pp) = match &actual_attrs {
+            rosu_pp::any::PerformanceAttributes::Osu(osu) => {
+                (Some(osu.pp_aim), Some(osu.pp_speed), Some(osu.pp_acc))
+            }
+            _ => (None, None, None),
+        };
 
         let max_pp = rosu_pp::Performance::new(diff_attrs.clone())
             .mods(mods_val)
@@ -1141,6 +1356,9 @@ async fn create_title(
                 pp,
                 nochoke_pp,
                 max_pp,
+                aim_pp,
+                speed_pp,
+                acc_pp,
             },
             (stars * 100.0).round() / 100.0,
             max_possible_combo,
@@ -1182,11 +1400,7 @@ async fn create_title(
                         .combo(max_possible_combo)
                         .calculate()
                         .pp();
-                    PpTriple {
-                        pp,
-                        nochoke_pp,
-                        max_pp,
-                    }
+                    PpTriple::basic(pp, nochoke_pp, max_pp)
                 });
 
             let pp_2024 = rosu_pp_2024::Beatmap::from_path(&map_path_old)
@@ -1217,11 +1431,7 @@ async fn create_title(
                         .combo(max_possible_combo)
                         .calculate()
                         .pp();
-                    PpTriple {
-                        pp,
-                        nochoke_pp,
-                        max_pp,
-                    }
+                    PpTriple::basic(pp, nochoke_pp, max_pp)
                 });
 
             let pp_2022 = rosu_pp_2022::Beatmap::from_path(&map_path_old)
@@ -1249,11 +1459,7 @@ async fn create_title(
                         .combo(max_possible_combo as usize)
                         .calculate()
                         .pp();
-                    PpTriple {
-                        pp,
-                        nochoke_pp,
-                        max_pp,
-                    }
+                    PpTriple::basic(pp, nochoke_pp, max_pp)
                 });
 
             let pp_2021 = rosu_pp_2021::Beatmap::from_path(&map_path_old)
@@ -1284,11 +1490,7 @@ async fn create_title(
                         .combo(max_possible_combo)
                         .calculate()
                         .pp();
-                    PpTriple {
-                        pp,
-                        nochoke_pp,
-                        max_pp,
-                    }
+                    PpTriple::basic(pp, nochoke_pp, max_pp)
                 });
 
             (pp_2025, pp_2024, pp_2022, pp_2021)

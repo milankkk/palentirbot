@@ -1,17 +1,41 @@
-use std::{borrow::Cow, path::PathBuf};
+use std::{
+    borrow::Cow,
+    path::PathBuf,
+    sync::{
+        atomic::AtomicBool,
+        Arc,
+    },
+};
 
 use osu_db::Replay;
 use rosu_v2::prelude::Grade;
+use tokio::sync::Notify;
 use twilight_model::id::{
     marker::{ChannelMarker, MessageMarker, UserMarker},
     Id,
 };
 
+#[derive(Clone, Debug, Default)]
+pub struct RenderOptions {
+    pub start: u32,
+    pub end: u32,
+    pub pitch: Option<f64>,
+    pub skin: Option<String>,
+    pub skip_intro: bool,
+    pub offset_ms: Option<i32>,
+    pub force_rerender: bool,
+}
+
 #[derive(Clone)]
 pub struct ReplayData {
+    pub job_id: u64,
     pub input_channel: Id<ChannelMarker>,
     pub output_channel: Id<ChannelMarker>,
     pub pitch: Option<f64>,
+    pub skin: Option<String>,
+    pub skip_intro: bool,
+    pub offset_ms: Option<i32>,
+    pub force_rerender: bool,
     pub path: PathBuf,
     pub replay: ReplaySlim,
     pub time_points: TimePoints,
@@ -25,9 +49,47 @@ pub struct ReplayData {
     pub difficulty_name: Option<String>,
     pub queue_message: Option<(Id<MessageMarker>, Id<ChannelMarker>)>,
     pub is_lazer: bool,
+    pub cancelled: Arc<AtomicBool>,
+    pub cancel_notify: Arc<Notify>,
 }
 
 impl ReplayData {
+    pub fn from_options(
+        input_channel: Id<ChannelMarker>,
+        output_channel: Id<ChannelMarker>,
+        path: PathBuf,
+        replay: ReplaySlim,
+        user: Id<UserMarker>,
+        is_lazer: bool,
+        opts: RenderOptions,
+    ) -> Self {
+        Self {
+            job_id: 0,
+            input_channel,
+            output_channel,
+            pitch: opts.pitch,
+            skin: opts.skin,
+            skip_intro: opts.skip_intro,
+            offset_ms: opts.offset_ms,
+            force_rerender: opts.force_rerender,
+            path,
+            replay,
+            time_points: TimePoints {
+                start: opts.start,
+                end: opts.end,
+            },
+            user,
+            title: None,
+            player_name: None,
+            map_title: None,
+            difficulty_name: None,
+            queue_message: None,
+            is_lazer,
+            cancelled: Arc::new(AtomicBool::new(false)),
+            cancel_notify: Arc::new(Notify::new()),
+        }
+    }
+
     pub fn replay_name(&self) -> Cow<'_, str> {
         let name = self
             .path
@@ -90,6 +152,23 @@ pub struct PpTriple {
     pub pp: f64,
     pub nochoke_pp: f64,
     pub max_pp: f64,
+    pub aim_pp: Option<f64>,
+    pub speed_pp: Option<f64>,
+    pub acc_pp: Option<f64>,
+}
+
+impl PpTriple {
+    #[inline]
+    pub const fn basic(pp: f64, nochoke_pp: f64, max_pp: f64) -> Self {
+        Self {
+            pp,
+            nochoke_pp,
+            max_pp,
+            aim_pp: None,
+            speed_pp: None,
+            acc_pp: None,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -256,12 +335,11 @@ mod tests {
 
     #[test]
     fn test_replay_name_handles_multiple_underscores_and_unicode() {
-        let data = ReplayData {
-            input_channel: Id::new(1),
-            output_channel: Id::new(1),
-            pitch: None,
-            path: PathBuf::from("/tmp/123_player_alpha_beta_map_Osu.osr"),
-            replay: ReplaySlim {
+        let mut data = ReplayData::from_options(
+            Id::new(1),
+            Id::new(1),
+            PathBuf::from("/tmp/123_player_alpha_beta_map_Osu.osr"),
+            ReplaySlim {
                 beatmap_hash: None,
                 count_300: 100,
                 count_100: 0,
@@ -277,15 +355,11 @@ mod tests {
                 timestamp: None,
                 grade: Grade::X,
             },
-            time_points: TimePoints { start: 0, end: 0 },
-            user: Id::new(1),
-            title: None,
-            player_name: None,
-            map_title: None,
-            difficulty_name: None,
-            queue_message: None,
-            is_lazer: false,
-        };
+            Id::new(1),
+            false,
+            RenderOptions::default(),
+        );
+        data.replay.player_name = None;
         assert_eq!(data.replay_name(), "123 player alpha beta map");
     }
 
