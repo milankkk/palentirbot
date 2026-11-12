@@ -109,6 +109,103 @@ enum StreamTarget {
     },
 }
 
+enum StreamPhase {
+    Status(String),
+    Thinking { chars: usize, tail: String },
+    Content(String),
+}
+
+struct StreamUiState {
+    started_at: tokio::time::Instant,
+    last_edit_at: Option<tokio::time::Instant>,
+    last_sent: String,
+    phase: Option<StreamPhase>,
+    dirty_urgent: bool,
+}
+
+impl StreamUiState {
+    fn new(initial_sent: String) -> Self {
+        Self {
+            started_at: tokio::time::Instant::now(),
+            last_edit_at: (!initial_sent.is_empty()).then(tokio::time::Instant::now),
+            last_sent: initial_sent,
+            phase: None,
+            dirty_urgent: false,
+        }
+    }
+
+    fn apply_event(&mut self, ev: AiStreamEvent) {
+        match ev {
+            AiStreamEvent::Status(status) => {
+                self.phase = Some(StreamPhase::Status(status));
+                self.dirty_urgent = true;
+            }
+            AiStreamEvent::Thinking { chars, tail } => {
+                let first_think = !matches!(self.phase, Some(StreamPhase::Thinking { .. }));
+                self.phase = Some(StreamPhase::Thinking { chars, tail });
+                if first_think {
+                    self.dirty_urgent = true;
+                }
+            }
+            AiStreamEvent::Content(raw) => {
+                let preview = format_streaming_preview(&raw);
+                if !preview.is_empty() {
+                    let first_content = !matches!(self.phase, Some(StreamPhase::Content(_)));
+                    self.phase = Some(StreamPhase::Content(preview));
+                    if first_content {
+                        self.dirty_urgent = true;
+                    }
+                }
+            }
+        }
+    }
+
+    fn render(&self, elapsed_secs: u64) -> String {
+        let Some(ref phase) = self.phase else {
+            return String::new();
+        };
+        match phase {
+            StreamPhase::Status(status) => {
+                if elapsed_secs >= 2 {
+                    format!("{status} ({elapsed_secs}s)")
+                } else {
+                    status.clone()
+                }
+            }
+            StreamPhase::Thinking { chars, tail } => {
+                let mut text = format!("🧠 **Thinking...** ({elapsed_secs}s · {chars} chars)");
+                let clean_tail = tail.trim();
+                if !clean_tail.is_empty() {
+                    let safe_tail = truncate_chars(clean_tail, 160);
+                    text.push_str("\n> *");
+                    text.push_str(&safe_tail);
+                    text.push('*');
+                }
+                text
+            }
+            StreamPhase::Content(preview) => preview.clone(),
+        }
+    }
+
+    fn should_flush_urgent(&self, cooldown: Duration) -> bool {
+        self.dirty_urgent
+            && self
+                .last_edit_at
+                .is_none_or(|t| t.elapsed() >= cooldown)
+    }
+
+    fn next_changed_text(&mut self) -> Option<String> {
+        let rendered = self.render(self.started_at.elapsed().as_secs());
+        if rendered.is_empty() || rendered == self.last_sent {
+            return None;
+        }
+        self.last_sent = rendered.clone();
+        self.last_edit_at = Some(tokio::time::Instant::now());
+        self.dirty_urgent = false;
+        Some(rendered)
+    }
+}
+
 fn format_streaming_preview(raw: &str) -> String {
     let cleaned = clean_ai_response(raw);
     let trimmed = cleaned.trim();
@@ -117,20 +214,6 @@ fn format_streaming_preview(raw: &str) -> String {
     }
     let truncated = truncate_chars(trimmed, 1_940);
     format!("{truncated} ▌")
-}
-
-fn apply_stream_event(latest_display: &mut Option<String>, ev: AiStreamEvent) {
-    match ev {
-        AiStreamEvent::Status(status) => {
-            *latest_display = Some(status);
-        }
-        AiStreamEvent::Content(raw) => {
-            let preview = format_streaming_preview(&raw);
-            if !preview.is_empty() {
-                *latest_display = Some(preview);
-            }
-        }
-    }
 }
 
 async fn send_stream_edit(target: &StreamTarget, content: &str) {
@@ -158,33 +241,44 @@ async fn send_stream_edit(target: &StreamTarget, content: &str) {
 
 fn spawn_stream_updater(
     target: StreamTarget,
+    initial_sent: impl Into<String>,
 ) -> (UnboundedSender<AiStreamEvent>, tokio::task::JoinHandle<()>) {
     let (tx, mut rx) = mpsc::unbounded_channel();
+    let initial_sent = initial_sent.into();
     let handle = tokio::spawn(async move {
-        let mut tick = tokio::time::interval(Duration::from_millis(1_150));
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        tick.tick().await; // skip immediate tick at t=0 so status stabilizes before first edit
+        const PERIODIC_TICK: Duration = Duration::from_millis(1_100);
+        const MIN_URGENT_COOLDOWN: Duration = Duration::from_millis(450);
 
-        let mut latest_display: Option<String> = None;
-        let mut last_sent = String::new();
+        let mut tick = tokio::time::interval(PERIODIC_TICK);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        tick.tick().await;
+
+        let mut ui = StreamUiState::new(initial_sent);
 
         loop {
             tokio::select! {
                 maybe_ev = rx.recv() => {
                     match maybe_ev {
-                        Some(ev) => apply_stream_event(&mut latest_display, ev),
+                        Some(ev) => {
+                            ui.apply_event(ev);
+                            while let Ok(next_ev) = rx.try_recv() {
+                                ui.apply_event(next_ev);
+                            }
+                            if ui.should_flush_urgent(MIN_URGENT_COOLDOWN) {
+                                if let Some(text) = ui.next_changed_text() {
+                                    send_stream_edit(&target, &text).await;
+                                }
+                            }
+                        }
                         None => break,
                     }
                 }
                 _ = tick.tick() => {
                     while let Ok(ev) = rx.try_recv() {
-                        apply_stream_event(&mut latest_display, ev);
+                        ui.apply_event(ev);
                     }
-                    if let Some(ref text) = latest_display {
-                        if text != &last_sent && !text.is_empty() {
-                            send_stream_edit(&target, text).await;
-                            last_sent = text.clone();
-                        }
+                    if let Some(text) = ui.next_changed_text() {
+                        send_stream_edit(&target, &text).await;
                     }
                 }
             }
@@ -254,18 +348,16 @@ async fn slash_ask(ctx: Arc<Context>, mut command: InteractionCommand) -> Result
     // Wait until it is this request's turn
     let _permit = ticket.wait().await;
 
-    if position > 0 {
-        let builder = MessageBuilder::new().content("💭 Generating response...");
-        let _ = command.update(&ctx, &builder).await;
-    }
-
     // Get the person currently talking to the AI.
     let user = command.user()?;
 
-    let (stream_tx, updater_handle) = spawn_stream_updater(StreamTarget::Interaction {
-        ctx: Arc::clone(&ctx),
-        token: command.token.clone(),
-    });
+    let (stream_tx, updater_handle) = spawn_stream_updater(
+        StreamTarget::Interaction {
+            ctx: Arc::clone(&ctx),
+            token: command.token.clone(),
+        },
+        String::new(),
+    );
 
     let res = execute_ai_question_with_options(
         &ctx,
@@ -408,7 +500,7 @@ pub async fn handle_prefix_ask(
     let initial_content = if position > 0 {
         format!("⏳ Waiting in AI queue (position #{position})...")
     } else {
-        "💭 Thinking...".to_string()
+        "🧠 Starting AI request...".to_string()
     };
 
     let placeholder = msg
@@ -416,7 +508,7 @@ pub async fn handle_prefix_ask(
         .create_message(
             &ctx,
             &MessageBuilder::new()
-                .content(initial_content)
+                .content(initial_content.clone())
                 .reply(msg.id),
         )
         .await
@@ -425,23 +517,25 @@ pub async fn handle_prefix_ask(
     // Wait until it is this request's turn
     let _permit = ticket.wait().await;
 
-    if position > 0 {
-        if let Some(ref ph) = placeholder {
-            let _ = ph
-                .update(&ctx, &MessageBuilder::new().content("💭 Thinking..."))
-                .await;
-        }
-    }
-
     let _ = ctx.http.create_typing_trigger(msg.channel_id).await;
 
-    let (stream_tx, updater_handle) = placeholder.as_ref().map(|ph| {
-        spawn_stream_updater(StreamTarget::Message {
-            ctx: Arc::clone(&ctx),
-            msg_id: ph.id,
-            channel_id: ph.channel_id,
+    let (stream_tx, updater_handle) = placeholder
+        .as_ref()
+        .map(|ph| {
+            spawn_stream_updater(
+                StreamTarget::Message {
+                    ctx: Arc::clone(&ctx),
+                    msg_id: ph.id,
+                    channel_id: ph.channel_id,
+                },
+                if position > 0 {
+                    String::new()
+                } else {
+                    initial_content.clone()
+                },
+            )
         })
-    }).map_or((None, None), |(tx, h)| (Some(tx), Some(h)));
+        .map_or((None, None), |(tx, h)| (Some(tx), Some(h)));
 
     let result = execute_ai_question_with_options(
         &ctx,
@@ -691,6 +785,9 @@ pub async fn execute_ai_question_with_options(
         bot_id,
         Permissions::VIEW_CHANNEL | Permissions::READ_MESSAGE_HISTORY,
     ) {
+        if let Some(ref tx) = opts.stream_tx {
+            let _ = tx.send(AiStreamEvent::Status("📚 Reading channel context...".into()));
+        }
         match tokio::time::timeout(
             std::time::Duration::from_secs(5),
             get_history(ctx, channel_id, opts.exclude_message_id),
@@ -858,29 +955,42 @@ pub(crate) fn is_transient_status(content: &str) -> bool {
         }
     }
 
-    content.starts_with("⏳ Waiting in AI queue")
-        || content.starts_with("⏳ Thinking")
-        || content.starts_with("💭 Thinking")
-        || content.starts_with("🧠 **Thinking")
-        || content.starts_with("🌐 Searching")
-        || content.starts_with("🌐 Thinking")
-        || content.starts_with("🌐 Browsing")
-        || content.starts_with("🖼️ Thinking")
-        || content.starts_with("🖼️ Downloading")
-        || content.starts_with("✍️ Thinking")
-        || content.starts_with("⚡ Generating")
-        || content.starts_with("💭 Generating")
-        || content.starts_with("🔍 Searching")
-        || content.starts_with("🎮 Checking osu!")
-        || content.starts_with("🗺️ Calculating beatmap")
-        || content.starts_with("⚠️ ")
-        || content.starts_with("🧹 ")
-        || content.starts_with("🔄 ")
-        || content.starts_with("🏓 Pong")
-        || content.starts_with("Pong!")
-        || content.starts_with("Failed to download map.")
-        || content.starts_with("*(blinks blankly")
-        || content.starts_with("Something went wrong while asking the AI")
+    const TRANSIENT_PREFIXES: &[&str] = &[
+        "⏳ Waiting",
+        "⏳ Thinking",
+        "💭 Thinking",
+        "💭 Generating",
+        "🧠 **Thinking",
+        "🧠 Starting",
+        "🧠 Waiting",
+        "🧠 Loading",
+        "🧠 Connecting",
+        "📚 Reading channel",
+        "🔍 Searching",
+        "🌐 Searching",
+        "🌐 Thinking",
+        "🌐 Browsing",
+        "🌐 Reading ",
+        "🎮 Checking osu!",
+        "🗺️ Calculating beatmap",
+        "⚡ Analyzing",
+        "⚡ Writing",
+        "⚡ Generating",
+        "🖼️ Thinking",
+        "🖼️ Downloading",
+        "✍️ Thinking",
+        "⚠️ ",
+        "❌ ",
+        "🧹 ",
+        "🔄 ",
+        "🏓 Pong",
+        "Pong!",
+        "Failed to download map.",
+        "*(blinks blankly",
+        "Something went wrong while asking the AI",
+    ];
+
+    TRANSIENT_PREFIXES.iter().any(|p| content.starts_with(p))
         || content.contains("[Replay](http")
         || content.contains("replays.insertdomainname.be")
         || content.contains("Finished rendering replay")
@@ -1386,11 +1496,44 @@ mod tests {
     fn test_is_transient_status() {
         assert!(is_transient_status("⏳ Waiting in AI queue (position #1)..."));
         assert!(is_transient_status("💭 Thinking..."));
+        assert!(is_transient_status("🧠 **Thinking...** (4s · 120 chars)\n> *checking stats...*"));
+        assert!(is_transient_status("🧠 Waiting for AI model..."));
+        assert!(is_transient_status("📚 Reading channel context..."));
+        assert!(is_transient_status("🔍 Searching the web for `mrekk`..."));
+        assert!(is_transient_status("🌐 Reading linked page..."));
+        assert!(is_transient_status("🎮 Checking osu! stats for `milan.be`..."));
+        assert!(is_transient_status("🗺️ Calculating beatmap stats `2101986`..."));
+        assert!(is_transient_status("⚡ Analyzing tool results..."));
+        assert!(is_transient_status("⚡ Writing response..."));
         assert!(is_transient_status("⚡ Generating response..."));
         assert!(is_transient_status("Finished rendering replay https://replays.insertdomainname.be/watch/123.mp4"));
         assert!(is_transient_status("<@123456> [Replay](https://my-custom-domain.com/watch/123.mp4)"));
         assert!(is_transient_status("*(blinks blankly... no thoughts head empty)*"));
         assert!(!is_transient_status("osu! was created in 2007 by Dean Herbert."));
+    }
+
+    #[test]
+    fn test_stream_ui_state_transitions_and_thinking() {
+        let mut ui = StreamUiState::new(String::new());
+        ui.apply_event(AiStreamEvent::Status("🔍 Searching the web for `mrekk`...".into()));
+        assert!(ui.should_flush_urgent(Duration::from_millis(450)));
+        assert_eq!(
+            ui.next_changed_text().as_deref(),
+            Some("🔍 Searching the web for `mrekk`...")
+        );
+        assert!(!ui.should_flush_urgent(Duration::from_millis(450)));
+
+        ui.apply_event(AiStreamEvent::Thinking {
+            chars: 42,
+            tail: "checking recent scores".into(),
+        });
+        let rendered_think = ui.render(3);
+        assert!(rendered_think.starts_with("🧠 **Thinking...** (3s · 42 chars)"));
+        assert!(rendered_think.contains("checking recent scores"));
+        assert!(is_transient_status(&rendered_think));
+
+        ui.apply_event(AiStreamEvent::Content("mrekk set a new score".into()));
+        assert_eq!(ui.render(4), "mrekk set a new score ▌");
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use eyre::{Context, Result};
@@ -13,6 +13,7 @@ use super::{sanitize_llm_text, AiMessage, SearchMode};
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AiStreamEvent {
     Status(String),
+    Thinking { chars: usize, tail: String },
     Content(String),
 }
 
@@ -85,6 +86,8 @@ pub struct OllamaClient {
     search: super::search::WebSearchClient,
     runtime: std::sync::RwLock<RuntimeAiConfig>,
     runtime_save_lock: tokio::sync::Mutex<()>,
+    unsupported_thinking_models: std::sync::RwLock<HashSet<String>>,
+    unsupported_tools_models: std::sync::RwLock<HashSet<String>>,
     last_stats: tokio::sync::RwLock<HashMap<Id<ChannelMarker>, LastGenerationStats>>,
 }
 
@@ -356,6 +359,8 @@ impl OllamaClient {
             search,
             runtime: std::sync::RwLock::new(runtime_cfg),
             runtime_save_lock: tokio::sync::Mutex::new(()),
+            unsupported_thinking_models: std::sync::RwLock::new(HashSet::new()),
+            unsupported_tools_models: std::sync::RwLock::new(HashSet::new()),
             last_stats: tokio::sync::RwLock::new(HashMap::new()),
         }
     }
@@ -619,6 +624,9 @@ impl OllamaClient {
         for round in 0..MAX_TOOL_ROUNDS {
             let pass_think = if round == 0 { think_enabled } else { false };
             let pass_tools = base_tools;
+            if round == 0 {
+                Self::emit_status(stream_tx.as_ref(), "🧠 Waiting for AI model...");
+            }
             let resp = self
                 .send_chat_request(
                     &working_messages,
@@ -698,6 +706,7 @@ impl OllamaClient {
             for out in executed {
                 working_messages.push(AiMessage::tool(out));
             }
+            Self::emit_status(stream_tx.as_ref(), "⚡ Analyzing tool results...");
         }
 
         if let Some(resp) = last_response {
@@ -722,6 +731,7 @@ impl OllamaClient {
             ));
         }
 
+        Self::emit_status(stream_tx.as_ref(), "⚡ Writing response...");
         let fallback = self
             .send_chat_request(
                 &working_messages,
@@ -747,10 +757,38 @@ impl OllamaClient {
         }
     }
 
+    fn summarize_thinking_tail(raw: &str, max_chars: usize) -> String {
+        let collapsed: String = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+        let safe = sanitize_llm_text(&collapsed);
+        let total = safe.chars().count();
+        if total <= max_chars {
+            safe
+        } else {
+            let skip = total - max_chars.saturating_sub(3);
+            let tail: String = safe.chars().skip(skip).collect();
+            format!("...{tail}")
+        }
+    }
+
+    fn extract_open_inline_think(content: &str) -> Option<&str> {
+        for (open_tag, close_tag) in [
+            ("<think>", "</think>"),
+            ("<thought>", "</thought>"),
+            ("<reasoning>", "</reasoning>"),
+        ] {
+            if let Some(open_idx) = content.rfind(open_tag) {
+                let after_open = &content[open_idx + open_tag.len()..];
+                if !after_open.contains(close_tag) {
+                    return Some(after_open);
+                }
+            }
+        }
+        None
+    }
+
     fn apply_ndjson_line(
         line: &[u8],
         acc: &mut OllamaResponse,
-        announced_thinking: &mut bool,
         stream_tx: Option<&UnboundedSender<AiStreamEvent>>,
     ) {
         let trimmed = String::from_utf8_lossy(line);
@@ -765,20 +803,33 @@ impl OllamaClient {
 
         if let Some(ref thought) = chunk.message.thinking {
             if !thought.is_empty() {
-                acc.message
-                    .thinking
-                    .get_or_insert_with(String::new)
-                    .push_str(thought);
-                if !*announced_thinking && acc.message.content.is_empty() {
-                    *announced_thinking = true;
-                    Self::emit_status(stream_tx, "💭 Thinking...");
+                let full_thought = acc.message.thinking.get_or_insert_with(String::new);
+                full_thought.push_str(thought);
+                if acc.message.content.is_empty() {
+                    if let Some(tx) = stream_tx {
+                        let _ = tx.send(AiStreamEvent::Thinking {
+                            chars: full_thought.chars().count(),
+                            tail: Self::summarize_thinking_tail(full_thought, 110),
+                        });
+                    }
                 }
             }
         }
         if !chunk.message.content.is_empty() {
             acc.message.content.push_str(&chunk.message.content);
             if let Some(tx) = stream_tx {
-                let _ = tx.send(AiStreamEvent::Content(acc.message.content.clone()));
+                if acc.message.thinking.is_none() {
+                    if let Some(inline_thought) = Self::extract_open_inline_think(&acc.message.content) {
+                        let _ = tx.send(AiStreamEvent::Thinking {
+                            chars: inline_thought.chars().count(),
+                            tail: Self::summarize_thinking_tail(inline_thought, 110),
+                        });
+                    } else {
+                        let _ = tx.send(AiStreamEvent::Content(acc.message.content.clone()));
+                    }
+                } else {
+                    let _ = tx.send(AiStreamEvent::Content(acc.message.content.clone()));
+                }
             }
         }
         if let Some(calls) = chunk.message.tool_calls {
@@ -804,6 +855,18 @@ impl OllamaClient {
         }
     }
 
+    fn is_unsupported_thinking_error(error_text: &str) -> bool {
+        let lower = error_text.to_ascii_lowercase();
+        lower.contains("does not support thinking")
+            || (lower.contains("not support") && lower.contains("thinking"))
+    }
+
+    fn is_unsupported_tools_error(error_text: &str) -> bool {
+        let lower = error_text.to_ascii_lowercase();
+        lower.contains("does not support tools")
+            || (lower.contains("not support") && lower.contains("tools"))
+    }
+
     async fn send_chat_request(
         &self,
         messages: &[AiMessage],
@@ -814,41 +877,85 @@ impl OllamaClient {
     ) -> Result<OllamaResponse> {
         let streaming = stream_tx.is_some();
         let cfg = self.snapshot_config();
-        let request = OllamaRequest {
-            model: &cfg.model,
-            messages,
-            stream: streaming,
-            think: Some(think),
-            keep_alive: &self.keep_alive,
-            tools,
-            options: OllamaOptions {
-                num_ctx: cfg.num_ctx,
-                num_predict: Some(num_predict),
-                repeat_penalty: self.repeat_penalty,
-                repeat_last_n: self.repeat_last_n,
-                presence_penalty: self.presence_penalty,
-                frequency_penalty: self.frequency_penalty,
-                temperature: cfg.temperature,
-                top_p: self.top_p,
-                top_k: self.top_k,
-                min_p: self.min_p,
-            },
-        };
 
-        let mut response = self
-            .client
-            .post(format!("{}/api/chat", self.url.trim_end_matches('/')))
-            .json(&request)
-            .send()
-            .await
-            .context("failed to contact Ollama")?;
+        let mut use_think_param = !self
+            .unsupported_thinking_models
+            .read()
+            .expect("unsupported_thinking RwLock poisoned")
+            .contains(&cfg.model);
+        let mut use_tools_param = !self
+            .unsupported_tools_models
+            .read()
+            .expect("unsupported_tools RwLock poisoned")
+            .contains(&cfg.model);
 
-        let status = response.status();
-        if !status.is_success() {
-            let error_bytes = response.bytes().await.unwrap_or_default();
+        let response = loop {
+            let request = OllamaRequest {
+                model: &cfg.model,
+                messages,
+                stream: streaming,
+                think: use_think_param.then_some(think),
+                keep_alive: &self.keep_alive,
+                tools: if use_tools_param { tools } else { None },
+                options: OllamaOptions {
+                    num_ctx: cfg.num_ctx,
+                    num_predict: Some(num_predict),
+                    repeat_penalty: self.repeat_penalty,
+                    repeat_last_n: self.repeat_last_n,
+                    presence_penalty: self.presence_penalty,
+                    frequency_penalty: self.frequency_penalty,
+                    temperature: cfg.temperature,
+                    top_p: self.top_p,
+                    top_k: self.top_k,
+                    min_p: self.min_p,
+                },
+            };
+
+            let resp = self
+                .client
+                .post(format!("{}/api/chat", self.url.trim_end_matches('/')))
+                .json(&request)
+                .send()
+                .await
+                .context("failed to contact Ollama")?;
+
+            let status = resp.status();
+            if status.is_success() {
+                break resp;
+            }
+
+            let error_bytes = resp.bytes().await.unwrap_or_default();
             let error_text = String::from_utf8_lossy(&error_bytes);
+
+            if status == reqwest::StatusCode::BAD_REQUEST
+                && use_think_param
+                && Self::is_unsupported_thinking_error(&error_text)
+            {
+                tracing::info!(model = %cfg.model, "Model does not support Ollama `think` parameter; retrying without it");
+                self.unsupported_thinking_models
+                    .write()
+                    .expect("unsupported_thinking RwLock poisoned")
+                    .insert(cfg.model.clone());
+                use_think_param = false;
+                continue;
+            }
+
+            if status == reqwest::StatusCode::BAD_REQUEST
+                && use_tools_param
+                && tools.is_some()
+                && Self::is_unsupported_tools_error(&error_text)
+            {
+                tracing::info!(model = %cfg.model, "Model does not support Ollama native `tools`; retrying without tools");
+                self.unsupported_tools_models
+                    .write()
+                    .expect("unsupported_tools RwLock poisoned")
+                    .insert(cfg.model.clone());
+                use_tools_param = false;
+                continue;
+            }
+
             eyre::bail!("Ollama returned HTTP {status}: {error_text}");
-        }
+        };
 
         if !streaming {
             let raw_bytes = response
@@ -862,7 +969,7 @@ impl OllamaClient {
 
         let mut acc = OllamaResponse::default();
         let mut buf: Vec<u8> = Vec::new();
-        let mut announced_thinking = false;
+        let mut response = response;
 
         while let Some(chunk) = response
             .chunk()
@@ -872,11 +979,11 @@ impl OllamaClient {
             buf.extend_from_slice(&chunk);
             while let Some(nl) = buf.iter().position(|&b| b == b'\n') {
                 let line: Vec<u8> = buf.drain(..=nl).collect();
-                Self::apply_ndjson_line(&line, &mut acc, &mut announced_thinking, stream_tx);
+                Self::apply_ndjson_line(&line, &mut acc, stream_tx);
             }
         }
         if !buf.is_empty() {
-            Self::apply_ndjson_line(&buf, &mut acc, &mut announced_thinking, stream_tx);
+            Self::apply_ndjson_line(&buf, &mut acc, stream_tx);
         }
 
         Ok(acc)
@@ -912,15 +1019,14 @@ mod tests {
     fn test_ndjson_stream_assembly_and_tool_calls() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let mut acc = OllamaResponse::default();
-        let mut announced_thinking = false;
 
         let line1 = br#"{"message":{"role":"assistant","content":"","thinking":"hmm"}}"#;
         let line2 = br#"{"message":{"role":"assistant","content":"mrekk is "}}"#;
         let line3 = br##"{"message":{"role":"assistant","content":"#1!","tool_calls":[{"function":{"name":"osu_player","arguments":{"username":"mrekk"}}}]},"done":true,"prompt_eval_count":100,"eval_count":12}"##;
 
-        OllamaClient::apply_ndjson_line(line1, &mut acc, &mut announced_thinking, Some(&tx));
-        OllamaClient::apply_ndjson_line(line2, &mut acc, &mut announced_thinking, Some(&tx));
-        OllamaClient::apply_ndjson_line(line3, &mut acc, &mut announced_thinking, Some(&tx));
+        OllamaClient::apply_ndjson_line(line1, &mut acc, Some(&tx));
+        OllamaClient::apply_ndjson_line(line2, &mut acc, Some(&tx));
+        OllamaClient::apply_ndjson_line(line3, &mut acc, Some(&tx));
 
         assert_eq!(acc.message.thinking.as_deref(), Some("hmm"));
         assert_eq!(acc.message.content, "mrekk is #1!");
@@ -929,9 +1035,46 @@ mod tests {
         assert_eq!(acc.eval_count, Some(12));
         assert_eq!(acc.message.tool_calls.as_ref().map(Vec::len), Some(1));
 
-        assert_eq!(rx.try_recv().unwrap(), AiStreamEvent::Status("💭 Thinking...".into()));
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            AiStreamEvent::Thinking {
+                chars: 3,
+                tail: "hmm".into()
+            }
+        );
         assert_eq!(rx.try_recv().unwrap(), AiStreamEvent::Content("mrekk is ".into()));
         assert_eq!(rx.try_recv().unwrap(), AiStreamEvent::Content("mrekk is #1!".into()));
+
+        // Inline <think> streaming + error capability detection
+        let mut inline_acc = OllamaResponse::default();
+        let (tx2, mut rx2) = tokio::sync::mpsc::unbounded_channel();
+        OllamaClient::apply_ndjson_line(
+            br#"{"message":{"role":"assistant","content":"<think>planning"}}"#,
+            &mut inline_acc,
+            Some(&tx2),
+        );
+        OllamaClient::apply_ndjson_line(
+            br#"{"message":{"role":"assistant","content":" done</think>Hi!"}}"#,
+            &mut inline_acc,
+            Some(&tx2),
+        );
+        assert_eq!(
+            rx2.try_recv().unwrap(),
+            AiStreamEvent::Thinking {
+                chars: 8,
+                tail: "planning".into()
+            }
+        );
+        assert_eq!(
+            rx2.try_recv().unwrap(),
+            AiStreamEvent::Content("<think>planning done</think>Hi!".into())
+        );
+        assert!(OllamaClient::is_unsupported_thinking_error(
+            r#"{"error":"\"gemma\" does not support thinking"}"#
+        ));
+        assert!(OllamaClient::is_unsupported_tools_error(
+            "this model does not support tools"
+        ));
     }
 
     #[test]
