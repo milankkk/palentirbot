@@ -1,6 +1,7 @@
-use std::{fs::File, io::ErrorKind, sync::Arc};
+use std::{io::ErrorKind, sync::Arc};
 
 use eyre::{Report, Result};
+use tokio::fs;
 
 use crate::{
     core::{BotConfig, Context},
@@ -19,8 +20,8 @@ pub async fn view(
     let mut user_path = BotConfig::get().paths.danser().to_owned();
     user_path.push(format!("settings/{}.json", user.id));
 
-    let settings = match File::open(&user_path) {
-        Ok(file) => match serde_json::from_reader(std::io::BufReader::new(file)) {
+    let settings = match fs::read(&user_path).await {
+        Ok(bytes) => match serde_json::from_slice(&bytes) {
             Ok(settings) => settings,
             Err(err) => {
                 let content = "Failed to read settings file";

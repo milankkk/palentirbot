@@ -1,11 +1,10 @@
 use std::{
     convert::TryInto,
-    fs::{File, OpenOptions},
     path::PathBuf,
     sync::Arc,
 };
 
-use eyre::{Context as _, ContextCompat, Report, Result};
+use eyre::{Context as _, Report, Result};
 use tokio::fs;
 use twilight_model::application::command::CommandOptionChoice;
 
@@ -70,7 +69,7 @@ pub async fn edit(
 
     // Retrieve attachment if provided
     let attached = if let Some(ref attachment) = args.file {
-        if !matches!(attachment.filename.rsplit('.').next(), Some("json")) {
+        if !matches!(attachment.filename.rsplit('.').next(), Some(ext) if ext.eq_ignore_ascii_case("json")) {
             let content = "The attached file must be of type .json";
             command.error_callback(&ctx, content, false).await?;
 
@@ -101,24 +100,34 @@ pub async fn edit(
         None
     };
 
-    let mut settings: DanserSettings = if user_path.exists() {
-        let file = File::open(&user_path)
-            .with_context(|| format!("failed to open settings file at {user_path:?}"))?;
+    let mut settings: DanserSettings = if fs::try_exists(&user_path).await.unwrap_or(false) {
+        let bytes = fs::read(&user_path)
+            .await
+            .with_context(|| format!("failed to read settings file at {user_path:?}"))?;
 
-        serde_json::from_reader(std::io::BufReader::new(file))
+        serde_json::from_slice(&bytes)
             .with_context(|| format!("failed to deserialize settings file at {user_path:?}"))?
     } else {
         let mut default_path = danser_path.to_owned();
         default_path.push("settings/default.json");
-        fs::copy(&default_path, &user_path)
+        let mut tmp_default = danser_path.to_owned();
+        tmp_default.push(format!("settings/.{author}.json.{}.tmp", command.id));
+        fs::copy(&default_path, &tmp_default)
             .await
             .context("failed to copy default danser settings")?;
+        if let Err(err) = fs::rename(&tmp_default, &user_path).await {
+            let _ = fs::remove_file(&tmp_default).await;
+            return Err(Report::from(err).wrap_err("failed to initialize user settings file"));
+        }
 
-        let file = File::open(&user_path).context("failed to open default settings file")?;
+        let bytes = fs::read(&user_path)
+            .await
+            .context("failed to read default settings file")?;
 
-        serde_json::from_reader(std::io::BufReader::new(file)).context("failed to deserialize default settings file")?
+        serde_json::from_slice(&bytes).context("failed to deserialize default settings file")?
     };
 
+    let had_attachment = attached.is_some();
     if let Some(attached) = attached {
         settings.audio = attached.audio;
         settings.input = attached.input;
@@ -134,25 +143,9 @@ pub async fn edit(
 
     // Modify the settings and check if something changed
     match modify_settings(&ctx, &mut settings, args) {
-        ModifyResult::Change(true) => {
-            let file = OpenOptions::new()
-                .write(true)
-                .truncate(true)
-                .open(&user_path)
-                .with_context(|| {
-                    format!("failed to open file at {user_path:?} after modifying settings")
-                })?;
-
-            match serde_json::to_writer(file, &settings) {
-                Ok(_) => {
-                    let user = command.user()?;
-                    let embed = create_settings_embed(user, &settings);
-                    let content = "Successfully changed settings!";
-                    let builder = MessageBuilder::new().content(content).embed(embed);
-                    command.callback(&ctx, builder, false).await?;
-
-                    Ok(())
-                }
+        ModifyResult::Change(changed) if changed || had_attachment => {
+            let json_bytes = match serde_json::to_vec_pretty(&settings) {
+                Ok(bytes) => bytes,
                 Err(err) => {
                     let content = "Failed to save modified settings";
                     let _ = command.error_callback(&ctx, content, false).await;
@@ -160,11 +153,39 @@ pub async fn edit(
                     let err = Report::from(err)
                         .wrap_err(format!("failed to serialize settings into {user_path:?}"));
 
-                    Err(err)
+                    return Err(err);
                 }
+            };
+
+            let mut tmp_path = danser_path.to_owned();
+            tmp_path.push(format!("settings/.{author}.json.{}.tmp", command.id));
+            if let Err(err) = fs::write(&tmp_path, &json_bytes).await {
+                let _ = fs::remove_file(&tmp_path).await;
+                let content = "Failed to save modified settings";
+                let _ = command.error_callback(&ctx, content, false).await;
+
+                return Err(Report::from(err)
+                    .wrap_err(format!("failed to write settings into {tmp_path:?}")));
             }
+
+            if let Err(err) = fs::rename(&tmp_path, &user_path).await {
+                let _ = fs::remove_file(&tmp_path).await;
+                let content = "Failed to save modified settings";
+                let _ = command.error_callback(&ctx, content, false).await;
+
+                return Err(Report::from(err)
+                    .wrap_err(format!("failed to commit settings into {user_path:?}")));
+            }
+
+            let user = command.user()?;
+            let embed = create_settings_embed(user, &settings);
+            let content = "Successfully changed settings!";
+            let builder = MessageBuilder::new().content(content).embed(embed);
+            command.callback(&ctx, builder, false).await?;
+
+            Ok(())
         }
-        ModifyResult::Change(false) => {
+        ModifyResult::Change(_) => {
             let user = command.user()?;
             let embed = create_settings_embed(user, &settings);
             let builder = MessageBuilder::new().embed(embed);
@@ -228,14 +249,14 @@ fn modify_settings(
 
     if let Some(skin) = skin {
         let skin_name_res = ctx.skin_list().get().map(|skins| {
-            let skin = skin.cow_replace('_', " ");
+            let skin_lower = skin.cow_replace('_', " ").to_ascii_lowercase();
 
             skins.iter().find_map(|skin_| {
                 let s = skin_.to_ascii_lowercase();
                 let s = s.to_string_lossy();
                 let s = s.cow_replace('_', " ");
 
-                (s == skin).then(|| skin_.to_owned())
+                (s == skin_lower).then(|| skin_.to_owned())
             })
         });
 
@@ -248,14 +269,9 @@ fn modify_settings(
         // Get skin of current settings
         let mut curr_skin_path = PathBuf::from(&settings.skin.current_skin);
 
-        let curr_skin_res = curr_skin_path
+        let is_different_skin = curr_skin_path
             .file_name()
-            .with_context(|| format!("missing filename for skin path {curr_skin_path:?}"));
-
-        let is_different_skin = match curr_skin_res {
-            Ok(skin) => skin != skin_name,
-            Err(err) => return ModifyResult::Err(err),
-        };
+            .is_none_or(|skin| skin != skin_name);
 
         // Compare new with old
         if is_different_skin {

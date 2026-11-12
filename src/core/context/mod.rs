@@ -60,7 +60,9 @@ impl Context {
     }
 
     pub fn skin_list(&self) -> MutexGuard<'_, SkinList> {
-        self.skin_list.lock().unwrap()
+        self.skin_list
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     pub fn ai(&self) -> &AiClient {

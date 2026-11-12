@@ -147,7 +147,9 @@ impl InteractionCommandExt for InteractionCommand {
         Ok(ctx
             .interaction()
             .update_response(&self.token)
+            .content(None)
             .embeds(Some(&[embed]))
+            .components(Some(&[]))
             .await?
             .model()
             .await?)

@@ -268,8 +268,8 @@ fn create_settings_embed(user: &User, settings: &DanserSettings) -> Embed {
     let skin_path = PathBuf::from(&settings.skin.current_skin);
     let skin = skin_path
         .file_name()
-        .expect("missing skin file name")
-        .to_string_lossy();
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_else(|| std::borrow::Cow::Borrowed("default"));
 
     let on_off = |b| if b { "on" } else { "off" };
     let percent = |value| Percent { value };

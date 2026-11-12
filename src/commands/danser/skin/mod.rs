@@ -22,7 +22,7 @@ mod remove;
 /// Skinlist configuration
 pub enum Skin {
     #[command(name = "add")]
-    Add(SkinAdd),
+    Add(Box<SkinAdd>),
     #[command(name = "remove")]
     Remove(SkinRemove),
     #[command(name = "list")]
@@ -55,7 +55,7 @@ pub struct SkinList;
 
 pub async fn slash_skin(ctx: Arc<Context>, mut command: InteractionCommand) -> Result<()> {
     match Skin::from_interaction(command.input_data())? {
-        Skin::Add(args) => add(ctx, command, args).await,
+        Skin::Add(args) => add(ctx, command, *args).await,
         Skin::Remove(args) => remove(ctx, command, args).await,
         Skin::List(_) => list(ctx, command).await,
     }

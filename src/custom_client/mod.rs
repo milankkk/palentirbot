@@ -49,10 +49,14 @@ impl From<&'static BotConfig> for UploadData {
     }
 }
 
+const MAX_DOWNLOAD_BYTES: usize = 250 * 1024 * 1024;
+const MAX_SKIN_BYTES: usize = 150 * 1024 * 1024;
+
 impl CustomClient {
     pub fn new() -> Self {
         let client = Client::builder()
             .user_agent(MY_USER_AGENT)
+            .connect_timeout(Duration::from_secs(10))
             .redirect(reqwest::redirect::Policy::limited(10))
             .build()
             .expect("failed to create reqwest CustomClient");
@@ -144,6 +148,42 @@ impl CustomClient {
         self.ratelimiters[site as usize].acquire_one().await
     }
 
+    async fn read_response_bytes_limited(
+        mut response: reqwest::Response,
+        url: &str,
+        max_bytes: usize,
+    ) -> Result<Bytes> {
+        if let Some(len) = response.content_length() {
+            ensure!(
+                len as usize <= max_bytes,
+                "response from {url} exceeds {} MB size limit",
+                max_bytes / (1024 * 1024)
+            );
+        }
+
+        let initial_cap = response
+            .content_length()
+            .and_then(|l| usize::try_from(l).ok())
+            .map_or(0, |l| l.min(max_bytes).min(8 * 1024 * 1024));
+        let mut buf = Vec::with_capacity(initial_cap);
+
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .with_context(|| format!("failed to read response chunk from {url}"))?
+        {
+            if buf.len().saturating_add(chunk.len()) > max_bytes {
+                bail!(
+                    "response from {url} exceeds {} MB size limit",
+                    max_bytes / (1024 * 1024)
+                );
+            }
+            buf.extend_from_slice(&chunk);
+        }
+
+        Ok(Bytes::from(buf))
+    }
+
     async fn make_get_request(&self, url: impl AsRef<str>, site: Site) -> Result<Bytes> {
         let url = url.as_ref();
         self.ratelimit(site).await;
@@ -153,6 +193,7 @@ impl CustomClient {
         let response = self
             .client
             .get(url)
+            .timeout(Duration::from_secs(90))
             .send()
             .await
             .with_context(|| format!("failed to receive GET response from {url}"))?;
@@ -164,10 +205,7 @@ impl CustomClient {
             bail!("failed with status code {status} when requesting {url}");
         }
 
-        let bytes = response
-            .bytes()
-            .await
-            .with_context(|| format!("failed to extract response bytes from {url}"))?;
+        let bytes = Self::read_response_bytes_limited(response, url, MAX_DOWNLOAD_BYTES).await?;
 
         warn!(
             "Got {} bytes from {url}, starts_with PK: {}",
@@ -184,10 +222,56 @@ impl CustomClient {
     }
 
     pub async fn get_skin_from_url(&self, url: &str) -> Result<Bytes> {
-        let bytes = self.make_get_request(url, Site::DownloadCatboy).await?;
-        const MAX_SKIN_BYTES: usize = 150 * 1024 * 1024; // 150 MB limit
-        ensure!(bytes.len() <= MAX_SKIN_BYTES, "skin file exceeds 150MB limit");
-        Ok(bytes)
+        const MAX_REDIRECTS: usize = 5;
+        self.ratelimit(Site::DownloadCatboy).await;
+
+        let mut current_url = url.to_owned();
+        for _ in 0..=MAX_REDIRECTS {
+            let target = crate::core::ai::search::validate_and_resolve_url(&current_url).await?;
+            let mut client_builder = Client::builder()
+                .user_agent(MY_USER_AGENT)
+                .connect_timeout(Duration::from_secs(10))
+                .timeout(Duration::from_secs(120))
+                .redirect(reqwest::redirect::Policy::none());
+            if !target.pinned_addrs.is_empty() && target.host.parse::<std::net::IpAddr>().is_err() {
+                client_builder = client_builder.resolve_to_addrs(&target.host, &target.pinned_addrs);
+            }
+            let client = client_builder
+                .build()
+                .context("failed to build SSRF-safe download client")?;
+
+            let response = client
+                .get(target.url.clone())
+                .send()
+                .await
+                .with_context(|| format!("failed to receive GET response from {current_url}"))?;
+
+            if response.status().is_redirection() {
+                let location = response
+                    .headers()
+                    .get(reqwest::header::LOCATION)
+                    .and_then(|v| v.to_str().ok())
+                    .ok_or_else(|| eyre::eyre!("redirect response missing Location header"))?;
+                let next_url = target
+                    .url
+                    .join(location)
+                    .context("invalid redirect Location URL")?;
+                current_url = next_url.to_string();
+                continue;
+            }
+
+            if !response.status().is_success() {
+                bail!(
+                    "failed with status code {} when requesting {current_url}",
+                    response.status()
+                );
+            }
+
+            return Self::read_response_bytes_limited(response, &current_url, MAX_SKIN_BYTES)
+                .await;
+        }
+
+        bail!("too many redirects while downloading skin")
     }
 
     pub async fn download_chimu_mapset(&self, mapset_id: u32) -> Result<Bytes> {
@@ -268,6 +352,7 @@ impl CustomClient {
         let response = self
             .client
             .post(self.upload.url)
+            .timeout(Duration::from_secs(600))
             .multipart(form)
             .send()
             .await
@@ -287,14 +372,13 @@ impl CustomClient {
         }
 
         let status = response.status();
-        if !status.is_success() {
-            bail!("upload failed with status code {status}");
-        }
-
-        let bytes = response
-            .bytes()
+        let bytes = Self::read_response_bytes_limited(response, self.upload.url, 1024 * 1024)
             .await
             .context("failed to extract upload response bytes")?;
+        if !status.is_success() {
+            let body = String::from_utf8_lossy(&bytes);
+            bail!("upload failed with status code {status}: {body}");
+        }
 
         serde_json::from_slice(&bytes).with_context(|| {
             let text = String::from_utf8_lossy(&bytes);

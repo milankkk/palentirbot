@@ -203,10 +203,10 @@ fn is_duckduckgo_challenge_html(body: &str) -> bool {
         || lower.contains("bots use duckduckgo")
 }
 
-struct ValidatedTarget {
-    url: reqwest::Url,
-    host: String,
-    pinned_addrs: Vec<SocketAddr>,
+pub struct ValidatedTarget {
+    pub url: reqwest::Url,
+    pub host: String,
+    pub pinned_addrs: Vec<SocketAddr>,
 }
 
 fn build_pinned_client(host: &str, addrs: &[SocketAddr]) -> Result<Client> {
@@ -342,7 +342,7 @@ pub fn is_private_or_local_ip(ip: std::net::IpAddr) -> bool {
     }
 }
 
-async fn validate_and_resolve_url(url_str: &str) -> Result<ValidatedTarget> {
+pub async fn validate_and_resolve_url(url_str: &str) -> Result<ValidatedTarget> {
     let raw = url_str
         .trim()
         .trim_matches(|c| matches!(c, '"' | '\'' | '`' | '<' | '>'))

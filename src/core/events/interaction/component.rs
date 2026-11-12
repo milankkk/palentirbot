@@ -35,10 +35,25 @@ pub async fn handle_component(ctx: Arc<Context>, component: InteractionComponent
         "profile_medium" => handle_profile_medium(ctx, component).await,
         "profile_full" => handle_profile_full(ctx, component).await,
         "owner_settings_section" => crate::commands::owner::settings::handle_owner_settings_section(ctx, component).await,
+        _ if name.starts_with("owner_settings_section_") => crate::commands::owner::settings::handle_owner_settings_section(ctx, component).await,
         _ if name.starts_with("owner_settings_prop_") => crate::commands::owner::settings::handle_owner_settings_prop(ctx, component).await,
         _ if name.starts_with("oset_applyall_") => crate::commands::owner::settings::handle_owner_settings_applyall(ctx, component).await,
         "oset_skipall" => crate::commands::owner::settings::handle_owner_settings_skipall(ctx, component).await,
-        _ => return error!("unknown message component `{name}`"),
+        _ => {
+            let response = twilight_model::http::interaction::InteractionResponse {
+                kind: twilight_model::http::interaction::InteractionResponseType::ChannelMessageWithSource,
+                data: Some(twilight_model::http::interaction::InteractionResponseData {
+                    content: Some("This interaction is unknown or has expired.".to_owned()),
+                    flags: Some(twilight_model::channel::message::MessageFlags::EPHEMERAL),
+                    ..Default::default()
+                }),
+            };
+            let _ = ctx
+                .interaction()
+                .create_response(component.id, &component.token, &response)
+                .await;
+            return error!("unknown message component `{name}`");
+        }
     };
 
     if let Err(err) = res.with_context(|| format!("failed to process component `{name}`")) {

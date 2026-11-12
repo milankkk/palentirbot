@@ -7,7 +7,7 @@ A modern revival of [shishabot](https://github.com/mezodev0/shishabot) using upd
 [**Invite the bot to your server**](https://discord.com/oauth2/authorize?client_id=1490728112173092875&permissions=4503599627388928&integration_type=0&scope=bot+applications.commands)
 
 ### Features
-- Default prefix: `<` (changeable via commands)
+- Default prefix: `!` (configurable per server via `/setup setprefix`)
 - **Reply to Render**: Right-click or reply to any osu! score embed to instantly render the replay.
 - **Custom Skins**: Add custom skins directly using raw `.osk` links.
 

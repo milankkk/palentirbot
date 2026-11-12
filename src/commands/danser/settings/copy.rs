@@ -1,6 +1,7 @@
-use std::{fs, sync::Arc};
+use std::sync::Arc;
 
 use eyre::{Report, Result};
+use tokio::fs;
 
 use crate::{
     core::{BotConfig, Context},
@@ -30,7 +31,7 @@ pub async fn copy(
     let mut from = danser_path.to_owned();
     from.push(format!("settings/{user}.json"));
 
-    if !from.exists() {
+    if !fs::try_exists(&from).await.unwrap_or(false) {
         let content = "That user has not configured their settings yet";
         command.error_callback(&ctx, content, false).await?;
 
@@ -39,8 +40,21 @@ pub async fn copy(
 
     let mut to = danser_path.to_owned();
     to.push(format!("settings/{author}.json"));
+    let mut tmp = danser_path.to_owned();
+    tmp.push(format!("settings/.{author}.json.{}.tmp", command.id));
 
-    if let Err(err) = fs::copy(from, to) {
+    let copy_res = match fs::copy(&from, &tmp).await {
+        Ok(_) => match fs::rename(&tmp, &to).await {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                let _ = fs::remove_file(&tmp).await;
+                Err(err)
+            }
+        },
+        Err(err) => Err(err),
+    };
+
+    if let Err(err) = copy_res {
         let content = "Failed to copy the settings file";
         let _ = command.error_callback(&ctx, content, false).await;
 

@@ -42,7 +42,16 @@ pub async fn slash_render(ctx: Arc<Context>, mut command: InteractionCommand) ->
         pitch,
     } = Render::from_interaction(command.input_data())?;
 
-    if !matches!(attachment.filename.split('.').next_back(), Some("osr")) {
+    if let Some(p) = pitch {
+        if !p.is_finite() || p <= 0.0 {
+            command
+                .error_callback(&ctx, "Pitch must be a positive number!", true)
+                .await?;
+            return Ok(());
+        }
+    }
+
+    if !matches!(attachment.filename.rsplit('.').next(), Some(ext) if ext.eq_ignore_ascii_case("osr")) {
         let content = "The attachment must be a .osr file!";
         command.error_callback(&ctx, content, true).await?;
 
@@ -82,11 +91,7 @@ pub async fn slash_render(ctx: Arc<Context>, mut command: InteractionCommand) ->
                 Err(err) => {
                     warn!("{err:?}");
                     command
-                        .error_callback(
-                            &ctx,
-                            "Failed to check server status, try again later.",
-                            false,
-                        )
+                        .error(&ctx, "Failed to check server status, try again later.")
                         .await?;
                     return Ok(());
                 }
@@ -96,7 +101,7 @@ pub async fn slash_render(ctx: Arc<Context>, mut command: InteractionCommand) ->
                 if let Some(reason) = reason_opt {
                     let _ = write!(content, " {reason}");
                 }
-                command.error_callback(&ctx, content, false).await?;
+                command.error(&ctx, content).await?;
                 return Ok(());
             }
 
@@ -108,7 +113,7 @@ pub async fn slash_render(ctx: Arc<Context>, mut command: InteractionCommand) ->
 
             if !is_allowed {
                 let content = "This channel is not an allowed input channel for rendering.";
-                command.error_callback(&ctx, content, true).await?;
+                command.error(&ctx, content).await?;
                 return Ok(());
             }
 
@@ -185,8 +190,7 @@ pub async fn slash_render(ctx: Arc<Context>, mut command: InteractionCommand) ->
         is_lazer,
     };
 
-    let was_empty = ctx.replay_queue.queue.lock().await.is_empty();
-    ctx.replay_queue.push(replay_data).await;
+    let was_empty = ctx.replay_queue.push(replay_data).await;
     let content = "Replay has been added to the queue!";
     let builder = MessageBuilder::new().embed(content);
     command.update(&ctx, &builder).await?;

@@ -24,11 +24,24 @@ pub async fn handle_modal(ctx: Arc<Context>, modal: InteractionModal) {
     let res = match name.as_str() {
         "pagination_page" => handle_pagination_modal(ctx, modal).await,
         _ if name.starts_with("oset_modal_") => crate::commands::owner::settings::handle_owner_settings_modal(ctx, modal).await,
-        _ => return error!("unknown modal `{name}`: {modal:#?}"),
+        _ => {
+            let response = twilight_model::http::interaction::InteractionResponse {
+                kind: twilight_model::http::interaction::InteractionResponseType::ChannelMessageWithSource,
+                data: Some(twilight_model::http::interaction::InteractionResponseData {
+                    content: Some("This modal is unknown or has expired.".to_owned()),
+                    flags: Some(twilight_model::channel::message::MessageFlags::EPHEMERAL),
+                    ..Default::default()
+                }),
+            };
+            let _ = ctx
+                .interaction()
+                .create_response(modal.id, &modal.token, &response)
+                .await;
+            return error!("unknown modal `{name}`");
+        }
     };
 
     if let Err(err) = res.with_context(|| format!("failed to process modal `{name}`")) {
-        println!("MODAL ERROR: {:?}", err);
         error!("{err:?}");
     }
 }

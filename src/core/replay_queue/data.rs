@@ -1,6 +1,5 @@
 use std::{borrow::Cow, path::PathBuf};
 
-use crate::util::CowUtils;
 use osu_db::Replay;
 use rosu_v2::prelude::Grade;
 use twilight_model::id::{
@@ -33,26 +32,22 @@ impl ReplayData {
         let name = self
             .path
             .file_name()
-            .expect("missing file name")
+            .unwrap_or_else(|| self.path.as_os_str())
             .to_string_lossy();
 
         let extension = name.rfind(".osr").unwrap_or(name.len());
         let suffix = name[..extension].rfind("_Osu").unwrap_or(extension);
+        let stem = &name[..suffix];
 
-        match name {
-            Cow::Borrowed(name) => name[..suffix].cow_replace('_', " "),
-            Cow::Owned(mut name) => {
-                name.truncate(suffix);
-
-                let mut idx = 0;
-
-                while let Some(i) = name.get(idx..).and_then(|suffix| suffix.find('_')) {
-                    let bytes = unsafe { name[idx..].as_bytes_mut() };
-                    bytes[i] = b' ';
-                    idx = i + 1;
+        if stem.contains('_') {
+            Cow::Owned(stem.replace('_', " "))
+        } else {
+            match name {
+                Cow::Borrowed(s) => Cow::Borrowed(&s[..suffix]),
+                Cow::Owned(mut s) => {
+                    s.truncate(suffix);
+                    Cow::Owned(s)
                 }
-
-                Cow::Owned(name)
             }
         }
     }
@@ -66,13 +61,17 @@ pub struct TimePoints {
 
 impl TimePoints {
     pub fn parse_single(s: &str) -> Result<u32, &'static str> {
-        let mut iter = s.split(':').map(str::parse);
+        let s = s.trim();
+        let mut iter = s.split(':').map(str::parse::<u32>);
 
-        match (iter.next(), iter.next()) {
-            (Some(Ok(minutes)), Some(Ok(seconds @ 0..=59))) => Ok(minutes * 60 + seconds),
-            (Some(Ok(_)), Some(Ok(_))) => Err("Seconds must be between 0 and 60!"),
-            (Some(Ok(seconds)), None) => Ok(seconds),
-            _ => Err("A value you supplied is not a number!"),
+        match (iter.next(), iter.next(), iter.next()) {
+            (Some(Ok(minutes)), Some(Ok(seconds @ 0..=59)), None) => minutes
+                .checked_mul(60)
+                .and_then(|m| m.checked_add(seconds))
+                .ok_or("Time value is too large!"),
+            (Some(Ok(_)), Some(Ok(_)), None) => Err("Seconds must be between 0 and 59!"),
+            (Some(Ok(seconds)), None, None) => Ok(seconds),
+            _ => Err("A value you supplied is not a valid timestamp!"),
         }
     }
 }
@@ -114,16 +113,22 @@ pub struct ReplaySlim {
 }
 
 impl ReplaySlim {
-    pub fn total_hits(&self) -> u16 {
-        self.count_300 + self.count_100 + self.count_50 + self.count_miss
+    pub fn total_hits(&self) -> u32 {
+        self.count_300 as u32
+            + self.count_100 as u32
+            + self.count_50 as u32
+            + self.count_miss as u32
     }
 
     pub fn accuracy(&self) -> f32 {
+        let denominator = self.total_hits() as f32 * 300.0;
+        if denominator == 0.0 {
+            return 0.0;
+        }
+
         let numerator = (self.count_50 as u32 * 50
             + self.count_100 as u32 * 100
             + self.count_300 as u32 * 300) as f32;
-
-        let denominator = self.total_hits() as f32 * 300.0;
 
         (10_000.0 * numerator / denominator).round() / 100.0
     }
@@ -233,4 +238,81 @@ pub fn calculate_grade_osu_std(
     }
 
     Grade::D
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_timepoints_parse_single() {
+        assert_eq!(TimePoints::parse_single("90"), Ok(90));
+        assert_eq!(TimePoints::parse_single("1:30"), Ok(90));
+        assert_eq!(TimePoints::parse_single(" 02:05 "), Ok(125));
+        assert!(TimePoints::parse_single("1:60").is_err());
+        assert!(TimePoints::parse_single("1:2:3").is_err());
+        assert!(TimePoints::parse_single("999999999:00").is_err());
+    }
+
+    #[test]
+    fn test_replay_name_handles_multiple_underscores_and_unicode() {
+        let data = ReplayData {
+            input_channel: Id::new(1),
+            output_channel: Id::new(1),
+            pitch: None,
+            path: PathBuf::from("/tmp/123_player_alpha_beta_map_Osu.osr"),
+            replay: ReplaySlim {
+                beatmap_hash: None,
+                count_300: 100,
+                count_100: 0,
+                count_50: 0,
+                count_geki: 0,
+                count_katsu: 0,
+                count_miss: 0,
+                max_combo: 100,
+                mods: 0,
+                player_name: None,
+                replay_hash: None,
+                score: 0,
+                timestamp: None,
+                grade: Grade::X,
+            },
+            time_points: TimePoints { start: 0, end: 0 },
+            user: Id::new(1),
+            title: None,
+            player_name: None,
+            map_title: None,
+            difficulty_name: None,
+            queue_message: None,
+            is_lazer: false,
+        };
+        assert_eq!(data.replay_name(), "123 player alpha beta map");
+    }
+
+    #[test]
+    fn test_replay_slim_total_hits_and_zero_accuracy() {
+        let mut slim = ReplaySlim {
+            beatmap_hash: None,
+            count_300: 0,
+            count_100: 0,
+            count_50: 0,
+            count_geki: 0,
+            count_katsu: 0,
+            count_miss: 0,
+            max_combo: 0,
+            mods: 0,
+            player_name: None,
+            replay_hash: None,
+            score: 0,
+            timestamp: None,
+            grade: Grade::F,
+        };
+        assert_eq!(slim.total_hits(), 0);
+        assert_eq!(slim.accuracy(), 0.0);
+
+        slim.count_300 = 50_000;
+        slim.count_100 = 20_000;
+        assert_eq!(slim.total_hits(), 70_000);
+        assert!(slim.accuracy() > 80.0);
+    }
 }

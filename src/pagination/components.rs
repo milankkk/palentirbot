@@ -141,10 +141,16 @@ pub async fn handle_pagination_modal(ctx: Arc<Context>, modal: InteractionModal)
         .and_then(|component| component.components.first())
         .context("missing input for page number")?;
 
-    let page: usize = if let Some(Ok(n)) = input.value.as_deref().map(str::parse) {
+    let page: usize = if let Some(Ok(n)) = input.value.as_deref().map(|s| s.trim().parse()) {
         n
     } else {
         debug!("failed to parse page input `{:?}` as usize", input.value);
+        let _ = modal
+            .callback(
+                &ctx,
+                MessageBuilder::new().embed("Please enter a valid positive page number."),
+            )
+            .await;
 
         return Ok(());
     };
@@ -154,6 +160,12 @@ pub async fn handle_pagination_modal(ctx: Arc<Context>, modal: InteractionModal)
 
         if let Some(pagination) = guard.get_mut() {
             if !pagination.is_author(modal.user_id()?) {
+                let _ = modal
+                    .callback(
+                        &ctx,
+                        MessageBuilder::new().embed("Only the command author can change the page."),
+                    )
+                    .await;
                 return Ok(());
             }
 
@@ -161,6 +173,13 @@ pub async fn handle_pagination_modal(ctx: Arc<Context>, modal: InteractionModal)
 
             if !(1..=max_page).contains(&page) {
                 debug!("page {page} is not between 1 and {max_page}");
+                let _ = modal
+                    .callback(
+                        &ctx,
+                        MessageBuilder::new()
+                            .embed(format!("Page must be between 1 and {max_page}.")),
+                    )
+                    .await;
 
                 return Ok(());
             }
@@ -176,6 +195,12 @@ pub async fn handle_pagination_modal(ctx: Arc<Context>, modal: InteractionModal)
 
             (pagination.build(&ctx).await, defer_components)
         } else {
+            let _ = modal
+                .callback(
+                    &ctx,
+                    MessageBuilder::new().embed("This pagination session has expired."),
+                )
+                .await;
             return Ok(());
         }
     } else {
@@ -183,6 +208,12 @@ pub async fn handle_pagination_modal(ctx: Arc<Context>, modal: InteractionModal)
             "received unexpected modal (has msg: {})",
             modal.message.is_some()
         );
+        let _ = modal
+            .callback(
+                &ctx,
+                MessageBuilder::new().embed("Cannot determine which message to paginate."),
+            )
+            .await;
 
         return Ok(());
     };

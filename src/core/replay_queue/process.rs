@@ -32,7 +32,7 @@ impl ReplayQueue {
         let config = BotConfig::get();
         let mut danser_path = config.paths.danser().to_owned();
         danser_path.push("danser");
-        if !danser_path.exists() {
+        if !tokio::fs::try_exists(&danser_path).await.unwrap_or(false) {
             warn!("danser binary not found at {danser_path:?}");
         }
 
@@ -115,7 +115,7 @@ async fn process_single_replay(
     let mut mapset_path = config.paths.songs();
     mapset_path.push(mapset_id.to_string());
 
-    if mapset_path.exists() {
+    if tokio::fs::try_exists(&mapset_path).await.unwrap_or(false) {
         warn!("Mapset {mapset_id} already exists locally, skipping download.");
         ctx.replay_queue.set_status(ReplayStatus::MapFound).await;
         ctx.replay_queue.notify.notify_waiters();
@@ -142,7 +142,7 @@ async fn process_single_replay(
     let mut settings_path = config.paths.danser().to_owned();
     settings_path.push(format!("settings/{user}.json"));
 
-    let settings = if settings_path.exists() {
+    let settings = if tokio::fs::try_exists(&settings_path).await.unwrap_or(false) {
         user.to_string()
     } else {
         "default".to_owned()
@@ -171,6 +171,7 @@ async fn process_single_replay(
     warn!("danser path: {:?}", danser_path);
     command
         .current_dir(config.paths.danser())
+        .kill_on_drop(true)
         .arg("-noupdatecheck")
         .arg("-replay")
         .arg(&canonical_path)
@@ -219,32 +220,47 @@ async fn process_single_replay(
     let stderr_reader = tokio::io::BufReader::new(stderr);
 
     let ctx1 = Arc::clone(&ctx);
-    tokio::spawn(async move {
-        read_danser_progress(ctx1, stdout_reader).await;
+    let stdout_handle = tokio::spawn(async move {
+        read_danser_progress(ctx1, stdout_reader).await
     });
 
     let ctx2 = Arc::clone(&ctx);
-    tokio::spawn(async move {
-        read_danser_progress(ctx2, stderr_reader).await;
+    let stderr_handle = tokio::spawn(async move {
+        read_danser_progress(ctx2, stderr_reader).await
     });
 
-    let childres = child.wait().await;
+    let childres = tokio::time::timeout(Duration::from_secs(1800), child.wait()).await;
     tracing::trace!("Danser finished");
 
     match childres {
-        Ok(status) => {
+        Ok(Ok(status)) => {
+            let (out_tail, err_tail) = tokio::join!(stdout_handle, stderr_handle);
             if !status.success() {
+                warn!(
+                    stdout_tail = ?out_tail.ok(),
+                    stderr_tail = ?err_tail.ok(),
+                    "danser exited with non-zero status: {status}"
+                );
                 let content = "Danser crashed or exited with an error code.";
                 let _ = input_channel.error(&ctx, content).await;
                 eyre::bail!("danser exited with non-zero status: {status}");
             }
         }
-        Err(err) => {
+        Ok(Err(err)) => {
+            let _ = child.kill().await;
+            let _ = tokio::join!(stdout_handle, stderr_handle);
             let err = Report::from(err).wrap_err("failed to run danser command");
             tracing::warn!("{:?}", err);
             let content = "Failed to run danser on the replay";
             let _ = input_channel.error(&ctx, content).await;
             return Err(err);
+        }
+        Err(_) => {
+            let _ = child.kill().await;
+            let _ = tokio::join!(stdout_handle, stderr_handle);
+            let content = "Danser render timed out after 30 minutes.";
+            let _ = input_channel.error(&ctx, content).await;
+            eyre::bail!("danser render timed out after 1800s");
         }
     }
 
@@ -302,8 +318,13 @@ async fn process_single_replay(
         .unwrap_or(("0.00", without_prefix));
     let (player, rest) = rest.split_once(" | ").unwrap_or(("Unknown", rest));
 
-    let rest = rest.trim_end_matches('%');
-    let (rest, acc) = rest.rsplit_once(' ').unwrap_or((rest, "100.00"));
+    let (rest, acc) = rest
+        .rsplit_once(" (")
+        .map(|(before, acc_part)| (before, acc_part.trim_end_matches(')').trim_end_matches('%')))
+        .unwrap_or_else(|| {
+            let trimmed = rest.trim_end_matches(')').trim_end_matches('%');
+            trimmed.rsplit_once(' ').unwrap_or((trimmed, "100.00"))
+        });
 
     let (map_name, mods) = if let Some((m, md)) = rest.rsplit_once(" +") {
         (m, md)
@@ -336,6 +357,7 @@ async fn process_single_replay(
         .unwrap_or_default()
         .as_secs();
 
+    let hash_prefix: String = replay_hash.chars().take(8).collect();
     let safe_filename = format!(
         "{}-{}-{}-{}-{}_{}_{}",
         sanitize(stars),
@@ -343,11 +365,7 @@ async fn process_single_replay(
         sanitize(map_name),
         sanitize(mods),
         sanitize(acc),
-        if replay_hash.len() > 8 {
-            &replay_hash[..8]
-        } else {
-            replay_hash
-        },
+        hash_prefix,
         timestamp
     );
 
@@ -625,7 +643,7 @@ async fn process_single_replay(
         );
     }
 
-    let link = link.replacen(".mp4", "", 1);
+    let link = link.strip_suffix(".mp4").unwrap_or(&link);
     let content = format!("<@{user}> [Replay]({link})");
 
     let builder = MessageBuilder::new().content(content);
@@ -662,11 +680,13 @@ async fn process_single_replay(
 async fn read_danser_progress<R: tokio::io::AsyncRead + Unpin>(
     ctx: std::sync::Arc<crate::core::Context>,
     mut reader: tokio::io::BufReader<R>,
-) {
+) -> Vec<String> {
+    use std::collections::VecDeque;
     use tokio::io::AsyncReadExt;
 
     let mut buf = [0u8; 1024];
     let mut text_buffer = String::new();
+    let mut tail: VecDeque<String> = VecDeque::with_capacity(20);
 
     while let Ok(n) = reader.read(&mut buf).await {
         if n == 0 {
@@ -680,6 +700,12 @@ async fn read_danser_progress<R: tokio::io::AsyncRead + Unpin>(
         let incomplete = lines.pop().unwrap_or("").to_string();
 
         for line in lines {
+            if !line.trim().is_empty() {
+                if tail.len() >= 20 {
+                    tail.pop_front();
+                }
+                tail.push_back(line.to_owned());
+            }
             if let Some(idx) = line.find("Progress: ") {
                 let remainder = &line[idx + 10..];
                 if let Some(pct_str) = remainder.split('%').next() {
@@ -694,6 +720,15 @@ async fn read_danser_progress<R: tokio::io::AsyncRead + Unpin>(
         }
         text_buffer = incomplete;
     }
+
+    if !text_buffer.trim().is_empty() {
+        if tail.len() >= 20 {
+            tail.pop_front();
+        }
+        tail.push_back(text_buffer);
+    }
+
+    tail.into_iter().collect()
 }
 
 #[derive(Debug)]
@@ -727,20 +762,43 @@ impl StdError for MapsetDownloadError {
 }
 
 async fn download_mapset(ctx: &Context, mapset_id: u32) -> Result<()> {
+    const MAX_UNCOMPRESSED_MAPSET_BYTES: u64 = 500 * 1024 * 1024;
     let bytes = request_mapset(ctx, mapset_id).await?;
     let mut out_path = BotConfig::get().paths.songs();
     out_path.push(mapset_id.to_string());
+    let cleanup_path = out_path.clone();
 
-    tokio::task::spawn_blocking(move || -> Result<()> {
+    let extract_res = tokio::task::spawn_blocking(move || -> Result<()> {
         let cursor = Cursor::new(bytes);
         let mut archive = ZipArchive::new(cursor).context("failed to create zip archive")?;
+        let mut total_size: u64 = 0;
+        for i in 0..archive.len() {
+            let entry = archive
+                .by_index(i)
+                .context("corrupt zip entry in beatmapset archive")?;
+            if entry.enclosed_name().is_none() {
+                eyre::bail!("beatmapset archive contains unsafe path traversal entry");
+            }
+            total_size = total_size
+                .checked_add(entry.size())
+                .ok_or_else(|| eyre::eyre!("beatmapset archive size overflow"))?;
+            if total_size > MAX_UNCOMPRESSED_MAPSET_BYTES {
+                eyre::bail!("beatmapset archive exceeds 500MB uncompressed limit");
+            }
+        }
         archive
             .extract(&out_path)
             .with_context(|| format!("failed to extract zip archive at `{out_path:?}`"))?;
         Ok(())
     })
     .await
-    .context("blocking zip extraction task panicked")?
+    .context("blocking zip extraction task panicked")?;
+
+    if extract_res.is_err() {
+        let _ = tokio::fs::remove_dir_all(&cleanup_path).await;
+    }
+
+    extract_res
 }
 
 async fn request_mapset(ctx: &Context, mapset_id: u32) -> Result<Bytes> {
@@ -888,34 +946,41 @@ async fn calc_single_latest_pp(
         cmd.arg("-m").arg("cl");
     }
 
+    cmd.kill_on_drop(true);
     cmd.arg(map_path);
 
-    if let Ok(output) = cmd.output().await {
-        if output.status.success() {
-            if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
-                if let Some(pp) = json
-                    .get("performance_attributes")
-                    .and_then(|attrs| attrs.get("pp"))
-                    .and_then(|pp| pp.as_f64())
-                {
-                    return Some(pp);
+    match tokio::time::timeout(Duration::from_secs(30), cmd.output()).await {
+        Ok(Ok(output)) => {
+            if output.status.success() {
+                if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
+                    if let Some(pp) = json
+                        .get("performance_attributes")
+                        .and_then(|attrs| attrs.get("pp"))
+                        .and_then(|pp| pp.as_f64())
+                    {
+                        return Some(pp);
+                    } else {
+                        tracing::warn!("Failed to parse PP from JSON: {:?}", json);
+                    }
                 } else {
-                    tracing::warn!("Failed to parse PP from JSON: {:?}", json);
+                    tracing::warn!(
+                        "Failed to parse JSON: {}",
+                        String::from_utf8_lossy(&output.stdout)
+                    );
                 }
             } else {
                 tracing::warn!(
-                    "Failed to parse JSON: {}",
-                    String::from_utf8_lossy(&output.stdout)
+                    "Command failed: {}",
+                    String::from_utf8_lossy(&output.stderr)
                 );
             }
-        } else {
-            tracing::warn!(
-                "Command failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
         }
-    } else {
-        tracing::warn!("Failed to spawn command");
+        Ok(Err(err)) => {
+            tracing::warn!("Failed to spawn PerformanceCalculator command: {err}");
+        }
+        Err(_) => {
+            tracing::warn!("PerformanceCalculator timed out after 30s");
+        }
     }
     None
 }
@@ -1018,209 +1083,220 @@ async fn create_title(
     map_title: &str,
     is_lazer: bool,
 ) -> Result<TitleResult> {
-    let map = Beatmap::from_path(&map_path)
-        .with_context(|| format!("failed to parse map at {map_path:?}"))?;
+    let map_path_v4 = map_path.clone();
+    let mods_val = replay.mods;
+    let count_300 = replay.count_300 as u32;
+    let count_100 = replay.count_100 as u32;
+    let count_50 = replay.count_50 as u32;
+    let count_miss = replay.count_miss as u32;
+    let max_combo = replay.max_combo as u32;
+    let total_300_nochoke = count_300 + count_miss;
+    let score_val = replay.score;
 
-    let diff_attrs = rosu_pp::Difficulty::new()
-        .mods(replay.mods)
-        .lazer(is_lazer)
-        .calculate(&map);
+    let (pp_v4, stars, max_possible_combo) = tokio::task::spawn_blocking(move || -> Result<_> {
+        let map = Beatmap::from_path(&map_path_v4)
+            .with_context(|| format!("failed to parse map at {map_path_v4:?}"))?;
 
-    let stars = diff_attrs.stars();
-    let max_possible_combo = diff_attrs.max_combo();
+        let diff_attrs = rosu_pp::Difficulty::new()
+            .mods(mods_val)
+            .lazer(is_lazer)
+            .calculate(&map);
 
-    let mut perf = rosu_pp::Performance::new(diff_attrs.clone())
-        .mods(replay.mods)
-        .n300(replay.count_300 as u32)
-        .n100(replay.count_100 as u32)
-        .n50(replay.count_50 as u32)
-        .misses(replay.count_miss as u32)
-        .combo(replay.max_combo as u32)
-        .lazer(is_lazer);
+        let stars = diff_attrs.stars();
+        let max_possible_combo = diff_attrs.max_combo();
 
-    if !is_lazer && replay.score > 0 {
-        perf = perf.legacy_total_score(replay.score);
-    }
-    let pp = perf.calculate().pp();
+        let mut perf = rosu_pp::Performance::new(diff_attrs.clone())
+            .mods(mods_val)
+            .n300(count_300)
+            .n100(count_100)
+            .n50(count_50)
+            .misses(count_miss)
+            .combo(max_combo)
+            .lazer(is_lazer);
 
-    let max_pp = rosu_pp::Performance::new(diff_attrs.clone())
-        .mods(replay.mods)
-        .lazer(is_lazer)
-        .calculate()
-        .pp();
+        if !is_lazer && score_val > 0 {
+            perf = perf.legacy_total_score(score_val);
+        }
+        let pp = perf.calculate().pp();
 
-    let nochoke_perf = rosu_pp::Performance::new(diff_attrs)
-        .mods(replay.mods)
-        .n300((replay.count_300 + replay.count_miss) as u32)
-        .n100(replay.count_100 as u32)
-        .n50(replay.count_50 as u32)
-        .misses(0)
-        .combo(max_possible_combo)
-        .lazer(is_lazer);
+        let max_pp = rosu_pp::Performance::new(diff_attrs.clone())
+            .mods(mods_val)
+            .lazer(is_lazer)
+            .calculate()
+            .pp();
 
-    let nochoke_pp = nochoke_perf.calculate().pp();
+        let nochoke_pp = rosu_pp::Performance::new(diff_attrs)
+            .mods(mods_val)
+            .n300(total_300_nochoke)
+            .n100(count_100)
+            .n50(count_50)
+            .misses(0)
+            .combo(max_possible_combo)
+            .lazer(is_lazer)
+            .calculate()
+            .pp();
 
-    let pp_v4 = PpTriple {
-        pp,
-        nochoke_pp,
-        max_pp,
-    };
-
-    let stars = (stars * 100.0).round() / 100.0;
+        Ok((
+            PpTriple {
+                pp,
+                nochoke_pp,
+                max_pp,
+            },
+            (stars * 100.0).round() / 100.0,
+            max_possible_combo,
+        ))
+    })
+    .await
+    .context("rosu_pp calculation task panicked")??;
 
     let pp_latest = calc_latest_pp(&map_path, replay, max_possible_combo, is_lazer).await;
 
-    let pp_2025 = if !is_lazer {
-        if let Ok(map_2025) = rosu_pp_2025::Beatmap::from_path(&map_path) {
-            let diff_2025 = rosu_pp_2025::Difficulty::new()
-                .mods(replay.mods)
-                .calculate(&map_2025);
-            let pp = rosu_pp_2025::Performance::new(diff_2025.clone())
-                .mods(replay.mods)
-                .n300(replay.count_300 as u32)
-                .n100(replay.count_100 as u32)
-                .n50(replay.count_50 as u32)
-                .misses(replay.count_miss as u32)
-                .combo(replay.max_combo as u32)
-                .calculate()
-                .pp();
-            let max_pp = rosu_pp_2025::Performance::new(diff_2025.clone())
-                .mods(replay.mods)
-                .calculate()
-                .pp();
-            let nochoke_pp = rosu_pp_2025::Performance::new(diff_2025)
-                .mods(replay.mods)
-                .n300((replay.count_300 + replay.count_miss) as u32)
-                .n100(replay.count_100 as u32)
-                .n50(replay.count_50 as u32)
-                .misses(0)
-                .combo(max_possible_combo)
-                .calculate()
-                .pp();
-            Some(PpTriple {
-                pp,
-                nochoke_pp,
-                max_pp,
-            })
-        } else {
-            None
-        }
-    } else {
-        None
-    };
+    let (pp_2025, pp_2024, pp_2022, pp_2021) = if !is_lazer {
+        let map_path_old = map_path.clone();
+        tokio::task::spawn_blocking(move || {
+            let pp_2025 = rosu_pp_2025::Beatmap::from_path(&map_path_old)
+                .ok()
+                .map(|map_2025| {
+                    let diff_2025 = rosu_pp_2025::Difficulty::new()
+                        .mods(mods_val)
+                        .calculate(&map_2025);
+                    let pp = rosu_pp_2025::Performance::new(diff_2025.clone())
+                        .mods(mods_val)
+                        .n300(count_300)
+                        .n100(count_100)
+                        .n50(count_50)
+                        .misses(count_miss)
+                        .combo(max_combo)
+                        .calculate()
+                        .pp();
+                    let max_pp = rosu_pp_2025::Performance::new(diff_2025.clone())
+                        .mods(mods_val)
+                        .calculate()
+                        .pp();
+                    let nochoke_pp = rosu_pp_2025::Performance::new(diff_2025)
+                        .mods(mods_val)
+                        .n300(total_300_nochoke)
+                        .n100(count_100)
+                        .n50(count_50)
+                        .misses(0)
+                        .combo(max_possible_combo)
+                        .calculate()
+                        .pp();
+                    PpTriple {
+                        pp,
+                        nochoke_pp,
+                        max_pp,
+                    }
+                });
 
-    let pp_2024 = if !is_lazer {
-        if let Ok(map_2024) = rosu_pp_2024::Beatmap::from_path(&map_path) {
-            let diff_2024 = rosu_pp_2024::Difficulty::new()
-                .mods(replay.mods)
-                .calculate(&map_2024);
-            let pp = rosu_pp_2024::Performance::new(diff_2024.clone())
-                .mods(replay.mods)
-                .n300(replay.count_300 as u32)
-                .n100(replay.count_100 as u32)
-                .n50(replay.count_50 as u32)
-                .misses(replay.count_miss as u32)
-                .combo(replay.max_combo as u32)
-                .calculate()
-                .pp();
-            let max_pp = rosu_pp_2024::Performance::new(diff_2024.clone())
-                .mods(replay.mods)
-                .calculate()
-                .pp();
-            let nochoke_pp = rosu_pp_2024::Performance::new(diff_2024)
-                .mods(replay.mods)
-                .n300((replay.count_300 + replay.count_miss) as u32)
-                .n100(replay.count_100 as u32)
-                .n50(replay.count_50 as u32)
-                .misses(0)
-                .combo(max_possible_combo)
-                .calculate()
-                .pp();
-            Some(PpTriple {
-                pp,
-                nochoke_pp,
-                max_pp,
-            })
-        } else {
-            None
-        }
-    } else {
-        None
-    };
+            let pp_2024 = rosu_pp_2024::Beatmap::from_path(&map_path_old)
+                .ok()
+                .map(|map_2024| {
+                    let diff_2024 = rosu_pp_2024::Difficulty::new()
+                        .mods(mods_val)
+                        .calculate(&map_2024);
+                    let pp = rosu_pp_2024::Performance::new(diff_2024.clone())
+                        .mods(mods_val)
+                        .n300(count_300)
+                        .n100(count_100)
+                        .n50(count_50)
+                        .misses(count_miss)
+                        .combo(max_combo)
+                        .calculate()
+                        .pp();
+                    let max_pp = rosu_pp_2024::Performance::new(diff_2024.clone())
+                        .mods(mods_val)
+                        .calculate()
+                        .pp();
+                    let nochoke_pp = rosu_pp_2024::Performance::new(diff_2024)
+                        .mods(mods_val)
+                        .n300(total_300_nochoke)
+                        .n100(count_100)
+                        .n50(count_50)
+                        .misses(0)
+                        .combo(max_possible_combo)
+                        .calculate()
+                        .pp();
+                    PpTriple {
+                        pp,
+                        nochoke_pp,
+                        max_pp,
+                    }
+                });
 
-    let pp_2022 = if !is_lazer {
-        if let Ok(map_2022) = rosu_pp_2022::Beatmap::from_path(&map_path) {
-            let pp = rosu_pp_2022::AnyPP::new(&map_2022)
-                .mods(replay.mods)
-                .n300(replay.count_300 as usize)
-                .n100(replay.count_100 as usize)
-                .n50(replay.count_50 as usize)
-                .n_misses(replay.count_miss as usize)
-                .combo(replay.max_combo as usize)
-                .calculate()
-                .pp();
-            let max_pp = rosu_pp_2022::AnyPP::new(&map_2022)
-                .mods(replay.mods)
-                .calculate()
-                .pp();
-            let nochoke_pp = rosu_pp_2022::AnyPP::new(&map_2022)
-                .mods(replay.mods)
-                .n300((replay.count_300 + replay.count_miss) as usize)
-                .n100(replay.count_100 as usize)
-                .n50(replay.count_50 as usize)
-                .n_misses(0)
-                .combo(max_possible_combo as usize)
-                .calculate()
-                .pp();
-            Some(PpTriple {
-                pp,
-                nochoke_pp,
-                max_pp,
-            })
-        } else {
-            None
-        }
-    } else {
-        None
-    };
+            let pp_2022 = rosu_pp_2022::Beatmap::from_path(&map_path_old)
+                .ok()
+                .map(|map_2022| {
+                    let pp = rosu_pp_2022::AnyPP::new(&map_2022)
+                        .mods(mods_val)
+                        .n300(count_300 as usize)
+                        .n100(count_100 as usize)
+                        .n50(count_50 as usize)
+                        .n_misses(count_miss as usize)
+                        .combo(max_combo as usize)
+                        .calculate()
+                        .pp();
+                    let max_pp = rosu_pp_2022::AnyPP::new(&map_2022)
+                        .mods(mods_val)
+                        .calculate()
+                        .pp();
+                    let nochoke_pp = rosu_pp_2022::AnyPP::new(&map_2022)
+                        .mods(mods_val)
+                        .n300(total_300_nochoke as usize)
+                        .n100(count_100 as usize)
+                        .n50(count_50 as usize)
+                        .n_misses(0)
+                        .combo(max_possible_combo as usize)
+                        .calculate()
+                        .pp();
+                    PpTriple {
+                        pp,
+                        nochoke_pp,
+                        max_pp,
+                    }
+                });
 
-    let pp_2021 = if !is_lazer {
-        if let Ok(map_2021) = rosu_pp_2021::Beatmap::from_path(&map_path) {
-            let diff_2021 = rosu_pp_2021::Difficulty::new()
-                .mods(replay.mods)
-                .calculate(&map_2021);
-            let pp = rosu_pp_2021::Performance::new(diff_2021.clone())
-                .mods(replay.mods)
-                .n300(replay.count_300 as u32)
-                .n100(replay.count_100 as u32)
-                .n50(replay.count_50 as u32)
-                .misses(replay.count_miss as u32)
-                .combo(replay.max_combo as u32)
-                .calculate()
-                .pp();
-            let max_pp = rosu_pp_2021::Performance::new(diff_2021.clone())
-                .mods(replay.mods)
-                .calculate()
-                .pp();
-            let nochoke_pp = rosu_pp_2021::Performance::new(diff_2021)
-                .mods(replay.mods)
-                .n300((replay.count_300 + replay.count_miss) as u32)
-                .n100(replay.count_100 as u32)
-                .n50(replay.count_50 as u32)
-                .misses(0)
-                .combo(max_possible_combo)
-                .calculate()
-                .pp();
-            Some(PpTriple {
-                pp,
-                nochoke_pp,
-                max_pp,
-            })
-        } else {
-            None
-        }
+            let pp_2021 = rosu_pp_2021::Beatmap::from_path(&map_path_old)
+                .ok()
+                .map(|map_2021| {
+                    let diff_2021 = rosu_pp_2021::Difficulty::new()
+                        .mods(mods_val)
+                        .calculate(&map_2021);
+                    let pp = rosu_pp_2021::Performance::new(diff_2021.clone())
+                        .mods(mods_val)
+                        .n300(count_300)
+                        .n100(count_100)
+                        .n50(count_50)
+                        .misses(count_miss)
+                        .combo(max_combo)
+                        .calculate()
+                        .pp();
+                    let max_pp = rosu_pp_2021::Performance::new(diff_2021.clone())
+                        .mods(mods_val)
+                        .calculate()
+                        .pp();
+                    let nochoke_pp = rosu_pp_2021::Performance::new(diff_2021)
+                        .mods(mods_val)
+                        .n300(total_300_nochoke)
+                        .n100(count_100)
+                        .n50(count_50)
+                        .misses(0)
+                        .combo(max_possible_combo)
+                        .calculate()
+                        .pp();
+                    PpTriple {
+                        pp,
+                        nochoke_pp,
+                        max_pp,
+                    }
+                });
+
+            (pp_2025, pp_2024, pp_2022, pp_2021)
+        })
+        .await
+        .context("historical rosu_pp task panicked")?
     } else {
-        None
+        (None, None, None, None)
     };
 
     let player_name = replay.player_name.clone();
@@ -1283,11 +1359,7 @@ async fn find_beatmap_osu_file(mapset_id: u32, map_id: u32, version: &str) -> Re
             let mut file_version = None;
 
             for line in content.lines() {
-                if line.starts_with('[')
-                    && !line.starts_with("[General]")
-                    && !line.starts_with("[Metadata]")
-                    && !line.starts_with("[Editor]")
-                {
+                if line.starts_with("[TimingPoints]") || line.starts_with("[HitObjects]") {
                     break;
                 }
                 if let Some(rest) = line.strip_prefix("BeatmapID:") {

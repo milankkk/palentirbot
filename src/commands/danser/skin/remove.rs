@@ -1,6 +1,7 @@
-use std::{fs, sync::Arc};
+use std::sync::Arc;
 
 use eyre::{Context as _, Result};
+use tokio::fs;
 
 use crate::{
     core::{BotConfig, Context},
@@ -34,20 +35,29 @@ pub async fn remove(
         return Ok(());
     }
 
+    command.defer(&ctx, false).await?;
+
     let SkinRemove { index } = args;
 
     let skin_path = BotConfig::get().paths.skins();
-    let skin_dir = fs::read_dir(&skin_path).context("failed to read skins folder")?;
+    let mut entries = fs::read_dir(&skin_path)
+        .await
+        .context("failed to read skins folder")?;
 
-    let mut skin_list = skin_dir
-        .collect::<Result<Vec<_>, _>>()
-        .context("failed to read entry in skins folder")?;
+    let mut skin_list = Vec::new();
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .context("failed to read entry in skins folder")?
+    {
+        skin_list.push(entry);
+    }
 
     skin_list.sort_unstable_by_key(|entry| entry.file_name().to_ascii_lowercase());
 
     let skin_to_remove_opt = index.checked_sub(1).and_then(|idx| skin_list.get(idx));
     if let Some(skin_to_remove) = skin_to_remove_opt {
-        fs::remove_dir_all(skin_to_remove.path())?;
+        fs::remove_dir_all(skin_to_remove.path()).await?;
 
         // Reset the skin list cache
         ctx.skin_list().clear();
@@ -56,11 +66,11 @@ pub async fn remove(
         let content = format!("Successfully deleted skin `{}`", skin.to_string_lossy());
         let builder = MessageBuilder::new().embed(content);
 
-        command.callback(&ctx, builder, false).await?;
+        command.update(&ctx, &builder).await?;
     } else {
         let len = skin_list.len();
         let content = format!("Invalid skin index, must be between 1 and {len}");
-        command.error_callback(&ctx, content, false).await?;
+        command.error(&ctx, content).await?;
     }
 
     Ok(())

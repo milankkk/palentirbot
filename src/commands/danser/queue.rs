@@ -69,7 +69,7 @@ pub async fn build_queue_embed(ctx: &Context) -> EmbedBuilder {
                 ReplayStatus::Uploading(secs) if secs > 0 => {
                     ProcessStatus::WaitingForCache(secs) // reuse Running for display
                 }
-                ReplayStatus::Uploading(_) => ProcessStatus::Waiting,
+                ReplayStatus::Uploading(_) => ProcessStatus::Running(None),
                 _ => ProcessStatus::Waiting,
             },
         );
@@ -80,32 +80,34 @@ pub async fn build_queue_embed(ctx: &Context) -> EmbedBuilder {
             value,
         }];
 
-        if let Some(data) = iter.next() {
+        if iter.len() > 0 {
             let name = "Upcoming".to_owned();
             let mut value = String::with_capacity(128);
-            let _ = writeln!(
-                value,
-                "`2.` <@{}>: {}",
-                data.user,
-                data.title
+            const MAX_FIELD_LEN: usize = 980;
+            let mut remaining = 0usize;
+
+            for (data, idx) in iter.zip(2..) {
+                let title = data
+                    .title
                     .clone()
-                    .unwrap_or_else(|| data.replay_name().into_owned())
-            );
-            for (data, idx) in iter.zip(3..) {
-                let _ = writeln!(
-                    value,
-                    "`{idx}.` <@{}>: {}",
-                    data.user,
-                    data.title
-                        .clone()
-                        .unwrap_or_else(|| data.replay_name().into_owned())
-                );
+                    .unwrap_or_else(|| data.replay_name().into_owned());
+                let line = format!("`{idx}.` <@{}>: {title}\n", data.user);
+                if value.len() + line.len() > MAX_FIELD_LEN {
+                    remaining += 1;
+                } else {
+                    value.push_str(&line);
+                }
             }
-            fields.push(EmbedField {
-                inline: false,
-                name,
-                value,
-            });
+            if remaining > 0 {
+                let _ = write!(value, "...and {remaining} more");
+            }
+            if !value.is_empty() {
+                fields.push(EmbedField {
+                    inline: false,
+                    name,
+                    value,
+                });
+            }
         }
 
         embed = embed.fields(fields);
@@ -138,7 +140,9 @@ pub fn spawn_queue_updater(
     message_id: Id<MessageMarker>,
 ) {
     tokio::spawn(async move {
+        const MIN_EDIT_INTERVAL: Duration = Duration::from_millis(1500);
         let notify = Arc::clone(&ctx.replay_queue.notify);
+        let mut last_edit = tokio::time::Instant::now() - MIN_EDIT_INTERVAL;
 
         loop {
             // Wait for a status notification or wake periodically up to 3s
@@ -155,18 +159,30 @@ pub fn spawn_queue_updater(
                 (is_empty, status)
             };
 
+            // Stop only after pop has completed: queue empty and status is Waiting
+            if is_empty && matches!(status, ReplayStatus::Waiting) {
+                let _ = ctx.http.delete_message(channel_id, message_id).await;
+                break;
+            }
+
+            let elapsed = last_edit.elapsed();
+            if elapsed < MIN_EDIT_INTERVAL {
+                tokio::time::sleep(MIN_EDIT_INTERVAL - elapsed).await;
+                let is_now_empty = ctx.replay_queue.queue.lock().await.is_empty();
+                let now_status = *ctx.replay_queue.status.lock().await;
+                if is_now_empty && matches!(now_status, ReplayStatus::Waiting) {
+                    let _ = ctx.http.delete_message(channel_id, message_id).await;
+                    break;
+                }
+            }
+
             let embed = build_queue_embed(&ctx).await.build();
             let _ = ctx
                 .http
                 .update_message(channel_id, message_id)
                 .embeds(Some(&[embed]))
                 .await;
-
-            // Stop only after pop has completed: queue empty and status is Waiting
-            if is_empty && matches!(status, ReplayStatus::Waiting) {
-                let _ = ctx.http.delete_message(channel_id, message_id).await;
-                break;
-            }
+            last_edit = tokio::time::Instant::now();
         }
     });
 }

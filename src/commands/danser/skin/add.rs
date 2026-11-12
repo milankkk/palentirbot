@@ -9,7 +9,7 @@ use std::{
 use zip::ZipArchive;
 
 use crate::{
-    core::{BotConfig, Context as TwilightContext},
+    core::{ai::search::validate_and_resolve_url, BotConfig, Context as TwilightContext},
     util::{
         builder::MessageBuilder,
         constants::GENERAL_ISSUE,
@@ -19,20 +19,6 @@ use crate::{
 };
 
 use super::SkinAdd;
-
-fn is_private_or_local_ip(ip: std::net::IpAddr) -> bool {
-    match ip {
-        std::net::IpAddr::V4(v4) => {
-            v4.is_loopback()
-                || v4.is_private()
-                || v4.is_link_local()
-                || v4.is_unspecified()
-                || v4.is_broadcast()
-                || v4.is_documentation()
-        }
-        std::net::IpAddr::V6(v6) => v6.is_loopback() || v6.is_unspecified(),
-    }
-}
 
 pub async fn add(
     ctx: Arc<TwilightContext>,
@@ -61,7 +47,7 @@ pub async fn add(
     let (bytes, filename) = match (skin, url) {
         (Some(skin), None) => {
             let filename = match skin.filename.rsplit_once('.') {
-                Some((filename, "osk")) => filename.to_string(),
+                Some((filename, ext)) if ext.eq_ignore_ascii_case("osk") => filename.to_string(),
                 _ => {
                     let content = "The attachment must be a .osk file!";
                     command.error_callback(&ctx, content, true).await?;
@@ -84,50 +70,21 @@ pub async fn add(
             (bytes, filename)
         }
         (None, Some(url)) => {
-            if !url.ends_with(".osk") {
-                command
-                    .error_callback(&ctx, "The URL must point to a .osk file!", true)
-                    .await?;
-                return Ok(());
-            }
-
-            let parsed = match reqwest::Url::parse(&url) {
-                Ok(u) => u,
-                Err(_) => {
-                    command.error_callback(&ctx, "Invalid URL!", true).await?;
+            let target = match validate_and_resolve_url(&url).await {
+                Ok(t) => t,
+                Err(err) => {
+                    command
+                        .error_callback(&ctx, format!("Invalid or disallowed URL: {err}"), true)
+                        .await?;
                     return Ok(());
                 }
             };
 
-            if parsed.scheme() != "http" && parsed.scheme() != "https" {
+            if !target.url.path().to_ascii_lowercase().ends_with(".osk") {
                 command
-                    .error_callback(&ctx, "URL must use http or https scheme!", true)
+                    .error_callback(&ctx, "The URL must point to a .osk file!", true)
                     .await?;
                 return Ok(());
-            }
-
-            if let Some(host) = parsed.host_str() {
-                let h = host.to_ascii_lowercase();
-                let is_blocked = if h == "localhost" {
-                    true
-                } else if let Ok(ip) = h.parse::<std::net::IpAddr>() {
-                    is_private_or_local_ip(ip)
-                } else if let Ok(mut addrs) = tokio::net::lookup_host(format!("{h}:443")).await {
-                    addrs.any(|addr| is_private_or_local_ip(addr.ip()))
-                } else {
-                    false
-                };
-
-                if is_blocked {
-                    command
-                        .error_callback(
-                            &ctx,
-                            "Local or private network addresses are not allowed!",
-                            true,
-                        )
-                        .await?;
-                    return Ok(());
-                }
             }
 
             let builder = MessageBuilder::new().embed("Downloading from URL...");
@@ -141,17 +98,16 @@ pub async fn add(
                 }
             };
 
-            let raw_filename = url
-                .split('/')
-                .next_back()
-                .unwrap_or("skin")
-                .trim_end_matches(".osk");
-            let decoded_filename = if let Some(pos) = raw_filename.find('?') {
-                &raw_filename[..pos]
-            } else {
-                raw_filename
-            };
-            let mut filename = crate::commands::danser::render_score::sanitize_filename(decoded_filename);
+            let raw_filename = target
+                .url
+                .path_segments()
+                .and_then(|mut segs| segs.next_back())
+                .unwrap_or("skin");
+            let trimmed_filename = raw_filename
+                .strip_suffix(".osk")
+                .or_else(|| raw_filename.strip_suffix(".OSK"))
+                .unwrap_or(raw_filename);
+            let mut filename = crate::commands::danser::render_score::sanitize_filename(trimmed_filename);
             if filename.is_empty() {
                 filename = "skin".to_string();
             }
@@ -230,13 +186,18 @@ pub async fn add(
 
     const MAX_UNCOMPRESSED_SKIN_BYTES: u64 = 400 * 1024 * 1024; // 400 MB
     let skin_file_clone = skin_file.clone();
-    let extract_res = tokio::task::spawn_blocking(move || -> Result<(), Report> {
+    let extract_res = tokio::task::spawn_blocking(move || -> Result<bool, Report> {
         let mut total_size: u64 = 0;
         for i in 0..archive.len() {
             let file = archive
                 .by_index(i)
                 .map_err(|e| Report::from(e).wrap_err("corrupt zip entry in skin archive"))?;
-            total_size += file.size();
+            if file.enclosed_name().is_none() {
+                eyre::bail!("Skin archive contains unsafe path traversal entry!");
+            }
+            total_size = total_size
+                .checked_add(file.size())
+                .ok_or_else(|| eyre::eyre!("Skin archive size overflow!"))?;
             if total_size > MAX_UNCOMPRESSED_SKIN_BYTES {
                 eyre::bail!("Skin archive exceeds 400MB uncompressed limit!");
             }
@@ -244,36 +205,42 @@ pub async fn add(
         archive
             .extract(&skin_file_clone)
             .map_err(|e| Report::from(e).wrap_err("failed to extract zip archive"))?;
-        Ok(())
+
+        let mut skin_ini_path = skin_file_clone.clone();
+        skin_ini_path.push("skin.ini");
+
+        if !(case_insensitive_exists(skin_ini_path)? || move_directory(&skin_file_clone)?) {
+            fs::remove_dir_all(&skin_file_clone).with_context(|| {
+                format!(
+                    "failed to remove directory after failing to assure skin.ini for {skin_file_clone:?}"
+                )
+            })?;
+            return Ok(false);
+        }
+
+        Ok(true)
     })
     .await;
 
     match extract_res {
-        Ok(Ok(())) => {}
+        Ok(Ok(true)) => {}
+        Ok(Ok(false)) => {
+            let content = "There was an error getting the folder containing the skin elements! \
+                Try re-exporting the skin!";
+            command.error(&ctx, content).await?;
+            return Ok(());
+        }
         Ok(Err(err)) => {
+            let _ = tokio::fs::remove_dir_all(&skin_file).await;
             let msg = err.to_string();
             let _ = command.error(&ctx, msg).await;
             return Err(err);
         }
         Err(err) => {
+            let _ = tokio::fs::remove_dir_all(&skin_file).await;
             let _ = command.error(&ctx, GENERAL_ISSUE).await;
             return Err(Report::from(err).wrap_err("extraction task panicked"));
         }
-    }
-
-    let mut skin_ini_path = skin_file.clone();
-    skin_ini_path.push("skin.ini");
-
-    if !(case_insensitive_exists(skin_ini_path)? || move_directory(&skin_file)?) {
-        let content = "There was an error getting the folder containing the skin elements! \
-            Try re-exporting the skin!";
-        command.error(&ctx, content).await?;
-
-        fs::remove_dir_all(&skin_file).with_context(|| {
-            format!("failed to remove directory after failing to assure skin.ini for {skin_file:?}")
-        })?;
-
-        return Ok(());
     }
 
     // Reset the skin list cache

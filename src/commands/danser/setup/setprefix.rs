@@ -33,7 +33,12 @@ pub async fn set_prefix(
         return Ok(());
     }
 
-    let guild_id = command.guild_id.unwrap();
+    let Some(guild_id) = command.guild_id else {
+        command
+            .error_callback(&ctx, "This command can only be used in a server.", true)
+            .await?;
+        return Ok(());
+    };
     let new_prefix = args.prefix.trim().to_owned();
 
     if new_prefix.is_empty() {

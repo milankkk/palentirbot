@@ -1,6 +1,9 @@
 use std::sync::Arc;
 
-use crate::commands::danser::{queue::send_queue_status, render_score::render_score_from_message};
+use crate::commands::danser::{
+    queue::send_queue_status,
+    render_score::{render_score_from_message, EmbedRenderOutcome},
+};
 
 use crate::util::builder::MessageBuilder;
 
@@ -87,15 +90,15 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
         // ── render ────────────────────────────────────────────────────────────
         "render" => {
             if let Some(attachment) = msg.attachments.first() {
-                if !matches!(attachment.filename.split('.').next_back(), Some("osr")) {
+                if !matches!(attachment.filename.rsplit('.').next(), Some(ext) if ext.eq_ignore_ascii_case("osr")) {
                     let _ = msg
                         .error(&ctx, "The attachment must be a `.osr` file!")
                         .await;
                     return;
                 }
 
-                // Blacklist check
-                if let Some(guild_id) = msg.guild_id {
+                // Blacklist & channel check
+                let output_channel = if let Some(guild_id) = msg.guild_id {
                     let is_allowed = ctx
                         .guild_settings(guild_id, |s| {
                             s.input_channels.is_empty() || s.input_channels.contains(&msg.channel_id)
@@ -112,19 +115,32 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
                         return;
                     }
 
-                    if let Ok((true, reason)) = ctx.psql()._is_server_blacklisted(guild_id).await {
-                        let mut c = String::from("This server has been blacklisted.");
-                        if let Some(r) = reason {
-                            c.push(' ');
-                            c.push_str(&r);
+                    match ctx.psql()._is_server_blacklisted(guild_id).await {
+                        Ok((true, reason)) => {
+                            let mut c = String::from("This server has been blacklisted.");
+                            if let Some(r) = reason {
+                                c.push(' ');
+                                c.push_str(&r);
+                            }
+                            let _ = msg.error(&ctx, c).await;
+                            return;
                         }
-                        let _ = msg.error(&ctx, c).await;
-                        return;
+                        Ok((false, _)) => {}
+                        Err(err) => {
+                            tracing::warn!(?err, "failed to check server blacklist");
+                            let _ = msg
+                                .error(&ctx, "Failed to check server status, try again later.")
+                                .await;
+                            return;
+                        }
                     }
-                }
 
-                // Always respond in the channel where the message was sent
-                let output_channel = msg.channel_id;
+                    ctx.guild_settings(guild_id, |s| s.output_channel)
+                        .flatten()
+                        .unwrap_or(msg.channel_id)
+                } else {
+                    msg.channel_id
+                };
 
                 // Parse optional args: start=MM:SS end=MM:SS pitch=1.5
                 let mut start_secs: u32 = 0;
@@ -132,16 +148,32 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
                 let mut pitch: Option<f64> = None;
                 for token in args_str.split_whitespace() {
                     if let Some(v) = token.strip_prefix("start=") {
-                        if let Ok(s) = crate::core::replay_queue::TimePoints::parse_single(v) {
-                            start_secs = s;
+                        match crate::core::replay_queue::TimePoints::parse_single(v) {
+                            Ok(s) => start_secs = s,
+                            Err(err) => {
+                                let _ = msg.error(&ctx, format!("Invalid `start`: {err}")).await;
+                                return;
+                            }
                         }
                     } else if let Some(v) = token.strip_prefix("end=") {
-                        if let Ok(s) = crate::core::replay_queue::TimePoints::parse_single(v) {
-                            end_secs = s;
+                        match crate::core::replay_queue::TimePoints::parse_single(v) {
+                            Ok(s) => end_secs = s,
+                            Err(err) => {
+                                let _ = msg.error(&ctx, format!("Invalid `end`: {err}")).await;
+                                return;
+                            }
                         }
                     } else if let Some(v) = token.strip_prefix("pitch=") {
-                        if let Ok(p) = v.parse::<f64>() {
-                            pitch = Some(p.clamp(0.5, 5.0));
+                        match v.parse::<f64>() {
+                            Ok(p) if p.is_finite() && p > 0.0 => {
+                                pitch = Some(p.clamp(0.5, 5.0));
+                            }
+                            _ => {
+                                let _ = msg
+                                    .error(&ctx, "Invalid `pitch`: must be a positive number (e.g. `pitch=1.5`).")
+                                    .await;
+                                return;
+                            }
                         }
                     }
                 }
@@ -158,7 +190,7 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
 
                 // Parse replay
                 use osu_db::{Mode, Replay};
-                let replay = match Replay::from_bytes(&bytes.clone()) {
+                let replay = match Replay::from_bytes(&bytes) {
                     Ok(r) => r,
                     Err(err) => {
                         tracing::error!(?err, "failed to parse .osr");
@@ -201,9 +233,9 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
 
                 // Push to queue
                 use crate::core::replay_queue::{is_lazer_replay, ReplayData, ReplaySlim, TimePoints};
-                let was_empty = ctx.replay_queue.queue.lock().await.is_empty();
                 let is_lazer = is_lazer_replay(replay.version);
-                ctx.replay_queue
+                let was_empty = ctx
+                    .replay_queue
                     .push(ReplayData {
                         input_channel: msg.channel_id,
                         output_channel,
@@ -240,7 +272,7 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
                     });
                 }
             } else if let Some(replied) = msg.referenced_message.as_deref() {
-                if let Some(guild_id) = msg.guild_id {
+                let output_channel = if let Some(guild_id) = msg.guild_id {
                     let is_allowed = ctx
                         .guild_settings(guild_id, |s| {
                             s.input_channels.is_empty() || s.input_channels.contains(&msg.channel_id)
@@ -257,21 +289,32 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
                         return;
                     }
 
-                    if let Ok((true, reason)) = ctx.psql()._is_server_blacklisted(guild_id).await {
-                        let mut c = String::from("This server has been blacklisted.");
-                        if let Some(r) = reason {
-                            c.push(' ');
-                            c.push_str(&r);
+                    match ctx.psql()._is_server_blacklisted(guild_id).await {
+                        Ok((true, reason)) => {
+                            let mut c = String::from("This server has been blacklisted.");
+                            if let Some(r) = reason {
+                                c.push(' ');
+                                c.push_str(&r);
+                            }
+                            let _ = msg.error(&ctx, c).await;
+                            return;
                         }
-                        let _ = msg.error(&ctx, c).await;
-                        return;
+                        Ok((false, _)) => {}
+                        Err(err) => {
+                            tracing::warn!(?err, "failed to check server blacklist");
+                            let _ = msg
+                                .error(&ctx, "Failed to check server status, try again later.")
+                                .await;
+                            return;
+                        }
                     }
-                }
 
-                // Always respond in the channel where the message was sent
-                let output_channel = msg.channel_id;
-
-                let was_empty = ctx.replay_queue.queue.lock().await.is_empty();
+                    ctx.guild_settings(guild_id, |s| s.output_channel)
+                        .flatten()
+                        .unwrap_or(msg.channel_id)
+                } else {
+                    msg.channel_id
+                };
 
                 match render_score_from_message(
                     Arc::clone(&ctx),
@@ -282,7 +325,7 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
                 )
                 .await
                 {
-                    Ok(Some(_)) => {
+                    Ok(EmbedRenderOutcome::Enqueued { was_empty }) => {
                         let _ = msg
                             .channel_id
                             .create_message(
@@ -298,13 +341,16 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
                             });
                         }
                     }
-                    Ok(None) => {
+                    Ok(EmbedRenderOutcome::NotScoreEmbed) => {
                         let _ = msg
                             .error(
                                 &ctx,
-                                "Could not download a replay from that embed. Assuming the score is not top 1000 or replay-available.",
+                                "Could not recognize a Bathbot/Owobot score embed on that message.",
                             )
                             .await;
+                    }
+                    Ok(EmbedRenderOutcome::ReplayUnavailable(reason)) => {
+                        let _ = msg.error(&ctx, reason).await;
                     }
                     Err(err) => {
                         tracing::error!(?err, "failed to render score from replied embed");
@@ -403,12 +449,20 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
                     let _ = msg.error(&ctx, "No skins available.").await;
                 }
                 Ok(skins) => {
-                    let list = skins
-                        .iter()
-                        .enumerate()
-                        .map(|(i, skin)| format!("{}. {}", i + 1, skin.to_string_lossy()))
-                        .collect::<Vec<_>>()
-                        .join("\n");
+                    use std::fmt::Write as _;
+                    let mut list = String::new();
+                    for (i, skin) in skins.iter().enumerate() {
+                        let entry = format!("{}. {}\n", i + 1, skin.to_string_lossy());
+                        if list.len() + entry.len() > 3800 {
+                            let _ = write!(
+                                list,
+                                "...and {} more (use `/skin list` for all)",
+                                skins.len() - i
+                            );
+                            break;
+                        }
+                        list.push_str(&entry);
+                    }
 
                     let embed = EmbedBuilder::new()
                         .title("Available skins")

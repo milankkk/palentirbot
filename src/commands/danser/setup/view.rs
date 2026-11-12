@@ -8,7 +8,16 @@ use crate::{
 };
 
 pub async fn view(ctx: Arc<Context>, command: InteractionCommand) -> Result<()> {
-    let guild_id = command.guild_id.unwrap();
+    let Some(guild_id) = command.guild_id else {
+        command
+            .error_callback(&ctx, "This command can only be used in a server.", true)
+            .await?;
+        return Ok(());
+    };
+
+    let prefix = ctx
+        .guild_settings(guild_id, |s| s.effective_prefix().to_owned())
+        .unwrap_or_else(|| "!".to_owned());
 
     let input_channels = ctx
         .guild_settings(guild_id, |server| {
@@ -32,7 +41,9 @@ pub async fn view(ctx: Arc<Context>, command: InteractionCommand) -> Result<()> 
         .flatten()
         .map_or_else(|| "None".to_owned(), |channel| format!("<#{channel}>"));
 
-    let content = format!("Input channels: {input_channels}\nOutput channel: {output_channel}");
+    let content = format!(
+        "Prefix: `{prefix}`\nInput channels: {input_channels}\nOutput channel: {output_channel}"
+    );
     let builder = MessageBuilder::new().embed(content);
     command.callback(&ctx, builder, false).await?;
 

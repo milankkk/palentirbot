@@ -1,8 +1,6 @@
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use super::queue::send_queue_status;
-use crate::util::ChannelExt;
 use crate::{
     core::{replay_queue::ReplaySlim, BotConfig, Context, ReplayData, TimePoints},
     util::{
@@ -120,11 +118,7 @@ async fn render_from_msg(ctx: Arc<Context>, mut command: InteractionCommand) -> 
                 Err(err) => {
                     tracing::warn!("{err:?}");
                     command
-                        .error_callback(
-                            &ctx,
-                            "Failed to check server status, try again later.",
-                            false,
-                        )
+                        .error(&ctx, "Failed to check server status, try again later.")
                         .await?;
                     return Ok(());
                 }
@@ -135,7 +129,7 @@ async fn render_from_msg(ctx: Arc<Context>, mut command: InteractionCommand) -> 
                     use std::fmt::Write as _;
                     let _ = write!(content, " {reason}");
                 }
-                command.error_callback(&ctx, content, false).await?;
+                command.error(&ctx, content).await?;
                 return Ok(());
             }
 
@@ -147,7 +141,7 @@ async fn render_from_msg(ctx: Arc<Context>, mut command: InteractionCommand) -> 
 
             if !is_allowed {
                 let content = "This channel is not an allowed input channel for rendering.";
-                command.error_callback(&ctx, content, true).await?;
+                command.error(&ctx, content).await?;
                 return Ok(());
             }
 
@@ -155,7 +149,7 @@ async fn render_from_msg(ctx: Arc<Context>, mut command: InteractionCommand) -> 
         }
         None => {
             let content = "This command cannot be used in DMs.";
-            command.error_callback(&ctx, content, true).await?;
+            command.error(&ctx, content).await?;
             return Ok(());
         }
     };
@@ -269,8 +263,7 @@ async fn render_from_msg(ctx: Arc<Context>, mut command: InteractionCommand) -> 
         is_lazer: score_to_render.set_on_lazer,
     };
 
-    let was_empty = ctx.replay_queue.queue.lock().await.is_empty();
-    ctx.replay_queue.push(replay_data).await;
+    let was_empty = ctx.replay_queue.push(replay_data).await;
 
     if was_empty {
         let ctx_clone = Arc::clone(&ctx);
@@ -281,15 +274,21 @@ async fn render_from_msg(ctx: Arc<Context>, mut command: InteractionCommand) -> 
     Ok(())
 }
 
+pub enum EmbedRenderOutcome {
+    Enqueued { was_empty: bool },
+    NotScoreEmbed,
+    ReplayUnavailable(&'static str),
+}
+
 pub async fn render_score_from_message(
     ctx: Arc<Context>,
     message: &Message,
     input_channel: Id<ChannelMarker>,
     output_channel: Id<ChannelMarker>,
     user: Id<UserMarker>,
-) -> eyre::Result<Option<PathBuf>> {
+) -> eyre::Result<EmbedRenderOutcome> {
     let Some(embed) = message.embeds.first() else {
-        return Ok(None);
+        return Ok(EmbedRenderOutcome::NotScoreEmbed);
     };
 
     render_score_from_embed(ctx, embed, input_channel, output_channel, user).await
@@ -301,7 +300,7 @@ pub async fn render_score_from_embed(
     input_channel: Id<ChannelMarker>,
     output_channel: Id<ChannelMarker>,
     user: Id<UserMarker>,
-) -> eyre::Result<Option<PathBuf>> {
+) -> eyre::Result<EmbedRenderOutcome> {
     tracing::warn!("render_score_from_embed: entered for map/user");
 
     let Some(ParsedEmbed {
@@ -311,15 +310,15 @@ pub async fn render_score_from_embed(
     }) = parse_embed(embed)
     else {
         tracing::warn!("render_score_from_embed: parse_embed returned None");
-        return Ok(None);
+        return Ok(EmbedRenderOutcome::NotScoreEmbed);
     };
 
     let score_to_render = match find_score_to_render(&ctx, user_id, beatmap_id, timestamp).await? {
         Some(s) => s,
         None => {
-            let content = "Couldn't find the replay for this score (not in recents, tops, or map bests).";
-            let _ = input_channel.error(&ctx, content).await;
-            return Ok(None);
+            return Ok(EmbedRenderOutcome::ReplayUnavailable(
+                "Couldn't find the replay for this score (not in recents, tops, or map bests).",
+            ));
         }
     };
 
@@ -337,7 +336,9 @@ pub async fn render_score_from_embed(
                 score_id = score_to_render.id,
                 "failed to download replay for embed-derived render"
             );
-            return Ok(None);
+            return Ok(EmbedRenderOutcome::ReplayUnavailable(
+                "Could not download a replay from that embed. Assuming the score is not top 1000 or replay-available.",
+            ));
         }
     };
 
@@ -378,12 +379,13 @@ pub async fn render_score_from_embed(
 
     tokio::fs::write(&path, replay_bytes).await.context("failed to write replay file")?;
 
-    ctx.replay_queue
+    let was_empty = ctx
+        .replay_queue
         .push(ReplayData {
             input_channel,
             output_channel,
             pitch: None,
-            path: path.clone(),
+            path,
             replay,
             time_points: TimePoints { start: 0, end: 0 },
             user,
@@ -396,7 +398,7 @@ pub async fn render_score_from_embed(
         })
         .await;
 
-    Ok(Some(path))
+    Ok(EmbedRenderOutcome::Enqueued { was_empty })
 }
 
 struct ParsedEmbed {

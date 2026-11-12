@@ -11,11 +11,15 @@ use crate::{
 use super::{InputAction, SetupInput};
 
 pub async fn input(ctx: Arc<Context>, command: InteractionCommand, args: SetupInput) -> Result<()> {
-    let member = command.member.as_ref().unwrap();
+    let (Some(member), Some(guild_id)) = (command.member.as_ref(), command.guild_id) else {
+        command
+            .error_callback(&ctx, "This command can only be used in a server.", true)
+            .await?;
+        return Ok(());
+    };
     let permissions = member.permissions.unwrap_or_else(Permissions::empty);
 
     if permissions.contains(Permissions::ADMINISTRATOR) {
-        let guild_id = command.guild_id.unwrap();
         let SetupInput { action, channel } = args;
 
         match action {

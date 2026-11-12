@@ -1,9 +1,6 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
-use tokio::sync::{
-    mpsc::{channel, Receiver, Sender},
-    Mutex, Notify,
-};
+use tokio::sync::{Mutex, Notify};
 
 pub use self::data::{is_lazer_replay, PpTriple, ReplayData, ReplaySlim, ReplayStatus, TimePoints};
 
@@ -14,8 +11,7 @@ pub struct ReplayQueue {
     pub queue: Mutex<VecDeque<ReplayData>>,
     pub status: Mutex<ReplayStatus>,
     pub notify: Arc<Notify>,
-    tx: Sender<()>,
-    rx: Mutex<Receiver<()>>,
+    work_notify: Notify,
 }
 
 impl ReplayQueue {
@@ -23,19 +19,29 @@ impl ReplayQueue {
         Self::default()
     }
 
-    pub async fn push(&self, entry: ReplayData) {
-        self.queue.lock().await.push_back(entry);
-        let _ = self.tx.try_send(());
+    pub async fn push(&self, entry: ReplayData) -> bool {
+        let was_empty = {
+            let mut guard = self.queue.lock().await;
+            let was_empty = guard.is_empty();
+            guard.push_back(entry);
+            was_empty
+        };
+        self.work_notify.notify_one();
+        was_empty
     }
 
-    pub async fn pop(&self) -> ReplayData {
-        self.queue.lock().await.pop_front().unwrap()
+    pub async fn pop(&self) -> Option<ReplayData> {
+        self.queue.lock().await.pop_front()
     }
 
     pub async fn peek(&self) -> ReplayData {
-        let mut guard = self.rx.lock().await;
-        let _ = guard.recv().await;
-        self.queue.lock().await.front().unwrap().to_owned()
+        loop {
+            let notified = self.work_notify.notified();
+            if let Some(entry) = self.queue.lock().await.front().cloned() {
+                return entry;
+            }
+            notified.await;
+        }
     }
 
     pub async fn set_status(&self, status: ReplayStatus) {
@@ -45,20 +51,18 @@ impl ReplayQueue {
 
     pub async fn reset_peek(&self) {
         *self.status.lock().await = ReplayStatus::Waiting;
-        self.pop().await;
+        let _ = self.pop().await;
         self.notify.notify_waiters();
     }
 }
 
 impl Default for ReplayQueue {
     fn default() -> Self {
-        let (tx, rx) = channel(100);
         Self {
             queue: Mutex::new(VecDeque::new()),
             status: Mutex::new(ReplayStatus::Waiting),
             notify: Arc::new(Notify::new()),
-            tx,
-            rx: Mutex::new(rx),
+            work_notify: Notify::new(),
         }
     }
 }
