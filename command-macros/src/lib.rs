@@ -46,7 +46,7 @@ pub fn msg_command(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// Two attribute name-value pairs are required:
 ///   - `per_page = {integer}`: How many entries are shown per page
 ///   - `entries = "{field name}"`: Field on which the `len` method
-///      will be called to determine the total amount of pages
+///     will be called to determine the total amount of pages
 ///   - Alternatively to `entries`, you can also specify `total = "{arg name}"`.
 ///     The argument must be of type `usize` and will be considered as total
 ///     amount of entries.

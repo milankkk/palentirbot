@@ -1,6 +1,9 @@
 use std::{
     fmt::{Display, Formatter, Result as FmtResult},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
 };
 
 use eyre::{Context as _, Result};
@@ -101,6 +104,32 @@ async fn process_shard(ctx: Arc<Context>, mut shard: Shard) {
     }
 }
 
+static LAST_PRESENCE_GUILD_COUNT: AtomicUsize = AtomicUsize::new(usize::MAX);
+
+async fn update_guild_presence(ctx: &Context, shard_id: u32) -> Result<()> {
+    let stats = ctx.cache.stats();
+    let count = stats.guilds() + stats.unavailable_guilds();
+
+    let prev = LAST_PRESENCE_GUILD_COUNT.swap(count, Ordering::Relaxed);
+    if prev == count {
+        return Ok(());
+    }
+
+    let activity = MinimalActivity {
+        kind: ActivityType::Watching,
+        name: format!("in {count} servers"),
+        url: None,
+    };
+
+    let req = UpdatePresence::new(vec![activity.into()], false, None, Status::Online)?;
+
+    if let Some(sender) = ctx.shard_senders.get(shard_id as usize) {
+        sender.command(&req).context("failed to update activity")?;
+    }
+
+    Ok(())
+}
+
 async fn handle_event(
     ctx: Arc<Context>,
     event: twilight_gateway::Event,
@@ -119,24 +148,15 @@ async fn handle_event(
             info!("Gateway requested shard {shard_id} to reconnect")
         }
         Event::GuildCreate(_) | Event::GuildDelete(_) => {
-            let stats = ctx.cache.stats();
-            let count = stats.guilds() + stats.unavailable_guilds();
-
-            let activity = MinimalActivity {
-                kind: ActivityType::Watching,
-                name: format!("in {count} servers"),
-                url: None,
-            };
-
-            let req = UpdatePresence::new(vec![activity.into()], false, None, Status::Online)?;
-
-            if let Some(sender) = ctx.shard_senders.get(shard_id as usize) {
-                sender.command(&req).context("failed to update activity")?;
-            }
+            update_guild_presence(&ctx, shard_id).await?;
         }
         Event::InteractionCreate(e) => handle_interaction(ctx, e.0).await,
         Event::MessageCreate(msg) => handle_message(ctx, msg.0).await,
-        Event::Ready(_) => info!("Shard {shard_id} is ready"),
+        Event::Ready(_) => {
+            info!("Shard {shard_id} is ready");
+            LAST_PRESENCE_GUILD_COUNT.store(usize::MAX, Ordering::Relaxed);
+            update_guild_presence(&ctx, shard_id).await?;
+        }
         Event::Resumed => info!("Shard {shard_id} is resumed"),
         _ => {}
     }

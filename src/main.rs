@@ -17,6 +17,7 @@ use std::sync::Arc;
 
 use eyre::{Context as _, Result};
 use tokio::{runtime::Builder as RuntimeBuilder, signal};
+use twilight_gateway::CloseFrame;
 
 use crate::core::{
     commands::slash::{Command, Commands},
@@ -24,6 +25,15 @@ use crate::core::{
 };
 
 fn main() {
+    let dotenv_res = dotenvy::dotenv();
+    let _log_worker_guard = logging::init();
+
+    if let Err(err) = dotenv_res {
+        if !matches!(err, dotenvy::Error::Io(ref io_err) if io_err.kind() == std::io::ErrorKind::NotFound) {
+            warn!("Failed to parse .env file: {err:?}");
+        }
+    }
+
     let runtime = RuntimeBuilder::new_multi_thread()
         .enable_all()
         .thread_stack_size(4 * 1024 * 1024)
@@ -36,13 +46,6 @@ fn main() {
 }
 
 async fn async_main() -> Result<()> {
-    if let Err(err) = dotenvy::dotenv() {
-        if !matches!(err, dotenvy::Error::Io(ref io_err) if io_err.kind() == std::io::ErrorKind::NotFound) {
-            warn!("Failed to parse .env file: {err:?}");
-        }
-    }
-    let _log_worker_guard = logging::init();
-
     BotConfig::init().context("failed to initialize config")?;
 
     let (ctx, shards) = Context::new().await.context("failed to create ctx")?;
@@ -78,14 +81,41 @@ async fn async_main() -> Result<()> {
 
     tokio::select! {
         _ = event_loop(Arc::clone(&ctx), shards) => error!("Event loop ended"),
-        res = signal::ctrl_c() => if let Err(err) = res.context("error while awaiting ctrl+c") {
-            error!("{err:?}");
-        } else {
-            info!("Received Ctrl+C");
+        res = wait_for_shutdown_signal() => match res {
+            Ok(sig_name) => info!("Received {sig_name}"),
+            Err(err) => error!("error while awaiting shutdown signal: {err:?}"),
         },
     }
 
-    info!("Shutting down");
+    info!("Shutting down shards");
+    for sender in &ctx.shard_senders {
+        let _ = sender.close(CloseFrame::NORMAL);
+    }
 
     Ok(())
+}
+
+async fn wait_for_shutdown_signal() -> Result<&'static str> {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut sigterm = signal(SignalKind::terminate())
+            .context("failed to register SIGTERM handler")?;
+
+        tokio::select! {
+            res = signal::ctrl_c() => {
+                res.context("error while awaiting ctrl+c")?;
+                Ok("SIGINT")
+            }
+            _ = sigterm.recv() => Ok("SIGTERM"),
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        signal::ctrl_c()
+            .await
+            .context("error while awaiting ctrl+c")?;
+        Ok("SIGINT")
+    }
 }

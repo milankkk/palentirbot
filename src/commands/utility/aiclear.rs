@@ -22,7 +22,7 @@ pub enum AiClearAction {
 }
 
 #[derive(CommandModel, CreateCommand, SlashCommand)]
-#[command(name = "aiclear")]
+#[command(name = "aiclear", dm_permission = false)]
 #[flags(AUTHORITY, SKIP_DEFER)]
 /// Clear the AI's conversation context or reload the prompt (admins & owner)
 pub struct AiClear {

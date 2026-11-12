@@ -1,7 +1,8 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use flurry::HashMap as FlurryMap;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use twilight_model::id::{
     marker::{ChannelMarker, GuildMarker},
     Id,
@@ -109,7 +110,7 @@ mod servers {
 
     impl Serialize for BorrowedRawServer<'_> {
         fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-            let mut raw = s.serialize_struct("RawServer", 3)?;
+            let mut raw = s.serialize_struct("RawServer", 4)?;
 
             raw.serialize_field("server_id", &self.server_id)?;
             raw.serialize_field("input_channels", &self.server.input_channels)?;
@@ -133,7 +134,6 @@ mod servers {
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct DanserSettings {
     pub general: General,
     pub graphics: Graphics,
@@ -147,11 +147,12 @@ pub struct DanserSettings {
     pub cursor_dance: CursorDance,
     pub knockout: Knockout,
     pub recording: Recording,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
-#[derive(Default, Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct General {
     pub osu_songs_dir: String,
     pub osu_skins_dir: String,
@@ -159,11 +160,12 @@ pub struct General {
     pub discord_presence_on: bool,
     pub unpack_osz_files: bool,
     pub verbose_import_logs: bool,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
-#[derive(Default, Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct Graphics {
     pub width: u32,
     pub height: u32,
@@ -179,18 +181,18 @@ pub struct Graphics {
     #[serde(rename = "ShowFPS")]
     pub show_fps: bool,
     pub experimental: Experimental,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
 #[derive(Default, Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct Experimental {
     pub use_persistent_buffers: bool,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct Audio {
     pub general_volume: f64,
     pub music_volume: f64,
@@ -204,11 +206,12 @@ pub struct Audio {
     pub beat_use_timing_points: bool,
     #[serde(rename = "Linux/Unix")]
     pub linux_unix: LinuxUnix,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
 #[derive(Default, Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct LinuxUnix {
     pub bass_playback_buffer_length: i32,
     pub bass_device_buffer_length: i32,
@@ -218,7 +221,6 @@ pub struct LinuxUnix {
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct Input {
     pub left_key: String,
     pub right_key: String,
@@ -228,11 +230,12 @@ pub struct Input {
     pub mouse_buttons_disabled: bool,
     pub mouse_high_precision: bool,
     pub mouse_sensitivity: f64,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct Gameplay {
     pub hit_error_meter: HitErrorMeter,
     pub aim_error_meter: AimErrorMeter,
@@ -259,11 +262,12 @@ pub struct Gameplay {
     pub play_username: String,
     #[serde(rename = "UseLazerPP")]
     pub use_lazer_pp: bool,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct HitErrorMeter {
     pub show: bool,
     pub scale: f64,
@@ -284,7 +288,6 @@ pub struct HitErrorMeter {
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct AimErrorMeter {
     pub show: bool,
     pub scale: f64,
@@ -306,7 +309,6 @@ pub struct AimErrorMeter {
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct Score {
     pub show: bool,
     pub scale: f64,
@@ -323,7 +325,6 @@ pub struct Score {
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct HpBar {
     pub show: bool,
     pub scale: f64,
@@ -336,7 +337,6 @@ pub struct HpBar {
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct ComboCounter {
     pub show: bool,
     pub scale: f64,
@@ -351,7 +351,6 @@ pub struct ComboCounter {
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct PpCounter {
     pub show: bool,
     pub scale: f64,
@@ -372,7 +371,6 @@ pub struct PpCounter {
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct Hsv {
     pub hue: f64,
     pub saturation: f64,
@@ -381,7 +379,6 @@ pub struct Hsv {
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct HitCounter {
     pub show: bool,
     pub scale: f64,
@@ -413,7 +410,6 @@ pub struct HitCounter {
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct StrainGraph {
     pub show: bool,
     pub opacity: f64,
@@ -431,7 +427,6 @@ pub struct StrainGraph {
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct StrainGraphOutline {
     pub show: bool,
     pub width: f64,
@@ -441,7 +436,6 @@ pub struct StrainGraphOutline {
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct KeyOverlay {
     pub show: bool,
     pub scale: f64,
@@ -454,7 +448,6 @@ pub struct KeyOverlay {
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct ScoreBoard {
     pub show: bool,
     pub scale: f64,
@@ -472,7 +465,6 @@ pub struct ScoreBoard {
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct Mods {
     pub show: bool,
     pub scale: f64,
@@ -488,7 +480,6 @@ pub struct Mods {
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct Boundaries {
     pub enabled: bool,
     pub border_thickness: f64,
@@ -501,7 +492,6 @@ pub struct Boundaries {
 
 #[derive(Default, Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct Underlay {
     pub path: String,
     pub above_hp_bar: bool,
@@ -509,18 +499,18 @@ pub struct Underlay {
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct Skin {
     pub current_skin: String,
     pub fallback_skin: String,
     pub use_colors_from_skin: bool,
     pub use_beatmap_colors: bool,
     pub cursor: SkinCursor,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct SkinCursor {
     pub use_skin_cursor: bool,
     pub scale: f64,
@@ -532,7 +522,6 @@ pub struct SkinCursor {
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct Cursor {
     pub trail_style: u8,
     #[serde(rename = "Style23Speed")]
@@ -562,11 +551,12 @@ pub struct Cursor {
     pub additive_blending: bool,
     pub cursor_ripples: bool,
     pub smoke_enabled: bool,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct CursorColors {
     pub enable_rainbow: bool,
     pub rainbow_speed: f64,
@@ -579,7 +569,6 @@ pub struct CursorColors {
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct Objects {
     pub draw_approach_circles: bool,
     pub draw_combo_numbers: bool,
@@ -589,11 +578,12 @@ pub struct Objects {
     pub stack_enabled: bool,
     pub sliders: Sliders,
     pub colors: Colors,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct Sliders {
     pub force_slider_ball_texture: bool,
     pub draw_end_circles: bool,
@@ -607,7 +597,6 @@ pub struct Sliders {
 
 #[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct SliderDistortions {
     enabled: bool,
     viewport_size: u64,
@@ -618,7 +607,6 @@ pub struct SliderDistortions {
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct Snaking {
     #[serde(rename = "In")]
     pub in_field: bool,
@@ -630,7 +618,6 @@ pub struct Snaking {
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct Colors {
     pub mandala_textures_trigger: i32,
     pub mandala_textures_alpha: f64,
@@ -644,7 +631,6 @@ pub struct Colors {
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct ObjectSliders {
     pub white_score_points: bool,
     pub score_point_color_offset: i32,
@@ -655,7 +641,6 @@ pub struct ObjectSliders {
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct Border {
     pub use_hit_circle_color: bool,
     pub color: ObjectColor,
@@ -665,7 +650,6 @@ pub struct Border {
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct Body {
     pub use_hit_circle_color: bool,
     pub color: ObjectColor,
@@ -677,7 +661,6 @@ pub struct Body {
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct ObjectColor {
     pub enable_rainbow: bool,
     pub rainbow_speed: f64,
@@ -690,7 +673,6 @@ pub struct ObjectColor {
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct Playfield {
     pub draw_objects: bool,
     pub draw_cursors: bool,
@@ -707,11 +689,12 @@ pub struct Playfield {
     pub background: Background,
     pub logo: Logo,
     pub bloom: Bloom,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct SeizureWarning {
     pub enabled: bool,
     pub duration: f64,
@@ -719,7 +702,6 @@ pub struct SeizureWarning {
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct Background {
     pub load_storyboards: bool,
     pub load_videos: bool,
@@ -732,7 +714,6 @@ pub struct Background {
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct Dim {
     pub intro: f64,
     pub normal: f64,
@@ -741,7 +722,6 @@ pub struct Dim {
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct Parallax {
     pub enabled: bool,
     pub amount: f64,
@@ -750,7 +730,6 @@ pub struct Parallax {
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct Blur {
     pub enabled: bool,
     pub values: BlurValues,
@@ -758,7 +737,6 @@ pub struct Blur {
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct BlurValues {
     pub intro: f64,
     pub normal: f64,
@@ -767,7 +745,6 @@ pub struct BlurValues {
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct Triangles {
     pub enabled: bool,
     pub shadowed: bool,
@@ -780,7 +757,6 @@ pub struct Triangles {
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct Logo {
     pub enabled: bool,
     pub draw_spectrum: bool,
@@ -789,7 +765,6 @@ pub struct Logo {
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct Bloom {
     pub enabled: bool,
     pub bloom_to_the_beat: bool,
@@ -801,7 +776,6 @@ pub struct Bloom {
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct CursorDance {
     pub movers: Vec<Mover>,
     pub spinners: Vec<Spinner>,
@@ -811,11 +785,12 @@ pub struct CursorDance {
     #[serde(rename = "TAGSliderDance")]
     pub tag_slider_dance: bool,
     pub mover_settings: MoverSettings,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
 #[derive(Default, Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct Mover {
     pub mover: String,
     pub slider_dance: bool,
@@ -824,7 +799,6 @@ pub struct Mover {
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct Spinner {
     pub mover: String,
     pub center_offset_x: f64,
@@ -834,7 +808,6 @@ pub struct Spinner {
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct MoverSettings {
     pub bezier: Vec<Bezier>,
     pub flower: Vec<Flower>,
@@ -848,7 +821,6 @@ pub struct MoverSettings {
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct Bezier {
     pub aggressiveness: f64,
     pub slider_aggressiveness: f64,
@@ -856,7 +828,6 @@ pub struct Bezier {
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct Flower {
     pub angle_offset: f64,
     pub distance_mult: f64,
@@ -868,7 +839,6 @@ pub struct Flower {
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct HalfCircle {
     pub radius_multiplier: f64,
     pub stream_trigger: i64,
@@ -876,7 +846,6 @@ pub struct HalfCircle {
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct Spline {
     pub rotational_force: bool,
     pub stream_half_circle: bool,
@@ -886,7 +855,6 @@ pub struct Spline {
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct Momentum {
     pub skip_stack_angles: bool,
     pub stream_restrict: bool,
@@ -902,14 +870,12 @@ pub struct Momentum {
 
 #[derive(Default, Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct ExGon {
     pub delay: u32,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct Linear {
     pub wait_for_preempt: bool,
     pub reaction_time: f64,
@@ -918,7 +884,6 @@ pub struct Linear {
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct Pippi {
     pub rotation_speed: f64,
     pub radius_multiplier: f64,
@@ -927,7 +892,6 @@ pub struct Pippi {
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct Knockout {
     pub mode: u8,
     pub grace_end_time: i32,
@@ -944,11 +908,12 @@ pub struct Knockout {
     pub max_cursor_size: f64,
     pub add_danser: bool,
     pub danser_name: String,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct Recording {
     pub frame_width: i32,
     pub frame_height: i32,
@@ -990,11 +955,12 @@ pub struct Recording {
     #[serde(rename = "ShowFFmpegLogs")]
     pub show_ffmpeg_logs: bool,
     pub motion_blur: MotionBlur,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
 #[derive(Default, Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct Libx264 {
     pub rate_control: String,
     pub bitrate: String,
@@ -1007,7 +973,6 @@ pub struct Libx264 {
 
 #[derive(Default, Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct Libx265 {
     pub rate_control: String,
     pub bitrate: String,
@@ -1019,7 +984,6 @@ pub struct Libx265 {
 
 #[derive(Default, Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct H264Nvenc {
     pub rate_control: String,
     pub bitrate: String,
@@ -1032,7 +996,6 @@ pub struct H264Nvenc {
 
 #[derive(Default, Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct HevcNvenc {
     pub rate_control: String,
     pub bitrate: String,
@@ -1044,7 +1007,6 @@ pub struct HevcNvenc {
 
 #[derive(Default, Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct H264Qsv {
     pub rate_control: String,
     pub bitrate: String,
@@ -1056,7 +1018,6 @@ pub struct H264Qsv {
 
 #[derive(Default, Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct HevcQsv {
     pub rate_control: String,
     pub bitrate: String,
@@ -1067,14 +1028,12 @@ pub struct HevcQsv {
 
 #[derive(Default, Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct Custom {
     pub custom_options: String,
 }
 
 #[derive(Default, Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct Aac {
     pub bitrate: String,
     pub additional_options: String,
@@ -1082,7 +1041,6 @@ pub struct Aac {
 
 #[derive(Default, Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct Libmp3lame {
     pub rate_control: String,
     pub target_bitrate: String,
@@ -1091,7 +1049,6 @@ pub struct Libmp3lame {
 
 #[derive(Default, Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct Libopus {
     pub rate_control: String,
     pub target_bitrate: String,
@@ -1100,7 +1057,6 @@ pub struct Libopus {
 
 #[derive(Default, Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct Flac {
     pub compression_level: i64,
     pub additional_options: String,
@@ -1108,14 +1064,12 @@ pub struct Flac {
 
 #[derive(Default, Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct CustomAudio {
     pub custom_options: String,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
-
 pub struct MotionBlur {
     pub enabled: bool,
     pub oversample_multiplier: u32,
@@ -1123,4 +1077,36 @@ pub struct MotionBlur {
     #[serde(rename = "BlendFunctionID")]
     pub blend_function_id: u32,
     pub gauss_weights_mult: f64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn danser_settings_preserves_unknown_fields_on_roundtrip() {
+        let sample = serde_json::json!({
+            "General": { "OsuSongsDir": "./Songs" },
+            "Audio": { "MusicVolume": 0.5, "OnlineOffset": 12 },
+            "Gameplay": {
+                "PlayUsername": "Guest",
+                "PPVersion": "2025",
+                "LazerClassicScore": true
+            },
+            "Recording": {
+                "Encoder": "libsvtav1",
+                "libsvtav1": { "Preset": 8 }
+            },
+            "Debug": { "PerfGraph": { "Show": false } }
+        });
+
+        let parsed: DanserSettings = serde_json::from_value(sample).unwrap();
+        let out = serde_json::to_value(&parsed).unwrap();
+
+        assert_eq!(out["Audio"]["OnlineOffset"], 12);
+        assert_eq!(out["Gameplay"]["PPVersion"], "2025");
+        assert_eq!(out["Gameplay"]["LazerClassicScore"], true);
+        assert_eq!(out["Recording"]["libsvtav1"]["Preset"], 8);
+        assert_eq!(out["Debug"]["PerfGraph"]["Show"], false);
+    }
 }

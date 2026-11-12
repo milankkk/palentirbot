@@ -10,12 +10,6 @@ pub struct Flags {
 }
 
 impl Flags {
-    pub fn new(bits: u8) -> Self {
-        Self {
-            tokens: quote!(#bits),
-        }
-    }
-
     pub fn into_tokens(self) -> TokenStream {
         let bits = self.tokens;
 
@@ -26,15 +20,18 @@ impl Flags {
 }
 
 pub fn parse_flags(attrs: &[Attribute]) -> Result<Flags> {
-    let attr_opt = attrs.iter().find(|attr| match attr.path.get_ident() {
-        Some(ident) => ident == "flags",
-        None => return false,
-    });
+    let mut combined = quote!(0);
 
-    match attr_opt {
-        Some(attr) => attr.parse_args(),
-        None => Ok(Flags::new(0)),
+    for attr in attrs {
+        let is_flags = attr.path.get_ident().is_some_and(|ident| ident == "flags");
+        if is_flags {
+            let parsed: Flags = attr.parse_args()?;
+            let inner = parsed.tokens;
+            combined.extend(quote!( | (#inner)));
+        }
     }
+
+    Ok(Flags { tokens: combined })
 }
 
 impl Parse for Flags {
@@ -56,7 +53,7 @@ impl Parse for Flags {
                 Err(cursor.error(message))
             })?;
 
-            tokens.extend(quote!( + crate::core::commands::CommandFlags::#flag.bits()));
+            tokens.extend(quote!( | crate::core::commands::CommandFlags::#flag.bits()));
 
             if input.is_empty() {
                 break;

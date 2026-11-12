@@ -19,9 +19,11 @@ use tracing_subscriber::{
 };
 
 pub fn init() -> WorkerGuard {
-    // Displays ERROR, WARN, and INFO from shishabot
+    // Displays ERROR, WARN, and INFO from palentirbot
     // and ERROR and WARN from dependencies
-    let stdout_filter: EnvFilter = "shishabot=info,warn".parse().unwrap();
+    let stdout_filter: EnvFilter = concat!(env!("CARGO_PKG_NAME"), "=info,warn")
+        .parse()
+        .unwrap();
 
     let stdout_layer = Layer::default()
         .event_format(StdoutEventFormat::default())
@@ -31,11 +33,13 @@ pub fn init() -> WorkerGuard {
     let (file_writer, guard) = NonBlocking::new(file_appender);
 
     // Check RUST_LOG in .env, if it's not found it'll
-    // display ERROR, WARN, INFO, DEBUG, and TRACE from shishabot
+    // display ERROR, WARN, INFO, DEBUG, and TRACE from palentirbot
     // and ERROR, WARN, INFO from dependencies.
     let file_filter = match EnvFilter::try_from_default_env() {
         Ok(filter) => filter,
-        Err(_) => "shishabot=trace,info".parse().unwrap(),
+        Err(_) => concat!(env!("CARGO_PKG_NAME"), "=trace,info")
+            .parse()
+            .unwrap(),
     };
 
     let file_layer = Layer::default()

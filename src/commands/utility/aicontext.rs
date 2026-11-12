@@ -10,6 +10,7 @@ use twilight_model::{
             Message,
         },
     },
+    guild::Permissions,
     id::{marker::ChannelMarker, Id},
 };
 
@@ -51,15 +52,31 @@ pub async fn create_context_embed(ctx: &Context, channel_id: Id<ChannelMarker>) 
     // In English & slang text with Qwen tokenizer, 1 token is ~3.8 characters
     let prompt_tokens = (prompt_chars as f64 / 3.8).round() as usize;
 
+    let guild_prefix = ctx
+        .cache
+        .channel(channel_id, |c| c.guild_id)
+        .ok()
+        .flatten()
+        .and_then(|gid| ctx.guild_settings(gid, |s| s.effective_prefix().to_owned()));
+
     // 2. Channel conversation history metrics (filtered using the same rules as ask.rs)
-    let history = tokio::time::timeout(
-        std::time::Duration::from_secs(4),
-        fetch_channel_history(ctx, channel_id),
-    )
-    .await
-    .ok()
-    .and_then(Result::ok)
-    .unwrap_or_default();
+    let history = if super::ask::bot_has_channel_perms(
+        ctx,
+        channel_id,
+        bot_id,
+        Permissions::VIEW_CHANNEL | Permissions::READ_MESSAGE_HISTORY,
+    ) {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(4),
+            fetch_channel_history(ctx, channel_id),
+        )
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     let mut user_messages = 0;
     let mut bot_messages = 0;
     let mut history_chars = 0;
@@ -78,7 +95,7 @@ pub async fn create_context_embed(ctx: &Context, channel_id: Id<ChannelMarker>) 
             }
             bot_messages += 1;
         } else {
-            if super::ask::is_non_ai_command(trimmed) {
+            if super::ask::is_non_ai_command_with_prefix(trimmed, guild_prefix.as_deref()) {
                 continue;
             }
             user_messages += 1;
@@ -165,6 +182,11 @@ pub async fn create_context_embed(ctx: &Context, channel_id: Id<ChannelMarker>) 
     }
 
     let num_predict = ctx.ai().num_predict();
+    let num_predict_display = if num_predict < 0 {
+        "unlimited".to_owned()
+    } else {
+        format_num(num_predict as usize)
+    };
 
     fields.push(EmbedField {
         inline: false,
@@ -172,10 +194,10 @@ pub async fn create_context_embed(ctx: &Context, channel_id: Id<ChannelMarker>) 
         value: format!(
             "• **Model:** `{model_name}`\n\
              • **Total Context:** `{}` tokens (max `{}` predicted)\n\
-             • **Memory:** 100% GPU VRAM (weights & KV cache resident)\n\
+             • **Memory:** Managed by Ollama runtime\n\
              • **Queue Status:** {queue_status}",
             format_num(max_window),
-            format_num(num_predict as usize)
+            num_predict_display
         ),
     });
 
@@ -220,11 +242,7 @@ fn make_progress_bar(used: usize, total: usize, width: usize) -> String {
 }
 
 async fn fetch_channel_history(ctx: &Context, channel_id: Id<ChannelMarker>) -> Result<Vec<Message>> {
-    let limit = std::env::var("AI_HISTORY_MESSAGES")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(25);
-    let limit = limit.clamp(1, 50);
+    let limit = super::ask::configured_history_limit();
     let response = ctx.http.channel_messages(channel_id).limit(limit).await?;
     let mut messages: Vec<Message> = response.model().await?;
 

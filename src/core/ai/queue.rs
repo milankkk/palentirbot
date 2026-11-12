@@ -1,6 +1,9 @@
 use std::collections::VecDeque;
-use std::sync::Arc;
-use tokio::sync::{oneshot, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
+use tokio::sync::oneshot;
 
 pub const DEFAULT_MAX_AI_QUEUE_SIZE: usize = 15;
 
@@ -12,20 +15,42 @@ pub struct AiQueue {
     max_size: usize,
 }
 
+struct AiWaiter {
+    tx: oneshot::Sender<()>,
+    woken: Arc<AtomicBool>,
+}
+
 struct AiQueueInner {
     running: bool,
-    waiters: VecDeque<oneshot::Sender<()>>,
+    waiters: VecDeque<AiWaiter>,
 }
 
 pub struct AiQueueTicket {
     inner: Arc<Mutex<AiQueueInner>>,
     receiver: Option<oneshot::Receiver<()>>,
     position: usize,
-    active_runner: bool,
+    woken: Arc<AtomicBool>,
 }
 
 pub struct AiQueuePermit {
     inner: Arc<Mutex<AiQueueInner>>,
+}
+
+fn lock_inner(inner: &Mutex<AiQueueInner>) -> std::sync::MutexGuard<'_, AiQueueInner> {
+    inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn advance_queue(inner_arc: &Mutex<AiQueueInner>) {
+    let mut inner = lock_inner(inner_arc);
+    while let Some(waiter) = inner.waiters.pop_front() {
+        // Mark woken before send; if receiver dropped, send returns Err and we continue.
+        waiter.woken.store(true, Ordering::Release);
+        if waiter.tx.send(()).is_ok() {
+            return;
+        }
+        waiter.woken.store(false, Ordering::Release);
+    }
+    inner.running = false;
 }
 
 impl AiQueue {
@@ -41,7 +66,7 @@ impl AiQueue {
 
     /// Enter the queue, reserving your exact spot in FIFO order.
     pub async fn enter(&self) -> Result<AiQueueTicket, usize> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = lock_inner(&self.inner);
         let total = if inner.running {
             1 + inner.waiters.len()
         } else {
@@ -58,24 +83,28 @@ impl AiQueue {
                 inner: Arc::clone(&self.inner),
                 receiver: None,
                 position: 0,
-                active_runner: true,
+                woken: Arc::new(AtomicBool::new(true)),
             })
         } else {
             let (tx, rx) = oneshot::channel();
-            inner.waiters.push_back(tx);
+            let woken = Arc::new(AtomicBool::new(false));
+            inner.waiters.push_back(AiWaiter {
+                tx,
+                woken: Arc::clone(&woken),
+            });
             let position = inner.waiters.len();
             Ok(AiQueueTicket {
                 inner: Arc::clone(&self.inner),
                 receiver: Some(rx),
                 position,
-                active_runner: false,
+                woken,
             })
         }
     }
 
     /// Total number of AI requests currently executing or waiting in line.
     pub async fn len(&self) -> usize {
-        let inner = self.inner.lock().await;
+        let inner = lock_inner(&self.inner);
         if inner.running {
             1 + inner.waiters.len()
         } else {
@@ -98,10 +127,12 @@ impl AiQueueTicket {
 
     /// Wait in strict FIFO order until it is this request's turn.
     pub async fn wait(mut self) -> AiQueuePermit {
-        self.active_runner = false; // Transferred to permit
         if let Some(rx) = self.receiver.take() {
             let _ = rx.await;
         }
+
+        // Ownership of the running slot transfers to AiQueuePermit; disarm ticket Drop.
+        self.woken.store(false, Ordering::Release);
 
         AiQueuePermit {
             inner: Arc::clone(&self.inner),
@@ -111,33 +142,15 @@ impl AiQueueTicket {
 
 impl Drop for AiQueueTicket {
     fn drop(&mut self) {
-        if self.active_runner {
-            let inner_clone = Arc::clone(&self.inner);
-            tokio::spawn(async move {
-                let mut inner = inner_clone.lock().await;
-                while let Some(tx) = inner.waiters.pop_front() {
-                    if tx.send(()).is_ok() {
-                        return; // Next waiter activated
-                    }
-                }
-                inner.running = false;
-            });
+        if self.woken.swap(false, Ordering::AcqRel) {
+            advance_queue(&self.inner);
         }
     }
 }
 
 impl Drop for AiQueuePermit {
     fn drop(&mut self) {
-        let inner_clone = Arc::clone(&self.inner);
-        tokio::spawn(async move {
-            let mut inner = inner_clone.lock().await;
-            while let Some(tx) = inner.waiters.pop_front() {
-                if tx.send(()).is_ok() {
-                    return; // Next waiter activated
-                }
-            }
-            inner.running = false;
-        });
+        advance_queue(&self.inner);
     }
 }
 
@@ -169,8 +182,29 @@ mod tests {
         let permit2 = ticket2.wait().await;
         drop(permit2);
 
-        // Give the spawned drop task a tick to clear running state
-        tokio::task::yield_now().await;
+        assert_eq!(queue.len().await, 0);
+    }
+
+    #[tokio::test]
+    async fn test_cancelled_waiter_after_wakeup_does_not_deadlock() {
+        let queue = AiQueue::new(3);
+        let t1 = queue.enter().await.unwrap();
+        let t2 = queue.enter().await.unwrap();
+        let t3 = queue.enter().await.unwrap();
+
+        let p1 = t1.wait().await;
+        // Release p1: this wakes t2 (sets t2.woken = true, running remains true)
+        drop(p1);
+
+        // Now drop t2 without completing t2.wait(), simulating an aborted/cancelled task!
+        drop(t2);
+
+        // t3 must still be woken up instead of deadlocking forever
+        let p3 = tokio::time::timeout(std::time::Duration::from_millis(200), t3.wait())
+            .await
+            .expect("t3 should not deadlock when woken t2 is dropped");
+        drop(p3);
+
         assert_eq!(queue.len().await, 0);
     }
 }

@@ -14,28 +14,31 @@ pub struct FormatInt(i64);
 
 impl fmt::Display for FormatInt {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.0 == 0 {
+            return f.write_str("0");
+        }
+
         let mut n = if self.0 < 0 {
             f.write_str("-")?;
 
-            -self.0
+            self.0.unsigned_abs()
         } else {
-            self.0
+            self.0 as u64
         };
 
-        let mut rev = 0;
-        let mut triples = 0;
+        let mut chunks = [0_u16; 7];
+        let mut count = 0_usize;
 
         while n > 0 {
-            rev = rev * 1000 + n % 1000;
+            chunks[count] = (n % 1000) as u16;
             n /= 1000;
-            triples += 1;
+            count += 1;
         }
 
-        write!(f, "{}", rev % 1000)?;
+        write!(f, "{}", chunks[count - 1])?;
 
-        for _ in 0..triples - 1 {
-            rev /= 1000;
-            write!(f, ",{:0>3}", rev % 1000)?;
+        for &chunk in chunks[..count - 1].iter().rev() {
+            write!(f, ",{chunk:0>3}")?;
         }
 
         Ok(())
@@ -85,13 +88,23 @@ mod tests {
         let v1 = 3.1615;
         let v2 = 3.16;
 
-        if round(v1) - v2 > std::f32::EPSILON {
+        if round(v1) - v2 > f32::EPSILON {
             panic!("[test_round] round({v1})={} != {v2}", round(v1));
         }
     }
 
     #[test]
     fn test_with_comma_int() {
+        assert_eq!(with_comma_int(0_u64).to_string(), "0".to_owned());
+        assert_eq!(with_comma_int(-1000_i64).to_string(), "-1,000".to_owned());
+        assert_eq!(
+            with_comma_int(i64::MIN).to_string(),
+            "-9,223,372,036,854,775,808".to_owned()
+        );
+        assert_eq!(
+            with_comma_int(9_000_000_000_000_000_999_i64).to_string(),
+            "9,000,000,000,000,000,999".to_owned()
+        );
         assert_eq!(
             with_comma_int(31_415_926_u32).to_string(),
             "31,415,926".to_owned()

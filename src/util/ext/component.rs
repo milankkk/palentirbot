@@ -30,6 +30,12 @@ pub trait ComponentExt {
         builder: &'a MessageBuilder<'a>,
     ) -> impl std::future::Future<Output = Result<Message>> + 'a;
 
+    fn update_response<'a>(
+        &'a self,
+        ctx: &'a Context,
+        builder: &'a MessageBuilder<'a>,
+    ) -> impl std::future::Future<Output = Result<()>> + 'a;
+
     fn modal<'a>(
         &'a self,
         ctx: &'a Context,
@@ -77,6 +83,30 @@ impl ComponentExt for InteractionComponent {
         builder: &'a MessageBuilder<'a>,
     ) -> Result<Message> {
         self.message.update(ctx, builder).await
+    }
+
+    async fn update_response<'a>(
+        &'a self,
+        ctx: &'a Context,
+        builder: &'a MessageBuilder<'a>,
+    ) -> Result<()> {
+        let client = ctx.interaction();
+        let mut req = client.update_response(&self.token);
+
+        if let Some(ref content) = builder.content {
+            req = req.content(Some(content.as_ref()));
+        }
+
+        if let Some(ref embed) = builder.embed {
+            req = req.embeds(Some(std::slice::from_ref(embed)));
+        }
+
+        if let Some(ref components) = builder.components {
+            req = req.components(Some(components));
+        }
+
+        req.await?;
+        Ok(())
     }
 
     async fn modal<'a>(&'a self, ctx: &'a Context, modal: ModalBuilder) -> Result<()> {

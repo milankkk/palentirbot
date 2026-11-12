@@ -1,4 +1,7 @@
-use std::time::Duration;
+use std::{
+    net::{IpAddr, SocketAddr},
+    time::Duration,
+};
 
 use eyre::{Context as _, Result};
 use reqwest::Client;
@@ -23,6 +26,9 @@ pub enum AiSearchAction {
     Browse(String),
 }
 
+const MAX_BROWSE_BODY_BYTES: usize = 256 * 1024;
+const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36";
+
 pub struct WebSearchClient {
     client: Client,
     searxng_url: Option<String>,
@@ -43,6 +49,7 @@ impl WebSearchClient {
 
         let client = Client::builder()
             .timeout(Duration::from_secs(8))
+            .connect_timeout(Duration::from_secs(5))
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .expect("failed to build WebSearchClient HTTP client");
@@ -93,10 +100,7 @@ impl WebSearchClient {
         let res = self
             .client
             .post(url)
-            .header(
-                reqwest::header::USER_AGENT,
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
-            )
+            .header(reqwest::header::USER_AGENT, USER_AGENT)
             .header(
                 reqwest::header::ACCEPT,
                 "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -112,6 +116,9 @@ impl WebSearchClient {
             .context("failed to query DuckDuckGo")?;
 
         let status = res.status();
+        if status == reqwest::StatusCode::ACCEPTED || status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            eyre::bail!("DuckDuckGo rate-limited / challenged automated search (HTTP {status})");
+        }
         if !status.is_success() {
             eyre::bail!("DuckDuckGo returned HTTP {status}");
         }
@@ -120,21 +127,25 @@ impl WebSearchClient {
             .text()
             .await
             .context("failed to read DuckDuckGo response")?;
-        Ok(parse_duckduckgo_html(&body))
+
+        let results = parse_duckduckgo_html(&body);
+        if results.is_empty() && is_duckduckgo_challenge_html(&body) {
+            eyre::bail!("DuckDuckGo CAPTCHA/anomaly challenge prevented search results");
+        }
+
+        Ok(results)
     }
 
-    /// Fetch and extract readable plain text from a URL, following up to 3 SSRF-validated redirects.
+    /// Fetch and extract readable plain text from a URL, following up to 3 SSRF-validated redirects
+    /// with DNS-pinned per-request resolution to prevent DNS rebinding TOCTOU.
     pub async fn browse_url(&self, raw_url: &str, max_chars: usize) -> Result<String> {
-        let mut current_url = validate_url_for_ssrf(raw_url).await?;
+        let mut current = validate_and_resolve_url(raw_url).await?;
 
         for _ in 0..4 {
-            let res = self
-                .client
-                .get(current_url.clone())
-                .header(
-                    reqwest::header::USER_AGENT,
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
-                )
+            let client = build_pinned_client(&current.host, &current.pinned_addrs)?;
+            let mut res = client
+                .get(current.url.clone())
+                .header(reqwest::header::USER_AGENT, USER_AGENT)
                 .header(
                     reqwest::header::ACCEPT,
                     "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.5",
@@ -146,10 +157,11 @@ impl WebSearchClient {
             if res.status().is_redirection() {
                 if let Some(loc) = res.headers().get(reqwest::header::LOCATION) {
                     if let Ok(loc_str) = loc.to_str() {
-                        let next_url = current_url
+                        let next_url = current
+                            .url
                             .join(loc_str)
                             .context("invalid redirect Location")?;
-                        current_url = validate_url_for_ssrf(next_url.as_str()).await?;
+                        current = validate_and_resolve_url(next_url.as_str()).await?;
                         continue;
                     }
                 }
@@ -160,9 +172,20 @@ impl WebSearchClient {
                 eyre::bail!("webpage returned HTTP {}", res.status());
             }
 
-            let bytes = res.bytes().await.context("failed to read webpage bytes")?;
-            let slice = &bytes[..bytes.len().min(256 * 1024)];
-            let html = String::from_utf8_lossy(slice);
+            let mut buf = Vec::new();
+            while let Some(chunk) = res.chunk().await.context("failed to read webpage chunk")? {
+                let remaining = MAX_BROWSE_BODY_BYTES.saturating_sub(buf.len());
+                if remaining == 0 {
+                    break;
+                }
+                let take = chunk.len().min(remaining);
+                buf.extend_from_slice(&chunk[..take]);
+                if buf.len() >= MAX_BROWSE_BODY_BYTES {
+                    break;
+                }
+            }
+
+            let html = String::from_utf8_lossy(&buf);
             let extracted = extract_article_text(&html);
             let truncated: String = extracted.chars().take(max_chars).collect();
             return Ok(truncated);
@@ -172,7 +195,36 @@ impl WebSearchClient {
     }
 }
 
-/// Format search results into a compact text block for the LLM system prompt.
+fn is_duckduckgo_challenge_html(body: &str) -> bool {
+    let lower = body.to_ascii_lowercase();
+    lower.contains("anomaly-modal")
+        || lower.contains("challenge-form")
+        || lower.contains("cc=botnet")
+        || lower.contains("bots use duckduckgo")
+}
+
+struct ValidatedTarget {
+    url: reqwest::Url,
+    host: String,
+    pinned_addrs: Vec<SocketAddr>,
+}
+
+fn build_pinned_client(host: &str, addrs: &[SocketAddr]) -> Result<Client> {
+    let mut builder = Client::builder()
+        .timeout(Duration::from_secs(8))
+        .connect_timeout(Duration::from_secs(5))
+        .redirect(reqwest::redirect::Policy::none());
+
+    if !addrs.is_empty() && host.parse::<IpAddr>().is_err() {
+        builder = builder.resolve_to_addrs(host, addrs);
+    }
+
+    builder
+        .build()
+        .context("failed to build SSRF-pinned HTTP client")
+}
+
+/// Format search results into a compact text block for the LLM tool turn.
 pub fn format_search_results(query: &str, results: &[SearchResultItem], max_items: usize) -> String {
     if results.is_empty() {
         return format!("Search query `{query}` returned no results.\n");
@@ -266,6 +318,7 @@ pub fn is_private_or_local_ip_v4(v4: std::net::Ipv4Addr) -> bool {
         || v4.is_unspecified()
         || v4.is_broadcast()
         || v4.is_documentation()
+        || v4.is_multicast()
         || octets[0] == 0
         || (octets[0] == 100 && (octets[1] & 0xc0) == 64)
         || (octets[0] == 192 && octets[1] == 0 && octets[2] == 0)
@@ -279,7 +332,9 @@ pub fn is_private_or_local_ip(ip: std::net::IpAddr) -> bool {
         std::net::IpAddr::V6(v6) => {
             v6.is_loopback()
                 || v6.is_unspecified()
+                || v6.is_multicast()
                 || v6.to_ipv4_mapped().is_some_and(is_private_or_local_ip_v4)
+                || v6.to_ipv4().is_some_and(is_private_or_local_ip_v4)
                 || (v6.segments()[0] & 0xfe00) == 0xfc00
                 || (v6.segments()[0] & 0xffc0) == 0xfe80
                 || (v6.segments()[0] == 0x2001 && v6.segments()[1] == 0x0db8)
@@ -287,7 +342,7 @@ pub fn is_private_or_local_ip(ip: std::net::IpAddr) -> bool {
     }
 }
 
-pub async fn validate_url_for_ssrf(url_str: &str) -> Result<reqwest::Url> {
+async fn validate_and_resolve_url(url_str: &str) -> Result<ValidatedTarget> {
     let raw = url_str
         .trim()
         .trim_matches(|c| matches!(c, '"' | '\'' | '`' | '<' | '>'))
@@ -298,10 +353,13 @@ pub async fn validate_url_for_ssrf(url_str: &str) -> Result<reqwest::Url> {
         eyre::bail!("URL scheme must be http or https");
     }
 
-    let host_str = parsed
+    let host = parsed
         .host_str()
-        .ok_or_else(|| eyre::eyre!("URL has no host"))?;
-    let host_lower = host_str.to_ascii_lowercase();
+        .ok_or_else(|| eyre::eyre!("URL has no host"))?
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_owned();
+    let host_lower = host.to_ascii_lowercase();
 
     if host_lower == "localhost"
         || host_lower.ends_with(".localhost")
@@ -316,29 +374,46 @@ pub async fn validate_url_for_ssrf(url_str: &str) -> Result<reqwest::Url> {
         eyre::bail!("Local and internal hostnames are not allowed");
     }
 
-    if let Ok(ip) = host_lower.parse::<std::net::IpAddr>() {
+    let port = parsed.port_or_known_default().unwrap_or(80);
+    if let Ok(ip) = host.parse::<IpAddr>() {
         if is_private_or_local_ip(ip) {
             eyre::bail!("Private or local IP addresses are not allowed: {ip}");
         }
-    } else {
-        let port = parsed.port_or_known_default().unwrap_or(80);
-        let addrs = tokio::net::lookup_host(format!("{host_lower}:{port}"))
-            .await
-            .context("failed to resolve host for security check")?;
-
-        let mut has_addrs = false;
-        for addr in addrs {
-            has_addrs = true;
-            if is_private_or_local_ip(addr.ip()) {
-                eyre::bail!("Host resolves to a private or local IP address: {}", addr.ip());
-            }
-        }
-        if !has_addrs {
-            eyre::bail!("Host did not resolve to any IP address");
-        }
+        return Ok(ValidatedTarget {
+            url: parsed,
+            host,
+            pinned_addrs: vec![SocketAddr::new(ip, port)],
+        });
     }
 
-    Ok(parsed)
+    let addrs = tokio::net::lookup_host((host.as_str(), port))
+        .await
+        .context("failed to resolve host for security check")?;
+
+    let mut pinned_addrs = Vec::new();
+    for addr in addrs {
+        if is_private_or_local_ip(addr.ip()) {
+            eyre::bail!(
+                "Host resolves to a private or local IP address: {}",
+                addr.ip()
+            );
+        }
+        pinned_addrs.push(addr);
+    }
+    if pinned_addrs.is_empty() {
+        eyre::bail!("Host did not resolve to any IP address");
+    }
+
+    Ok(ValidatedTarget {
+        url: parsed,
+        host,
+        pinned_addrs,
+    })
+}
+
+#[cfg(test)]
+pub async fn validate_url_for_ssrf(url_str: &str) -> Result<reqwest::Url> {
+    Ok(validate_and_resolve_url(url_str).await?.url)
 }
 
 pub fn decode_html_entities(input: &str) -> String {
@@ -470,23 +545,47 @@ pub fn parse_duckduckgo_html(html: &str) -> Vec<SearchResultItem> {
     results
 }
 
+const SKIP_TAGS: &[&str] = &["script", "style", "noscript", "svg", "header", "footer", "nav"];
+
 pub fn extract_article_text(html: &str) -> String {
-    let mut cleaned = html.to_string();
-    for tag in &["script", "style", "noscript", "svg", "header", "footer", "nav"] {
-        let open_pat = format!("<{tag}");
-        let close_pat = format!("</{tag}>");
-        loop {
-            let lower = cleaned.to_ascii_lowercase();
-            if let Some(start) = lower.find(&open_pat) {
-                if let Some(end) = lower[start..].find(&close_pat) {
-                    cleaned.drain(start..start + end + close_pat.len());
-                    continue;
-                } else {
-                    cleaned.truncate(start);
+    // Strip excluded elements linearly while preserving unrelated tags like <navigation>.
+    let lower = html.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    let mut cleaned = String::with_capacity(html.len());
+    let mut i = 0usize;
+
+    while i < html.len() {
+        if bytes[i] == b'<' {
+            let rest = &lower[i + 1..];
+            let mut skipped_tag = false;
+            for tag in SKIP_TAGS {
+                if let Some(after_name) = rest.strip_prefix(tag) {
+                    let boundary_ok = after_name.is_empty()
+                        || after_name.starts_with(|c: char| c.is_ascii_whitespace() || c == '>' || c == '/');
+                    if boundary_ok {
+                        let open_end = rest.find('>').map(|p| i + 1 + p + 1);
+                        let close_pat = format!("</{tag}>");
+                        if let Some(open_end_idx) = open_end {
+                            // If a closing tag exists, skip the whole element; otherwise strip only the opening tag.
+                            if let Some(close_rel) = lower[open_end_idx..].find(&close_pat) {
+                                i = open_end_idx + close_rel + close_pat.len();
+                            } else {
+                                i = open_end_idx;
+                            }
+                            skipped_tag = true;
+                            break;
+                        }
+                    }
                 }
             }
-            break;
+            if skipped_tag {
+                continue;
+            }
         }
+
+        let ch = html[i..].chars().next().unwrap();
+        cleaned.push(ch);
+        i += ch.len_utf8();
     }
 
     let raw_text = strip_html_tags(&cleaned);
@@ -518,6 +617,25 @@ mod tests {
         assert!(validate_url_for_ssrf("http://127.0.0.1:8080").await.is_err());
         assert!(validate_url_for_ssrf("http://localhost/admin").await.is_err());
         assert!(validate_url_for_ssrf("http://[::1]/").await.is_err());
+        assert!(validate_url_for_ssrf("http://[fe80::1]/").await.is_err());
+        assert!(validate_url_for_ssrf("http://[fd00::1]/").await.is_err());
+        assert!(validate_url_for_ssrf("http://[::ffff:127.0.0.1]/").await.is_err());
         assert!(validate_url_for_ssrf("file:///etc/passwd").await.is_err());
+    }
+
+    #[test]
+    fn test_extract_article_text_preserves_similar_tags_and_unclosed_blocks() {
+        let html = "<nav>Menu</nav><navigation>Keep me</navigation><script>bad()</script><header>Unclosed header <p>Article body</p>";
+        let text = extract_article_text(html);
+        assert!(text.contains("Keep me"), "unexpected text: {text}");
+        assert!(text.contains("Article body"), "unexpected text: {text}");
+        assert!(!text.contains("bad()"), "unexpected text: {text}");
+        assert!(!text.contains("Menu"), "unexpected text: {text}");
+    }
+
+    #[test]
+    fn test_detects_ddg_challenge() {
+        assert!(is_duckduckgo_challenge_html("<form id=\"challenge-form\">Please verify</form>"));
+        assert!(!is_duckduckgo_challenge_html("<div class=\"result__title\">Normal result</div>"));
     }
 }

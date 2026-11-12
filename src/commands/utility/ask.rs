@@ -5,22 +5,26 @@ use eyre::Result;
 use twilight_interactions::command::{CommandModel, CreateCommand};
 use twilight_model::{
     channel::Message,
+    guild::Permissions,
     id::{
-        marker::{ChannelMarker, MessageMarker, UserMarker},
+        marker::{ChannelMarker, GuildMarker, MessageMarker, UserMarker},
         Id,
     },
 };
 
 use crate::{
-    core::{ai::AiMessage, Context},
+    core::{
+        ai::{sanitize_llm_text, AiMessage},
+        Context,
+    },
     util::{
         builder::MessageBuilder, interaction::InteractionCommand, Authored, ChannelExt,
         InteractionCommandExt, MessageExt,
     },
 };
 
-/// Default number of previous Discord messages sent to the AI (kept focused to prevent context pollution).
-const DEFAULT_HISTORY_LIMIT: u16 = 10;
+/// Default number of previous Discord messages sent to the AI.
+const DEFAULT_HISTORY_LIMIT: u16 = 25;
 /// Hard ceiling for history messages.
 const MAX_HISTORY_LIMIT: u16 = 50;
 /// Maximum number of characters taken from a single historical message.
@@ -83,6 +87,7 @@ async fn slash_ask(ctx: Arc<Context>, mut command: InteractionCommand) -> Result
 
     let answer = match execute_ai_question(
         &ctx,
+        command.guild_id,
         command.channel_id,
         user.id,
         &user.name,
@@ -125,6 +130,21 @@ pub async fn handle_prefix_ask(
     let mut question = args_str.trim().to_string();
 
     let bot_id = ctx.cache.current_user(|u| u.id).ok();
+    if let Some(id) = bot_id {
+        if !bot_has_channel_perms(
+            &ctx,
+            msg.channel_id,
+            id,
+            Permissions::VIEW_CHANNEL | Permissions::SEND_MESSAGES,
+        ) {
+            tracing::debug!(
+                channel_id = %msg.channel_id,
+                "skipping prefix AI reply because bot lacks cached channel view/send permissions"
+            );
+            return;
+        }
+    }
+
     let is_reply_to_ai = msg
         .referenced_message
         .as_deref()
@@ -205,6 +225,7 @@ pub async fn handle_prefix_ask(
 
     let result = execute_ai_question(
         &ctx,
+        msg.guild_id,
         msg.channel_id,
         msg.author.id,
         &msg.author.name,
@@ -254,9 +275,49 @@ pub async fn handle_prefix_ask(
     }
 }
 
+/// Check cached bot permissions when guild & member metadata are available.
+/// Returns `true` when metadata is missing so uncached channels never fail closed.
+pub(crate) fn bot_has_channel_perms(
+    ctx: &Context,
+    channel_id: Id<ChannelMarker>,
+    bot_id: Id<UserMarker>,
+    required: Permissions,
+) -> bool {
+    let Ok(Some(guild_id)) = ctx.cache.channel(channel_id, |c| c.guild_id) else {
+        return true;
+    };
+    if ctx.cache.member(guild_id, bot_id, |_| ()).is_err() {
+        return true;
+    }
+    ctx.cache
+        .get_channel_permissions(bot_id, channel_id, Some(guild_id))
+        .contains(required)
+}
+
+pub(crate) fn configured_history_limit() -> u16 {
+    std::env::var("AI_HISTORY_MESSAGES")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_HISTORY_LIMIT)
+        .clamp(1, MAX_HISTORY_LIMIT)
+}
+
+fn push_or_coalesce_user_message(msgs: &mut Vec<AiMessage>, current_user_msg: String) {
+    if let Some(last) = msgs.last_mut() {
+        if last.role == "user" {
+            last.content.push('\n');
+            last.content.push_str(&current_user_msg);
+            return;
+        }
+    }
+    msgs.push(AiMessage::user(current_user_msg));
+}
+
 /// Core function to formulate messages and query the AI backend.
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_ai_question(
     ctx: &Context,
+    guild_id: Option<Id<GuildMarker>>,
     channel_id: Id<ChannelMarker>,
     user_id: Id<UserMarker>,
     username: &str,
@@ -264,23 +325,20 @@ pub async fn execute_ai_question(
     exclude_message_id: Option<Id<MessageMarker>>,
     referenced_msg: Option<&Message>,
 ) -> Result<String> {
-    // Get our own Discord user ID.
-    //
-    // We need this so previous responses from this bot can be sent to the
-    // model with role="assistant" instead of pretending another user wrote
-    // them.
     let bot_id = ctx
         .cache
         .current_user(|user| user.id)
         .expect("missing CurrentUser in cache");
 
-    // Get the cached system prompt template from AiClient.
+    let resolved_guild = guild_id.or_else(|| ctx.cache.channel(channel_id, |c| c.guild_id).ok().flatten());
+    let guild_prefix = resolved_guild
+        .and_then(|gid| ctx.guild_settings(gid, |s| s.effective_prefix().to_owned()));
+
     let system_prompt_template = ctx.ai().get_prompt().await;
 
     let clean_username = sanitize_llm_text(username);
     let clean_question = sanitize_llm_text(question);
 
-    // Explicitly tell the model who is currently speaking.
     let mut system_prompt = system_prompt_template
         .replace("{username}", &clean_username)
         .replace("{user_id}", &user_id.to_string());
@@ -289,47 +347,52 @@ pub async fn execute_ai_question(
         "{clean_username} (Discord ID {user_id}): {clean_question}"
     );
 
-    // Fetch recent channel messages for this specific chat channel (respecting /aiclear cutoffs)
-    let history = match tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        get_history(ctx, channel_id, exclude_message_id),
-    )
-    .await
-    {
-        Ok(Ok(history)) => history,
-        Ok(Err(err)) => {
-            tracing::warn!(?err, %channel_id, "failed to fetch channel history for AI; continuing without it");
-            Vec::new()
+    let history = if bot_has_channel_perms(
+        ctx,
+        channel_id,
+        bot_id,
+        Permissions::VIEW_CHANNEL | Permissions::READ_MESSAGE_HISTORY,
+    ) {
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            get_history(ctx, channel_id, exclude_message_id),
+        )
+        .await
+        {
+            Ok(Ok(history)) => history,
+            Ok(Err(err)) => {
+                tracing::debug!(?err, %channel_id, "failed to fetch channel history for AI; continuing without it");
+                Vec::new()
+            }
+            Err(_) => {
+                tracing::warn!(%channel_id, "timed out fetching channel history for AI; continuing without it");
+                Vec::new()
+            }
         }
-        Err(_) => {
-            tracing::warn!(%channel_id, "timed out fetching channel history for AI; continuing without it");
-            Vec::new()
-        }
+    } else {
+        tracing::debug!(%channel_id, "skipping history fetch: bot lacks cached READ_MESSAGE_HISTORY/VIEW_CHANNEL");
+        Vec::new()
     };
 
     let messages = if let Some(replied) = referenced_msg {
         if replied.author.id == bot_id && is_conversational_ai_message(replied) {
-            // User is directly replying to a conversational message sent by the AI!
             let raw_ai_text = &replied.content;
             let ai_content = sanitize_llm_text(&clean_ai_response(&truncate_history_message(raw_ai_text)));
 
-            // Focus context: Take messages up to the replied AI message in this chat
             let history_before_ai = if let Some(idx) = history.iter().position(|m| m.id == replied.id) {
                 history[..idx].to_vec()
             } else {
                 history.into_iter().filter(|m| m.id != replied.id).collect()
             };
 
-            // Keep only the most recent few turns before the AI message (up to 6 messages)
-            let history_slice = if history_before_ai.len() > 6 {
-                history_before_ai[history_before_ai.len() - 6..].to_vec()
+            let history_slice = if history_before_ai.len() > 8 {
+                history_before_ai[history_before_ai.len() - 8..].to_vec()
             } else {
                 history_before_ai
             };
 
-            let mut history_messages = convert_history(history_slice, bot_id);
+            let mut history_messages = convert_history(history_slice, bot_id, guild_prefix.as_deref());
 
-            // Put the exact AI message being replied to as the immediate prior assistant turn
             if !ai_content.is_empty() {
                 if let Some(last) = history_messages.last_mut() {
                     if last.role == "assistant" {
@@ -349,21 +412,10 @@ pub async fn execute_ai_question(
             let mut msgs = Vec::with_capacity(history_messages.len() + 2);
             msgs.push(AiMessage::system(system_prompt));
             msgs.extend(history_messages);
-            msgs.push(AiMessage::user(current_user_msg));
+            push_or_coalesce_user_message(&mut msgs, current_user_msg);
             msgs
         } else {
-            // Replying to another human user in this chat
-            let history_slice = if history.len() > 8 {
-                history[history.len() - 8..].to_vec()
-            } else {
-                history
-            };
-            let mut history_messages = convert_history(history_slice, bot_id);
-            if let Some(last) = history_messages.last() {
-                if last.role == "user" {
-                    history_messages.pop();
-                }
-            }
+            let history_messages = convert_history(history, bot_id, guild_prefix.as_deref());
 
             system_prompt.push_str(
                 "\n\nRecent messages from this specific Discord chat are provided for conversational context. Answer the current question directly. If the latest question introduces a new topic, focus entirely on the new topic—do NOT repeat previous answers or equations from earlier in the chat!"
@@ -372,22 +424,11 @@ pub async fn execute_ai_question(
             let mut msgs = Vec::with_capacity(history_messages.len() + 2);
             msgs.push(AiMessage::system(system_prompt));
             msgs.extend(history_messages);
-            msgs.push(AiMessage::user(current_user_msg));
+            push_or_coalesce_user_message(&mut msgs, current_user_msg);
             msgs
         }
     } else {
-        // Normal question in this channel - preserve conversational context for this specific chat
-        let history_slice = if history.len() > 8 {
-            history[history.len() - 8..].to_vec()
-        } else {
-            history
-        };
-        let mut history_messages = convert_history(history_slice, bot_id);
-        if let Some(last) = history_messages.last() {
-            if last.role == "user" {
-                history_messages.pop();
-            }
-        }
+        let history_messages = convert_history(history, bot_id, guild_prefix.as_deref());
 
         system_prompt.push_str(
             "\n\nRecent messages from this specific Discord chat are provided for conversational context. Answer the current question directly. If the latest question introduces a new topic, focus entirely on the new topic—do NOT repeat previous answers or equations from earlier in the chat!"
@@ -396,7 +437,7 @@ pub async fn execute_ai_question(
         let mut msgs = Vec::with_capacity(history_messages.len() + 2);
         msgs.push(AiMessage::system(system_prompt));
         msgs.extend(history_messages);
-        msgs.push(AiMessage::user(current_user_msg));
+        push_or_coalesce_user_message(&mut msgs, current_user_msg);
         msgs
     };
 
@@ -428,11 +469,7 @@ async fn get_history(
     channel_id: Id<ChannelMarker>,
     exclude_message_id: Option<Id<MessageMarker>>,
 ) -> Result<Vec<Message>> {
-    let limit = std::env::var("AI_HISTORY_MESSAGES")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(DEFAULT_HISTORY_LIMIT);
-    let limit = limit.clamp(1, MAX_HISTORY_LIMIT);
+    let limit = configured_history_limit();
 
     let response = ctx
         .http
@@ -513,48 +550,68 @@ pub(crate) fn is_transient_status(content: &str) -> bool {
         || content.contains("Started replay processing")
 }
 
-pub(crate) fn is_non_ai_command(content: &str) -> bool {
-    let lower = content.to_ascii_lowercase();
-    let trimmed = lower.trim();
-    if trimmed == "!r" || trimmed == "!q" {
-        return true;
+pub(crate) fn is_non_ai_command_with_prefix(content: &str, guild_prefix: Option<&str>) -> bool {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return false;
     }
-    for prefix in &[
-        "!render", "!r ", "/render", "!queue", "!q ", "!skin", "!danser",
-        "!settings", "!setup", "!ping", "!help", "!np", "!replay",
-    ] {
-        if lower.starts_with(prefix) {
-            return true;
+
+    let prefixes = [guild_prefix, Some("!"), Some("<"), Some("?"), Some("/")];
+    for p in prefixes.into_iter().flatten() {
+        if p.is_empty() {
+            continue;
+        }
+        if let Some(after_prefix) = trimmed.strip_prefix(p) {
+            let cmd_token = after_prefix
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if matches!(
+                cmd_token.as_str(),
+                "render"
+                    | "r"
+                    | "queue"
+                    | "q"
+                    | "skin"
+                    | "danser"
+                    | "settings"
+                    | "setup"
+                    | "ping"
+                    | "help"
+                    | "np"
+                    | "replay"
+                    | "aiclear"
+                    | "aicontext"
+                    | "blacklist"
+                    | "owner"
+                    | "invite"
+            ) {
+                return true;
+            }
         }
     }
+
     false
 }
 
-/// Convert normal Discord messages into messages suitable for the AI.
-///
-/// Human messages become:
-///
-///     role: user
-///     Alice (Discord ID 123): hello
-///
-/// Previous messages written by this bot become:
-///
-///     role: assistant
-///     Hello! How can I help?
-///
-/// Messages from unrelated bots are ignored.
-/// Consecutive messages with the same role are coalesced to enforce
-/// strict alternating user <-> assistant dialogue expected by LLM chat templates.
-fn convert_history(history: Vec<Message>, bot_id: Id<UserMarker>) -> Vec<AiMessage> {
+#[cfg(test)]
+pub(crate) fn is_non_ai_command(content: &str) -> bool {
+    is_non_ai_command_with_prefix(content, None)
+}
+
+fn convert_history(
+    history: Vec<Message>,
+    bot_id: Id<UserMarker>,
+    guild_prefix: Option<&str>,
+) -> Vec<AiMessage> {
     let mut raw_messages: Vec<AiMessage> = Vec::with_capacity(history.len());
 
     for message in history {
-        // Ignore messages without textual content.
         if message.content.trim().is_empty() {
             continue;
         }
 
-        // Ignore messages from unrelated bots.
         if message.author.bot && message.author.id != bot_id {
             continue;
         }
@@ -562,25 +619,21 @@ fn convert_history(history: Vec<Message>, bot_id: Id<UserMarker>) -> Vec<AiMessa
         let content = sanitize_llm_text(&truncate_history_message(&message.content));
 
         if message.author.id == bot_id {
-            // Filter out non-conversational bot messages (status, queue notices, clear confirmations, render alerts)
             if is_transient_status(&content) {
                 continue;
             }
-            // Previous AI response - clean to remove residual think blocks or role headers
             let cleaned = clean_ai_response(&content);
             if !cleaned.is_empty() {
                 raw_messages.push(AiMessage::assistant(cleaned));
             }
         } else {
-            // Ignore non-AI commands to prevent polluting the conversation with danser/utility spam
             let trimmed = content.trim();
-            if is_non_ai_command(trimmed) {
+            if is_non_ai_command_with_prefix(trimmed, guild_prefix) {
                 continue;
             }
 
-            // Human Discord message.
             let author_name = sanitize_llm_text(&message.author.name);
-            let cleaned = strip_command_prefix(&content);
+            let cleaned = strip_command_prefix_with_prefix(&content, guild_prefix);
             if !cleaned.is_empty() {
                 raw_messages.push(AiMessage::user(format!(
                     "{} (Discord ID {}): {}",
@@ -590,8 +643,6 @@ fn convert_history(history: Vec<Message>, bot_id: Id<UserMarker>) -> Vec<AiMessa
         }
     }
 
-    // Coalesce consecutive messages of the same role so the model receives
-    // a clean, strictly alternating dialogue without repeated role headers.
     let mut coalesced: Vec<AiMessage> = Vec::with_capacity(raw_messages.len());
     for msg in raw_messages {
         if let Some(last) = coalesced.last_mut() {
@@ -607,36 +658,38 @@ fn convert_history(history: Vec<Message>, bot_id: Id<UserMarker>) -> Vec<AiMessa
     coalesced
 }
 
-/// Strip leading command prefix (e.g. `!ask `, `!ai `, `/ask `) from historical user messages
-/// so historical conversation text reads naturally for the model.
-fn strip_command_prefix(content: &str) -> &str {
+fn strip_command_prefix_with_prefix<'a>(content: &'a str, guild_prefix: Option<&str>) -> &'a str {
     let trimmed = content.trim();
-    for prefix in &[
-        "!ask ", "!ask", "!ai ", "!ai", "!a ", "!a",
-        "/ask ", "/ask",
-    ] {
-        if let Some(rest) = trimmed.strip_prefix(prefix) {
-            return rest.trim_start();
+    let prefixes = [guild_prefix, Some("!"), Some("<"), Some("?"), Some("/")];
+
+    for p in prefixes.into_iter().flatten() {
+        if p.is_empty() {
+            continue;
+        }
+        if let Some(after_prefix) = trimmed.strip_prefix(p) {
+            let lower = after_prefix.to_ascii_lowercase();
+            for cmd in &["ask", "ai", "a"] {
+                if let Some(rest) = lower.strip_prefix(cmd) {
+                    if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+                        return after_prefix[cmd.len()..].trim_start();
+                    }
+                }
+            }
         }
     }
+
     trimmed
+}
+
+#[allow(dead_code)]
+fn strip_command_prefix(content: &str) -> &str {
+    strip_command_prefix_with_prefix(content, None)
 }
 
 /// Limit how much of an individual historical Discord message is supplied to
 /// the model.
 fn truncate_history_message(content: &str) -> String {
     truncate_chars(content, HISTORY_MESSAGE_CHAR_LIMIT)
-}
-
-/// Sanitize text for LLM prompts by stripping null bytes, invalid control characters,
-/// and prompt template delimiters that could confuse ChatML / LLM tokenizer.
-fn sanitize_llm_text(text: &str) -> String {
-    text.chars()
-        .filter(|&c| c == '\n' || c == '\r' || c == '\t' || !c.is_control())
-        .collect::<String>()
-        .replace("<|im_start|>", "")
-        .replace("<|im_end|>", "")
-        .replace("<|endoftext|>", "")
 }
 
 fn clean_ai_response(content: &str) -> String {
@@ -850,7 +903,9 @@ mod tests {
     fn test_strip_command_prefix() {
         assert_eq!(strip_command_prefix("!ask What is osu?"), "What is osu?");
         assert_eq!(strip_command_prefix("!ai tell me a joke"), "tell me a joke");
+        assert_eq!(strip_command_prefix("<ask test"), "test");
         assert_eq!(strip_command_prefix("/ask who made you"), "who made you");
+        assert_eq!(strip_command_prefix("!actually not a command"), "!actually not a command");
         assert_eq!(strip_command_prefix("hello world"), "hello world");
     }
 
@@ -893,6 +948,8 @@ mod tests {
     #[test]
     fn test_is_non_ai_command() {
         assert!(is_non_ai_command("!render https://osu.ppy.sh/scores/123"));
+        assert!(is_non_ai_command("<render https://osu.ppy.sh/scores/123"));
+        assert!(is_non_ai_command("?q"));
         assert!(is_non_ai_command("!r"));
         assert!(is_non_ai_command("/render"));
         assert!(is_non_ai_command("!skin"));

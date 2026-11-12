@@ -1,3 +1,6 @@
+[workspace]
+members = [".", "command-macros"]
+
 [package]
 name = "palentirbot"
 version = "420.69.67"

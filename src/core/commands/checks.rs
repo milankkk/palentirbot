@@ -20,6 +20,10 @@ pub async fn check_authority(
         return None;
     }
 
+    if guild.is_none() {
+        return Some("This command can only be used in a server.");
+    }
+
     let permissions = ctx.cache.get_channel_permissions(author, channel, guild);
 
     if permissions.intersects(Permissions::ADMINISTRATOR | Permissions::MANAGE_CHANNELS) {

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use eyre::{Context as _, Result};
 use serde::Serialize;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use twilight_model::id::{marker::ChannelMarker, Id};
 
 mod ollama;
@@ -41,10 +41,30 @@ impl AiMessage {
             content: content.into(),
         }
     }
+
+    pub fn tool(content: impl Into<String>) -> Self {
+        Self {
+            role: "tool".to_owned(),
+            content: content.into(),
+        }
+    }
+}
+
+/// Sanitize untrusted text before inserting into LLM prompts by stripping null
+/// bytes, disallowed control characters, and ChatML/special tokenizer delimiters.
+pub fn sanitize_llm_text(text: &str) -> String {
+    text.chars()
+        .filter(|&c| c == '\n' || c == '\r' || c == '\t' || !c.is_control())
+        .collect::<String>()
+        .replace("<|im_start|>", "")
+        .replace("<|im_end|>", "")
+        .replace("<|endoftext|>", "")
 }
 
 const SYSTEM_PROMPT_ENV: &str = "AI_SYSTEM_PROMPT";
 const CUTOFFS_FILE_PATH: &str = "data/ai_cutoffs.json";
+const FALLBACK_SYSTEM_PROMPT: &str =
+    "You are a helpful, witty Discord assistant. Reply concisely in plain text.";
 
 pub struct AiClient {
     ollama: OllamaClient,
@@ -55,17 +75,23 @@ pub struct AiClient {
     /// this instant are excluded from the AI's conversation history, effectively
     /// "clearing" the context for that channel.
     context_cutoffs: RwLock<HashMap<Id<ChannelMarker>, i64>>,
+    cutoffs_save_lock: Mutex<()>,
 }
 
 impl AiClient {
     pub async fn new() -> Self {
-        let prompt = Self::load_prompt_from_disk()
-            .await
-            .expect("failed to load AI system prompt on startup");
+        let prompt = match Self::load_prompt_from_disk().await {
+            Ok(p) => p,
+            Err(err) => {
+                tracing::error!(?err, "failed to load AI system prompt on startup; using fallback prompt");
+                FALLBACK_SYSTEM_PROMPT.to_owned()
+            }
+        };
 
         let max_queue_size = std::env::var("AI_MAX_QUEUE_SIZE")
             .ok()
             .and_then(|s| s.parse().ok())
+            .filter(|&n: &usize| n > 0)
             .unwrap_or(DEFAULT_MAX_AI_QUEUE_SIZE);
 
         let cutoffs = Self::load_cutoffs_from_disk().await;
@@ -75,6 +101,7 @@ impl AiClient {
             queue: AiQueue::new(max_queue_size),
             cached_prompt: RwLock::new(prompt),
             context_cutoffs: RwLock::new(cutoffs),
+            cutoffs_save_lock: Mutex::new(()),
         }
     }
 
@@ -127,6 +154,7 @@ impl AiClient {
     /// Mark a cutoff for a channel — messages older than or equal to `now` will be ignored.
     pub async fn clear_context(&self, channel_id: Id<ChannelMarker>) {
         let now = time::OffsetDateTime::now_utc().unix_timestamp();
+        let _save_guard = self.cutoffs_save_lock.lock().await;
         let snapshot = {
             let mut guard = self.context_cutoffs.write().await;
             guard.insert(channel_id, now);
@@ -160,10 +188,13 @@ impl AiClient {
             .map(|(k, &v)| (k.get().to_string(), v))
             .collect();
         let json = serde_json::to_vec_pretty(&raw)?;
-        if let Some(parent) = std::path::Path::new(CUTOFFS_FILE_PATH).parent() {
+        let path = std::path::Path::new(CUTOFFS_FILE_PATH);
+        if let Some(parent) = path.parent() {
             let _ = tokio::fs::create_dir_all(parent).await;
         }
-        tokio::fs::write(CUTOFFS_FILE_PATH, json).await?;
+        let tmp = path.with_extension("json.tmp");
+        tokio::fs::write(&tmp, json).await?;
+        tokio::fs::rename(&tmp, path).await?;
         Ok(())
     }
 
