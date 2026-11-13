@@ -770,6 +770,39 @@ pub fn extract_search_actions(text: &str, max_actions: usize) -> Vec<AiSearchAct
     actions
 }
 
+/// Extract up to `max_calls` `<tool_call>{"name": ..., "arguments": {...}}</tool_call>` blocks
+/// emitted as literal text when the model runtime fails to parse special tool tokens.
+pub fn extract_inline_tool_calls(
+    text: &str,
+    max_calls: usize,
+) -> Vec<(String, serde_json::Value)> {
+    let mut calls = Vec::new();
+    let mut remaining = text;
+
+    while calls.len() < max_calls {
+        let Some(open_idx) = remaining.find("<tool_call>") else {
+            break;
+        };
+        let after_open = &remaining[open_idx + "<tool_call>".len()..];
+        let Some(close_idx) = after_open.find("</tool_call>") else {
+            break;
+        };
+        let body = after_open[..close_idx].trim();
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(body) {
+            if let Some(name) = val.get("name").and_then(|v| v.as_str()) {
+                let args = val
+                    .get("arguments")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({}));
+                calls.push((name.trim().to_owned(), args));
+            }
+        }
+        remaining = &after_open[close_idx + "</tool_call>".len()..];
+    }
+
+    calls
+}
+
 /// Extract the first `http://` or `https://` URL from a user's question, if present.
 pub fn extract_first_url(text: &str) -> Option<String> {
     for token in text.split_whitespace() {
@@ -1257,22 +1290,29 @@ fn strip_markdown_links(
             if let Some(label_end_rel) = text[i..].find("](") {
                 let target_start = i + label_end_rel + 2;
                 if let Some(target_end_rel) = text[target_start..].find(')') {
+                    let span = &text[i..target_start + target_end_rel];
                     let raw_target = text[target_start..target_start + target_end_rel].trim();
                     let target_lower = raw_target.to_ascii_lowercase();
-                    if target_lower.starts_with("http://")
+                    let is_placeholder = matches!(
+                        target_lower.as_str(),
+                        "" | "url" | "link" | "image" | "image_url" | "placeholder"
+                    );
+                    if !span.contains('\n') && (is_md_image
+                        || is_placeholder
+                        || target_lower.starts_with("http://")
                         || target_lower.starts_with("https://")
-                        || target_lower.starts_with("attachment://")
+                        || target_lower.starts_with("attachment://"))
                     {
                         let end = target_start + target_end_rel + 1;
-                        let should_strip = if is_md_image || target_lower.starts_with("attachment://")
-                        {
-                            true
-                        } else {
-                            let url_end = scan_http_url_end(raw_target, 0);
-                            let url = &raw_target[..url_end];
-                            !is_url_verified(url, verified, canon)
-                                || (strip_images && looks_like_image_url(url))
-                        };
+                        let should_strip =
+                            if is_md_image || is_placeholder || target_lower.starts_with("attachment://") {
+                                true
+                            } else {
+                                let url_end = scan_http_url_end(raw_target, 0);
+                                let url = &raw_target[..url_end];
+                                !is_url_verified(url, verified, canon)
+                                    || (strip_images && looks_like_image_url(url))
+                            };
                         if should_strip {
                             did_strip = true;
                             i = end;
@@ -1289,6 +1329,61 @@ fn strip_markdown_links(
     }
 
     (out, did_strip)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DraftedToolIssue {
+    PlaceholderImage(Option<String>),
+    UnfulfilledSearchPromise,
+}
+
+/// Detects when a model stopped early after drafting a fake Markdown image (`![alt](url)`)
+/// or promising to search (`"... wait, no! Let me find..."`) without issuing a tool call.
+pub fn detect_stalled_tool_draft(text: &str) -> Option<DraftedToolIssue> {
+    let mut pos = 0usize;
+    while let Some(rel) = text[pos..].find("![") {
+        let start = pos + rel + 2;
+        if let Some(label_end_rel) = text[start..].find("](") {
+            let target_start = start + label_end_rel + 2;
+            if let Some(target_end_rel) = text[target_start..].find(')') {
+                if !text[start..target_start + target_end_rel].contains('\n') {
+                    let alt = text[start..start + label_end_rel].trim();
+                    let alt_opt = (!alt.is_empty()).then(|| alt.to_owned());
+                    return Some(DraftedToolIssue::PlaceholderImage(alt_opt));
+                }
+            }
+        }
+        pos = start;
+    }
+
+    let trimmed = text.trim();
+    let tail_start = trimmed
+        .char_indices()
+        .rev()
+        .nth(180)
+        .map_or(0, |(idx, _)| idx);
+    let tail_lower = trimmed[tail_start..].to_ascii_lowercase();
+    if tail_lower.contains("wait, no!")
+        || tail_lower.contains("wait no!")
+        || [
+            "let me find ",
+            "let me search ",
+            "let me look up ",
+            "let me grab ",
+            "let me pull up ",
+            "let me fetch ",
+        ]
+        .iter()
+        .any(|pat| {
+            tail_lower.starts_with(pat)
+                || tail_lower.contains(&format!(" {pat}"))
+                || tail_lower.contains(&format!("\n{pat}"))
+        })
+    {
+        return Some(DraftedToolIssue::UnfulfilledSearchPromise);
+    }
+
+    None
 }
 
 /// Strips Markdown image links, unverified/hallucinated URLs, and redundant bare image URLs
@@ -1482,9 +1577,36 @@ mod tests {
             "https://docs.rs/serenity".to_owned(),
             "https://i.imgur.com/verified.png".to_owned(),
         ]);
-        let raw = "Check [serenity](https://docs.rs/serenity) and ![meme](https://i.imgur.com/verified.png)\nAlso fake: <https://broken.example.com/nope.jpg> and direct https://i.imgur.com/verified.png";
+        let raw = "Check [serenity](https://docs.rs/serenity) and ![meme](https://i.imgur.com/verified.png)\nFake: <https://broken.example.com/nope.jpg> ![puffy mouth meme](url) and direct https://i.imgur.com/verified.png";
         let cleaned = clean_image_links_and_unverified_urls(raw, &verified, true);
-        assert_eq!(cleaned, "Check [serenity](https://docs.rs/serenity) and\nAlso fake: and direct");
+        assert_eq!(cleaned, "Check [serenity](https://docs.rs/serenity) and\nFake: and direct");
+    }
+
+    #[test]
+    fn test_extract_inline_tool_calls_and_stalled_drafts() {
+        let raw_call = "<think>hmm</think><tool_call>{\"name\":\"image_search\",\"arguments\":{\"query\":\"puffy mouth meme\"}}</tool_call>";
+        let calls = extract_inline_tool_calls(raw_call, 3);
+        assert_eq!(
+            calls,
+            vec![(
+                "image_search".to_owned(),
+                serde_json::json!({"query": "puffy mouth meme"}),
+            )]
+        );
+
+        let stalled = "check this out:\n![puffy mouth meme](url) ... wait, no! Let me find the actual verified image for real";
+        assert_eq!(
+            detect_stalled_tool_draft(stalled),
+            Some(DraftedToolIssue::PlaceholderImage(Some("puffy mouth meme".to_owned())))
+        );
+        assert_eq!(
+            detect_stalled_tool_draft("Hold on... let me find a verified picture first."),
+            Some(DraftedToolIssue::UnfulfilledSearchPromise)
+        );
+        assert_eq!(
+            detect_stalled_tool_draft("That exam prep is looking rough ngl 💀"),
+            None
+        );
     }
 
     #[test]

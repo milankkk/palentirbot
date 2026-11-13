@@ -22,7 +22,7 @@ pub const DEFAULT_MODEL: &str = "huihui_ai/qwen3.5-abliterated:9b";
 pub const DEFAULT_NUM_CTX: u32 = 24_576;
 /// How long Ollama keeps the model resident after a request.
 pub const DEFAULT_KEEP_ALIVE: &str = "30m";
-pub const DEFAULT_REPEAT_PENALTY: f32 = 1.05;
+pub const DEFAULT_REPEAT_PENALTY: f32 = 1.0;
 pub const DEFAULT_REPEAT_LAST_N: i32 = 256;
 pub const DEFAULT_PRESENCE_PENALTY: f32 = 0.05;
 pub const DEFAULT_FREQUENCY_PENALTY: f32 = 0.0;
@@ -78,11 +78,11 @@ impl AiThinkDepth {
             }
             Self::High => {
                 "REASONING DEPTH (HIGH — DEEP ANALYSIS, MANDATORY): Use your internal thinking block extensively BEFORE replying. Deliberate thoroughly through at least 4 distinct steps internally:\n\
-                 1. Deconstruct the user's question, implicit nuances, and relevant chat context.\n\
+                 1. Focus strictly on the exact current user request first. Treat it as standalone unless it explicitly refers to an earlier message — NEVER merge old topics, adjectives, or previous queries into a new question or search query.\n\
                  2. Explore the underlying concepts, causes, mechanisms, or multiple angles carefully.\n\
                  3. Verify every fact, edge case, or calculation step-by-step via tools (`web_search`, `browse_url`, `image_search`) instead of guessing from memory.\n\
-                 4. Whenever the user asks for a picture/photo/meme/GIF or visual context helps, call `image_search` first (it verifies and attaches real images automatically); use `attach_file` for scripts or long code/text. NEVER fabricate or paste unverified image URLs or Markdown `![alt](url)` links.\n\
-                 Do NOT rush or take shortcuts — think deeply and use search tools before replying, while keeping your final visible Discord reply concise and punchy."
+                 4. Always invoke any needed tool BEFORE writing your visible reply—never draft `![alt](url)` placeholders or write \"let me find...\" self-corrections in content. Use `image_search` first for pictures/memes/GIFs and `attach_file` for scripts or long code/text.\n\
+                 Do NOT rush or take shortcuts — think deeply and invoke tools cleanly before replying, while keeping your final visible Discord reply concise and punchy."
             }
         }
     }
@@ -256,7 +256,7 @@ static AI_TOOLS: once_cell::sync::Lazy<[serde_json::Value; 7]> = once_cell::sync
             "type": "function",
             "function": {
                 "name": "image_search",
-                "description": "Search the web for real pictures, diagrams, memes, or reference photos and automatically download, verify, and attach a working image directly to your Discord reply. Do NOT paste image URLs or Markdown `![alt](url)` links in your text.",
+                "description": "Search the web for real pictures, diagrams, memes, or reference photos and automatically download, verify, and attach a working image directly to your Discord reply. Build `query` strictly from the user's current request (never carry over subjects/adjectives from earlier unrelated messages). Do NOT paste image URLs or Markdown `![alt](url)` links in your text.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -1109,6 +1109,7 @@ impl OllamaClient {
         let base_tools = Self::tools_for(search_mode, osu.is_some());
         let mut last_response: Option<OllamaResponse> = None;
         let mut nudged_image_search = false;
+        let mut nudged_stalled_draft = false;
         let mut nudged_unverified_urls = false;
 
         let cfg = self.snapshot_config();
@@ -1185,6 +1186,27 @@ impl OllamaClient {
                         executed.push(out);
                     }
                 }
+                if executed.len() < MAX_TOOLS_PER_ROUND {
+                    let rem_calls = MAX_TOOLS_PER_ROUND - executed.len();
+                    for (tool_name, args_val) in
+                        super::search::extract_inline_tool_calls(&combined_text, rem_calls)
+                    {
+                        if let Some(out) = self
+                            .run_single_tool(
+                                channel_id,
+                                &tool_name,
+                                &args_val,
+                                search_mode,
+                                osu,
+                                &mut state,
+                                stream_tx.as_ref(),
+                            )
+                            .await
+                        {
+                            executed.push(out);
+                        }
+                    }
+                }
             }
 
             if executed.is_empty() {
@@ -1204,6 +1226,36 @@ impl OllamaClient {
                     ));
                     Self::emit_status(stream_tx.as_ref(), "🖼️ Searching for a real image...");
                     continue;
+                }
+
+                if search_mode != SearchMode::Off
+                    && !nudged_stalled_draft
+                    && round + 1 < MAX_TOOL_ROUNDS
+                {
+                    if let Some(issue) = super::search::detect_stalled_tool_draft(&resp.message.content)
+                    {
+                        nudged_stalled_draft = true;
+                        let nudge_msg = match issue {
+                            super::search::DraftedToolIssue::PlaceholderImage(Some(alt)) => {
+                                tracing::warn!(%channel_id, round, %alt, "Model drafted placeholder Markdown image; forcing image_search tool round");
+                                format!(
+                                    "STOP writing Markdown placeholders like `![{alt}](url)`! Call `image_search` with a real query (e.g. \"{alt}\") RIGHT NOW using a tool call so the image uploads automatically, then write a clean final reply with NO `![alt](...)` text."
+                                )
+                            }
+                            super::search::DraftedToolIssue::PlaceholderImage(None) => {
+                                tracing::warn!(%channel_id, round, "Model drafted Markdown image placeholder; forcing tool round");
+                                "STOP writing Markdown `![alt](url)` placeholders! Call `image_search` via a tool call RIGHT NOW so a real verified image attaches automatically, then write your clean reply.".to_owned()
+                            }
+                            super::search::DraftedToolIssue::UnfulfilledSearchPromise => {
+                                tracing::warn!(%channel_id, round, "Model wrote unfulfilled search self-correction; forcing tool round");
+                                "You stopped mid-response saying \"let me find/search...\" instead of actually calling a tool. Execute `image_search` or `web_search` via a real tool call RIGHT NOW, then reply cleanly without self-correction chatter.".to_owned()
+                            }
+                        };
+                        working_messages.push(AiMessage::assistant(resp.message.content.clone()));
+                        working_messages.push(AiMessage::user(nudge_msg));
+                        Self::emit_status(stream_tx.as_ref(), "🖼️ Running tool instead of draft...");
+                        continue;
+                    }
                 }
 
                 if search_mode != SearchMode::Off
@@ -1324,6 +1376,13 @@ impl OllamaClient {
         None
     }
 
+    fn has_open_inline_tool_call(content: &str) -> bool {
+        if let Some(open_idx) = content.rfind("<tool_call>") {
+            return !content[open_idx + "<tool_call>".len()..].contains("</tool_call>");
+        }
+        false
+    }
+
     fn apply_ndjson_line(
         line: &[u8],
         acc: &mut OllamaResponse,
@@ -1343,7 +1402,7 @@ impl OllamaClient {
             if !thought.is_empty() {
                 let full_thought = acc.message.thinking.get_or_insert_with(String::new);
                 full_thought.push_str(thought);
-                if acc.message.content.is_empty() {
+                if acc.message.content.trim().is_empty() {
                     if let Some(tx) = stream_tx {
                         let _ = tx.send(AiStreamEvent::Thinking {
                             chars: full_thought.chars().count(),
@@ -1356,15 +1415,13 @@ impl OllamaClient {
         if !chunk.message.content.is_empty() {
             acc.message.content.push_str(&chunk.message.content);
             if let Some(tx) = stream_tx {
-                if acc.message.thinking.is_none() {
-                    if let Some(inline_thought) = Self::extract_open_inline_think(&acc.message.content) {
-                        let _ = tx.send(AiStreamEvent::Thinking {
-                            chars: inline_thought.chars().count(),
-                            tail: Self::summarize_thinking_tail(inline_thought, 110),
-                        });
-                    } else {
-                        let _ = tx.send(AiStreamEvent::Content(acc.message.content.clone()));
-                    }
+                if let Some(inline_thought) = Self::extract_open_inline_think(&acc.message.content) {
+                    let _ = tx.send(AiStreamEvent::Thinking {
+                        chars: inline_thought.chars().count(),
+                        tail: Self::summarize_thinking_tail(inline_thought, 110),
+                    });
+                } else if Self::has_open_inline_tool_call(&acc.message.content) {
+                    let _ = tx.send(AiStreamEvent::Status("🧰 Preparing tool call...".into()));
                 } else {
                     let _ = tx.send(AiStreamEvent::Content(acc.message.content.clone()));
                 }
@@ -1780,6 +1837,34 @@ mod tests {
             rx2.try_recv().unwrap(),
             AiStreamEvent::Content("<think>planning done</think>Hi!".into())
         );
+
+        // Whitespace-only content does not suppress Thinking; open <tool_call> suppresses Content flash.
+        let mut mixed_acc = OllamaResponse::default();
+        let (tx3, mut rx3) = tokio::sync::mpsc::unbounded_channel();
+        OllamaClient::apply_ndjson_line(
+            br#"{"message":{"role":"assistant","content":"\n","thinking":"step 1"}}"#,
+            &mut mixed_acc,
+            Some(&tx3),
+        );
+        OllamaClient::apply_ndjson_line(
+            br#"{"message":{"role":"assistant","content":"","thinking":" step 2"}}"#,
+            &mut mixed_acc,
+            Some(&tx3),
+        );
+        OllamaClient::apply_ndjson_line(
+            br#"{"message":{"role":"assistant","content":"<tool_call>{\"name\":\"image_search\""}}"#,
+            &mut mixed_acc,
+            Some(&tx3),
+        );
+        let events3: Vec<AiStreamEvent> = std::iter::from_fn(|| rx3.try_recv().ok()).collect();
+        assert!(events3.iter().any(|ev| matches!(ev, AiStreamEvent::Thinking { chars, .. } if *chars == 13)));
+        assert!(events3
+            .iter()
+            .any(|ev| matches!(ev, AiStreamEvent::Status(s) if s.contains("Preparing tool call"))));
+        assert!(!events3
+            .iter()
+            .any(|ev| matches!(ev, AiStreamEvent::Content(c) if c.contains("<tool_call>"))));
+
         assert!(OllamaClient::is_unsupported_thinking_error(
             r#"{"error":"\"gemma\" does not support thinking"}"#
         ));

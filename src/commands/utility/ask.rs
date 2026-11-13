@@ -969,20 +969,33 @@ pub fn format_message_text_and_embeds(msg: &Message) -> String {
     truncate_history_message(&out)
 }
 
-fn push_or_coalesce_user_message(
-    msgs: &mut Vec<AiMessage>,
-    current_user_msg: String,
-    images: Vec<String>,
-) {
-    if let Some(last) = msgs.last_mut() {
-        if last.role == "user" {
-            last.content.push('\n');
-            last.content.push_str(&current_user_msg);
-            last.images.extend(images);
-            return;
+fn format_history_as_background_log(history: &[AiMessage]) -> String {
+    let mut lines = Vec::new();
+    for msg in history {
+        let trimmed = msg.content.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if msg.role == "assistant" {
+            let single_line = trimmed
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ");
+            if !single_line.is_empty() {
+                lines.push(format!("- Render Slave (you): {single_line}"));
+            }
+        } else {
+            for line in trimmed.lines() {
+                let l = line.trim();
+                if !l.is_empty() {
+                    lines.push(format!("- {l}"));
+                }
+            }
         }
     }
-    msgs.push(AiMessage::user_with_images(current_user_msg, images));
+    lines.join("\n")
 }
 
 /// Core entry point accepting image attachments and search-mode overrides.
@@ -1076,6 +1089,10 @@ pub async fn execute_ai_question_with_options(
 
     let slash_turns = ctx.ai().snapshot_slash_turns().await;
 
+    let is_direct_reply = opts
+        .referenced_msg
+        .is_some_and(|r| r.author.id == bot_id && is_conversational_ai_message(r));
+
     let mut history_messages = if let Some(replied) = opts
         .referenced_msg
         .filter(|r| r.author.id == bot_id && is_conversational_ai_message(r))
@@ -1088,8 +1105,8 @@ pub async fn execute_ai_question_with_options(
             history.into_iter().filter(|m| m.id != replied.id).collect()
         };
 
-        let history_slice = if history_before_ai.len() > 8 {
-            history_before_ai[history_before_ai.len() - 8..].to_vec()
+        let history_slice = if history_before_ai.len() > 4 {
+            history_before_ai[history_before_ai.len() - 4..].to_vec()
         } else {
             history_before_ai
         };
@@ -1118,33 +1135,57 @@ pub async fn execute_ai_question_with_options(
         }
 
         system_prompt.push_str(
-            "\n\nCONVERSATION CONTEXT: The user is directly replying to your previous statement above. Focus your response specifically on addressing what they said in direct relation to your statement. Do NOT repeat or regurgitate what you already said—simply answer their reply directly."
+            "\n\nCONVERSATION CONTEXT: The user is directly replying to your previous statement above. Address their reply directly without repeating yourself. However, if their reply asks to search or look up a brand-new topic or subject that does not depend on your earlier message, build search queries strictly from the new request without carrying over earlier keywords."
         );
         msgs
     } else {
         system_prompt.push_str(
-            "\n\nRecent messages from this specific Discord chat are provided for conversational context. Answer the current question directly. If the latest question introduces a new topic, focus entirely on the new topic—do NOT repeat previous answers or equations from earlier in the chat!"
+            "\n\nCONTEXT & TOPIC ISOLATION (IMPORTANT): Treat the user's latest message below as a STANDALONE request by default. Only pull details from the passive channel log below if the latest message explicitly references earlier messages (e.g., pronouns like \"it/that/they/him/her\", \"again\", \"instead\", \"same\", \"what did X say\", \"what about...\"). When formulating `web_search` or `image_search` queries for a new topic, person, or picture, use keywords SOLELY from the latest request—NEVER mix in subjects, adjectives, or styles from earlier messages!"
         );
         convert_history(history, bot_id, guild_prefix.as_deref(), &slash_turns)
     };
 
-    if runtime_cfg.think_enabled {
-        system_prompt.push_str("\n\n");
-        system_prompt.push_str(runtime_cfg.think_depth.prompt_instruction());
-    }
+    let think_suffix = runtime_cfg
+        .think_enabled
+        .then(|| format!("\n\n{}", runtime_cfg.think_depth.prompt_instruction()));
 
+    let budget_prompt = match think_suffix {
+        Some(ref s) => format!("{system_prompt}{s}"),
+        None => system_prompt.clone(),
+    };
     trim_history_to_budget(
         &mut history_messages,
-        &system_prompt,
+        &budget_prompt,
         &current_user_msg,
         ctx.ai().num_ctx(),
         ctx.ai().num_predict(),
     );
 
-    let mut messages = Vec::with_capacity(history_messages.len() + 2);
-    messages.push(AiMessage::system(system_prompt));
-    messages.extend(history_messages);
-    push_or_coalesce_user_message(&mut messages, current_user_msg, opts.images);
+    let mut messages = Vec::with_capacity(if is_direct_reply {
+        history_messages.len() + 2
+    } else {
+        2
+    });
+    if is_direct_reply {
+        if let Some(ref s) = think_suffix {
+            system_prompt.push_str(s);
+        }
+        messages.push(AiMessage::system(system_prompt));
+        messages.extend(history_messages);
+    } else {
+        let background_log = format_history_as_background_log(&history_messages);
+        if !background_log.is_empty() {
+            system_prompt.push_str(
+                "\n\n[RECENT DISCORD CHANNEL LOG — PASSIVE BACKGROUND CONTEXT ONLY (oldest to newest)]:\n",
+            );
+            system_prompt.push_str(&background_log);
+        }
+        if let Some(ref s) = think_suffix {
+            system_prompt.push_str(s);
+        }
+        messages.push(AiMessage::system(system_prompt));
+    }
+    messages.push(AiMessage::user_with_images(current_user_msg, opts.images));
 
     let reply = ctx
         .ai()
@@ -1433,72 +1474,47 @@ fn truncate_history_message(content: &str) -> String {
     truncate_chars(content, HISTORY_MESSAGE_CHAR_LIMIT)
 }
 
+fn strip_tag_blocks(text: &mut String, open_tag: &str, close_tag: &str) {
+    while let Some(start) = text.find(open_tag) {
+        if let Some(end) = text[start..].find(close_tag) {
+            let end_idx = start + end + close_tag.len();
+            text.drain(start..end_idx);
+        } else {
+            // Unclosed tag block (e.g. model cut off mid-thought/tool_call): drop trailing artifact.
+            text.truncate(start);
+            break;
+        }
+    }
+    while let Some(end) = text.find(close_tag) {
+        let end_idx = end + close_tag.len();
+        text.drain(..end_idx);
+    }
+}
+
 fn clean_ai_response(content: &str) -> String {
     let mut text = content.trim().to_owned();
 
-    // Repeatedly strip all complete <think>...</think> blocks
-    while let Some(start) = text.find("<think>") {
-        if let Some(end) = text[start..].find("</think>") {
-            let end_idx = start + end + "</think>".len();
-            text.drain(start..end_idx);
-        } else {
-            // Unclosed <think> block (e.g. model was cut off mid-thought):
-            // Strip from <think> to the end
-            text.truncate(start);
-            break;
-        }
+    for (open_tag, close_tag) in &[
+        ("<think>", "</think>"),
+        ("<thought>", "</thought>"),
+        ("<reasoning>", "</reasoning>"),
+        ("<search>", "</search>"),
+        ("<browse>", "</browse>"),
+        ("<tool_call>", "</tool_call>"),
+        ("<|tool_call|>", "<|/tool_call|>"),
+    ] {
+        strip_tag_blocks(&mut text, open_tag, close_tag);
     }
 
-    // Also strip any standalone </think> tags
-    while let Some(end) = text.find("</think>") {
-        let end_idx = end + "</think>".len();
-        text.drain(..end_idx);
-    }
-
-    // Repeatedly strip all complete <thought>...</thought> blocks
-    while let Some(start) = text.find("<thought>") {
-        if let Some(end) = text[start..].find("</thought>") {
-            let end_idx = start + end + "</thought>".len();
-            text.drain(start..end_idx);
-        } else {
-            text.truncate(start);
-            break;
-        }
-    }
-    while let Some(end) = text.find("</thought>") {
-        let end_idx = end + "</thought>".len();
-        text.drain(..end_idx);
-    }
-
-    // Repeatedly strip all complete <reasoning>...</reasoning> blocks
-    while let Some(start) = text.find("<reasoning>") {
-        if let Some(end) = text[start..].find("</reasoning>") {
-            let end_idx = start + end + "</reasoning>".len();
-            text.drain(start..end_idx);
-        } else {
-            text.truncate(start);
-            break;
-        }
-    }
-    while let Some(end) = text.find("</reasoning>") {
-        let end_idx = end + "</reasoning>".len();
-        text.drain(..end_idx);
-    }
-
-    // Strip any residual <search>...</search> or <browse>...</browse> tool tags
-    for (open_tag, close_tag) in &[("<search>", "</search>"), ("<browse>", "</browse>")] {
-        while let Some(start) = text.find(open_tag) {
-            if let Some(end) = text[start..].find(close_tag) {
-                let end_idx = start + end + close_tag.len();
-                text.drain(start..end_idx);
-            } else {
-                text.truncate(start);
-                break;
-            }
-        }
-        while let Some(end) = text.find(close_tag) {
-            let end_idx = end + close_tag.len();
-            text.drain(..end_idx);
+    for token in &[
+        "<|im_end|>",
+        "<|endoftext|>",
+        "<|tool_call|>",
+        "<|/tool_call|>",
+        "<|thought|>",
+    ] {
+        if text.contains(token) {
+            text = text.replace(token, "");
         }
     }
 
@@ -1755,6 +1771,9 @@ mod tests {
 
         let browse_tags = "<browse>https://osu.ppy.sh</browse>Here is the webpage info.";
         assert_eq!(clean_ai_response(browse_tags), "Here is the webpage info.");
+
+        let tool_call_tags = "<tool_call>{\"name\":\"image_search\",\"arguments\":{\"query\":\"meme\"}}</tool_call>Clean reply";
+        assert_eq!(clean_ai_response(tool_call_tags), "Clean reply");
     }
 
     #[test]
@@ -2021,5 +2040,20 @@ mod tests {
         assert!(section.contains("~~~~\n```rust"));
         assert!(section.contains("truncated to fit"));
         assert!(max_attached_text_chars(24_576) >= 16_000);
+    }
+
+    #[test]
+    fn test_format_history_as_background_log() {
+        let log = format_history_as_background_log(&[
+            AiMessage::user("alice (Discord ID 101): show a chibi cat\nbob (Discord ID 102): lol"),
+            AiMessage::assistant("Here you go!\nEnjoy the cat."),
+            AiMessage::user("   "),
+        ]);
+        assert_eq!(
+            log,
+            "- alice (Discord ID 101): show a chibi cat\n\
+             - bob (Discord ID 102): lol\n\
+             - Render Slave (you): Here you go! Enjoy the cat."
+        );
     }
 }
