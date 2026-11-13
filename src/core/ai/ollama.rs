@@ -294,13 +294,13 @@ static AI_TOOLS: once_cell::sync::Lazy<[serde_json::Value; 7]> = once_cell::sync
             "type": "function",
             "function": {
                 "name": "osu_player",
-                "description": "Fetch live osu! player profile stats, rank, pp, accuracy, top 5 plays, and recent plays from the official osu! API",
+                "description": "Fetch live osu! player profile stats, rank, pp, accuracy, top 5 plays, and recent plays from the official osu! API. Only pass an explicit osu! username, numeric osu! ID, or osu.ppy.sh/users/<id> URL — NEVER guess a Discord username, Discord @mention, or Discord user ID.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "username": {
                             "type": "string",
-                            "description": "osu! username, user ID, or profile URL"
+                            "description": "Explicit osu! IGN, numeric osu! ID, or osu.ppy.sh/users/<id> URL (never a Discord username or Discord snowflake ID)"
                         },
                         "mode": {
                             "type": "string",

@@ -317,6 +317,27 @@ pub fn strip_bot_mention(content: &str, bot_id: Id<UserMarker>) -> Option<String
     Some(cleaned.trim().to_owned())
 }
 
+fn resolve_discord_mentions(
+    content: &str,
+    mentions: &[twilight_model::channel::message::Mention],
+) -> String {
+    if mentions.is_empty() || !content.contains("<@") {
+        return content.to_owned();
+    }
+    let mut out = content.to_owned();
+    for user in mentions {
+        let name = sanitize_llm_text(user.name.trim());
+        if name.is_empty() {
+            continue;
+        }
+        let replacement = format!("@{name} (Discord user)");
+        out = out
+            .replace(&format!("<@{}>", user.id), &replacement)
+            .replace(&format!("<@!{}>", user.id), &replacement);
+    }
+    out
+}
+
 async fn slash_ask(ctx: Arc<Context>, mut command: InteractionCommand) -> Result<()> {
     let Ask {
         question,
@@ -460,7 +481,7 @@ async fn slash_ask(ctx: Arc<Context>, mut command: InteractionCommand) -> Result
                 ctx.ai()
                     .record_slash_turn(
                         sent_msg.id,
-                        format!("{author_name} (Discord ID {}): {}", user.id, summary.trim()),
+                        format!("{author_name}: {}", summary.trim()),
                     )
                     .await;
             }
@@ -485,7 +506,7 @@ pub async fn handle_prefix_ask(
     args_str: &str,
     prefix: &str,
 ) {
-    let mut question = args_str.trim().to_string();
+    let mut question = resolve_discord_mentions(args_str.trim(), &msg.mentions);
 
     let bot_id = ctx.cache.current_user(|u| u.id).ok();
     if let Some(id) = bot_id {
@@ -919,8 +940,27 @@ pub fn format_embed_summary(embed: &Embed) -> Option<String> {
     let mut parts = Vec::new();
     if let Some(ref author) = embed.author {
         let a = sanitize_llm_text(author.name.trim());
-        if !a.is_empty() {
-            parts.push(format!("Author: {a}"));
+        let author_url = author
+            .url
+            .as_deref()
+            .map(|u| sanitize_llm_text(u.trim()))
+            .filter(|u| !u.is_empty());
+        match (a.is_empty(), author_url) {
+            (false, Some(u)) => parts.push(format!("Author: {a} ({u})")),
+            (false, None) => parts.push(format!("Author: {a}")),
+            (true, Some(u)) => parts.push(format!("Author URL: {u}")),
+            (true, None) => {}
+        }
+    }
+    if let Some(ref url) = embed.url {
+        let u = sanitize_llm_text(url.trim());
+        let dup_author_url = embed
+            .author
+            .as_ref()
+            .and_then(|a| a.url.as_deref())
+            .is_some_and(|au| au.trim() == url.trim());
+        if !u.is_empty() && !dup_author_url {
+            parts.push(format!("URL: {u}"));
         }
     }
     if let Some(ref title) = embed.title {
@@ -957,7 +997,8 @@ pub fn format_embed_summary(embed: &Embed) -> Option<String> {
 
 /// Render a Discord message's text plus any embed summaries into sanitized prompt text.
 pub fn format_message_text_and_embeds(msg: &Message) -> String {
-    let mut out = sanitize_llm_text(&truncate_history_message(&msg.content));
+    let resolved_content = resolve_discord_mentions(&msg.content, &msg.mentions);
+    let mut out = sanitize_llm_text(&truncate_history_message(&resolved_content));
     for embed in msg.embeds.iter().take(2) {
         if let Some(summary) = format_embed_summary(embed) {
             if !out.is_empty() {
@@ -1050,11 +1091,9 @@ pub async fn execute_ai_question_with_options(
 
     let files_section = format_attached_files_section(&opts.text_files);
     let current_user_msg = if files_section.is_empty() {
-        format!("{clean_username} (Discord ID {user_id}): {clean_question}")
+        format!("{clean_username}: {clean_question}")
     } else {
-        format!(
-            "{clean_username} (Discord ID {user_id}): {clean_question}\n\n{files_section}"
-        )
+        format!("{clean_username}: {clean_question}\n\n{files_section}")
     };
 
     if let Some(ref tx) = opts.stream_tx {
@@ -1414,10 +1453,7 @@ fn convert_history(
             let author_name = sanitize_llm_text(&message.author.name);
             let cleaned = strip_command_prefix_with_prefix(&content, guild_prefix);
             if !cleaned.is_empty() {
-                raw_messages.push(AiMessage::user(format!(
-                    "{} (Discord ID {}): {}",
-                    author_name, message.author.id, cleaned,
-                )));
+                raw_messages.push(AiMessage::user(format!("{author_name}: {cleaned}")));
             }
         }
     }
@@ -1866,7 +1902,7 @@ mod tests {
                 icon_url: None,
                 name: "mrekk".into(),
                 proxy_icon_url: None,
-                url: None,
+                url: Some("https://osu.ppy.sh/users/7562902".into()),
             }),
             color: None,
             description: Some("99.1% FC".into()),
@@ -1882,12 +1918,29 @@ mod tests {
             thumbnail: None,
             timestamp: None,
             title: Some("Sidetracked Day".into()),
-            url: None,
+            url: Some("https://osu.ppy.sh/b/2116202".into()),
             video: None,
         };
         let summary = format_embed_summary(&embed).expect("non-empty embed summary");
-        assert!(summary.contains("mrekk"));
+        assert!(summary.contains("mrekk (https://osu.ppy.sh/users/7562902)"));
+        assert!(summary.contains("URL: https://osu.ppy.sh/b/2116202"));
         assert!(summary.contains("1,400pp"));
+
+        let mention: twilight_model::channel::message::Mention = serde_json::from_value(
+            serde_json::json!({
+                "id": "1313644055317446710",
+                "username": "lovecats102",
+                "discriminator": "0000",
+                "avatar": null,
+                "bot": false,
+                "public_flags": 0
+            }),
+        )
+        .expect("valid mention");
+        assert_eq!(
+            resolve_discord_mentions("check <@1313644055317446710> stats", &[mention]),
+            "check @lovecats102 (Discord user) stats"
+        );
 
         let mut msgs = vec![
             AiMessage::user("oldest ".repeat(350)),
@@ -1948,7 +2001,7 @@ mod tests {
         let mut slash_turns = HashMap::new();
         slash_turns.insert(
             slash_reply_id,
-            "alice (Discord ID 101): my favorite color is cyan".to_owned(),
+            "alice: my favorite color is cyan".to_owned(),
         );
 
         let history = vec![
@@ -1964,14 +2017,14 @@ mod tests {
         assert_eq!(converted[0].role, "user");
         assert_eq!(
             converted[0].content,
-            "alice (Discord ID 101): my favorite color is cyan"
+            "alice: my favorite color is cyan"
         );
         assert_eq!(converted[1].role, "assistant");
         assert_eq!(converted[1].content, "Cyan is a great color!");
         assert_eq!(converted[2].role, "user");
         assert_eq!(
             converted[2].content,
-            "bob (Discord ID 102): what did alice say?\nbob (Discord ID 102): just chatting"
+            "bob: what did alice say?\nbob: just chatting"
         );
         assert_eq!(converted[3].role, "assistant");
         assert_eq!(converted[3].content, "She picked cyan.");
@@ -2035,14 +2088,14 @@ mod tests {
     #[test]
     fn test_format_history_as_background_log() {
         let log = format_history_as_background_log(&[
-            AiMessage::user("alice (Discord ID 101): show a chibi cat\nbob (Discord ID 102): lol"),
+            AiMessage::user("alice: show a chibi cat\nbob: lol"),
             AiMessage::assistant("Here you go!\nEnjoy the cat."),
             AiMessage::user("   "),
         ]);
         assert_eq!(
             log,
-            "- alice (Discord ID 101): show a chibi cat\n\
-             - bob (Discord ID 102): lol\n\
+            "- alice: show a chibi cat\n\
+             - bob: lol\n\
              - Render Slave (you): Here you go! Enjoy the cat."
         );
     }

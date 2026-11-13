@@ -161,8 +161,44 @@ fn summarize_score(score: &Score) -> serde_json::Value {
     })
 }
 
+fn looks_like_discord_user_ref(args: &serde_json::Value) -> Option<String> {
+    if let Some(id) = args
+        .get("user_id")
+        .or_else(|| args.get("username"))
+        .or_else(|| args.get("user"))
+        .or_else(|| args.get("player"))
+        .and_then(|v| v.as_u64())
+    {
+        if id > u64::from(u32::MAX) {
+            return Some(id.to_string());
+        }
+    }
+
+    let raw = args
+        .get("username")
+        .or_else(|| args.get("user"))
+        .or_else(|| args.get("player"))
+        .or_else(|| args.as_str().map(|_| args))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())?;
+
+    if (raw.starts_with("<@") && raw.ends_with('>'))
+        || (raw.len() >= 17 && raw.bytes().all(|b| b.is_ascii_digit()))
+    {
+        return Some(raw.to_owned());
+    }
+
+    None
+}
+
 /// Look up live osu! profile stats, top 5 plays, and 3 most recent plays.
 pub async fn execute_osu_player_tool(osu: &Osu, args: &serde_json::Value) -> String {
+    if let Some(discord_ref) = looks_like_discord_user_ref(args) {
+        return format!(
+            "[osu_player error: `{discord_ref}` is a Discord user ID/mention, NOT an osu! user ID or username. Render Slave does not store Discord-to-osu! links. Check recent `[Bot ...]` embeds in chat/replies from `<osu @user` for an `osu.ppy.sh/users/...` profile link or osu! IGN, or ask the user to run `<osu @user` first or give their osu! username.]"
+        );
+    }
     let Some(user_id) = parse_osu_user_id(args) else {
         return "[osu_player error: missing `username` argument]".to_owned();
     };
@@ -532,6 +568,13 @@ mod tests {
 
         let num_val = serde_json::json!({ "username": 7562902 });
         assert!(matches!(parse_osu_user_id(&num_val), Some(UserId::Id(7_562_902))));
+
+        assert!(looks_like_discord_user_ref(&serde_json::json!({ "username": "<@1313644055317446710>" })).is_some());
+        assert!(looks_like_discord_user_ref(&serde_json::json!({ "username": "<@!339076467105333248>" })).is_some());
+        assert!(looks_like_discord_user_ref(&serde_json::json!({ "username": "1313644055317446710" })).is_some());
+        assert!(looks_like_discord_user_ref(&serde_json::json!({ "username": 1_313_644_055_317_446_710_u64 })).is_some());
+        assert!(looks_like_discord_user_ref(&serde_json::json!({ "username": "7562902" })).is_none());
+        assert!(looks_like_discord_user_ref(&serde_json::json!({ "username": "mrekk" })).is_none());
     }
 
     #[test]
