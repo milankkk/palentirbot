@@ -20,7 +20,7 @@ use crate::{
     core::{
         ai::{
             base64_encode, describe_ai_error, sanitize_llm_text, AiAttachmentFile, AiMessage,
-            AiPersonaMode, AiStreamEvent, SearchMode,
+            AiPersonaMode, AiStreamEvent, OsuToolContext, SearchMode,
         },
         Context,
     },
@@ -97,6 +97,7 @@ pub struct AiQuestionOutput {
 pub struct AiQuestionOptions<'a> {
     pub exclude_message_id: Option<Id<MessageMarker>>,
     pub referenced_msg: Option<&'a Message>,
+    pub raw_user_text: Option<&'a str>,
     pub images: Vec<String>,
     pub text_files: Vec<AttachedTextFile>,
     pub search_mode: SearchMode,
@@ -108,6 +109,7 @@ impl Default for AiQuestionOptions<'_> {
         Self {
             exclude_message_id: None,
             referenced_msg: None,
+            raw_user_text: None,
             images: Vec::new(),
             text_files: Vec::new(),
             search_mode: SearchMode::Auto,
@@ -506,7 +508,8 @@ pub async fn handle_prefix_ask(
     args_str: &str,
     prefix: &str,
 ) {
-    let mut question = resolve_discord_mentions(args_str.trim(), &msg.mentions);
+    let raw_user_text = args_str.trim();
+    let mut question = resolve_discord_mentions(raw_user_text, &msg.mentions);
 
     let bot_id = ctx.cache.current_user(|u| u.id).ok();
     if let Some(id) = bot_id {
@@ -648,6 +651,7 @@ pub async fn handle_prefix_ask(
         AiQuestionOptions {
             exclude_message_id: Some(msg.id),
             referenced_msg: msg.referenced_message.as_deref(),
+            raw_user_text: Some(raw_user_text),
             images,
             text_files,
             search_mode: SearchMode::Auto,
@@ -1039,6 +1043,178 @@ fn format_history_as_background_log(history: &[AiMessage]) -> String {
     lines.join("\n")
 }
 
+fn text_explicitly_mentions_plain_handle(text: &str, handle: &str) -> bool {
+    let lower_text = text.to_ascii_lowercase();
+    let lower_handle = handle.trim().to_ascii_lowercase();
+    if lower_handle.is_empty() {
+        return false;
+    }
+    let bytes = lower_text.as_bytes();
+    let mut start = 0usize;
+    while let Some(rel) = lower_text[start..].find(&lower_handle) {
+        let idx = start + rel;
+        let end = idx + lower_handle.len();
+        let left_ok = idx == 0
+            || !matches!(
+                bytes[idx - 1],
+                b'@' | b'_' | b'-' | b'.' | b'/' | b'a'..=b'z' | b'0'..=b'9'
+            );
+        let right_ok = end == bytes.len()
+            || !matches!(
+                bytes[end],
+                b'_' | b'-' | b'/' | b'a'..=b'z' | b'0'..=b'9'
+            ) && (bytes[end] != b'.'
+                || end + 1 == bytes.len()
+                || !matches!(bytes[end + 1], b'a'..=b'z' | b'0'..=b'9'));
+        if left_ok && right_ok {
+            return true;
+        }
+        start = idx + 1;
+    }
+    false
+}
+
+fn extract_discord_user_mentions(resolved_text: &str, out: &mut Vec<String>) {
+    const MARKER: &str = " (Discord user)";
+    let mut rest = resolved_text;
+    while let Some(end) = rest.find(MARKER) {
+        let before = &rest[..end];
+        if let Some(at_pos) = before.rfind('@') {
+            let name = before[at_pos + 1..].trim();
+            if !name.is_empty() && !name.contains('\n') {
+                out.push(name.to_owned());
+            }
+        }
+        rest = &rest[end + MARKER.len()..];
+    }
+}
+
+fn extract_at_handles(text: &str, out: &mut Vec<String>) {
+    let bytes = text.as_bytes();
+    for (idx, &b) in bytes.iter().enumerate() {
+        if b != b'@' {
+            continue;
+        }
+        let left_ok = idx == 0
+            || !matches!(
+                bytes[idx - 1],
+                b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' | b'.' | b'<'
+            );
+        if !left_ok {
+            continue;
+        }
+        let rest = &text[idx + 1..];
+        let token_len = rest
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '.'))
+            .unwrap_or(rest.len());
+        let handle = rest[..token_len].trim_end_matches('.');
+        if !handle.is_empty() && !handle.bytes().all(|c| c.is_ascii_digit()) {
+            out.push(handle.to_owned());
+        }
+    }
+}
+
+fn is_osu_profile_embed(embed: &twilight_model::channel::message::Embed) -> bool {
+    let has_profile_url = |s: &str| {
+        let lower = s.to_ascii_lowercase();
+        lower.contains("osu.ppy.sh/users/") || lower.contains("osu.ppy.sh/u/")
+    };
+    embed.url.as_deref().is_some_and(has_profile_url)
+        || embed
+            .author
+            .as_ref()
+            .and_then(|a| a.url.as_deref())
+            .is_some_and(has_profile_url)
+        || embed.description.as_deref().is_some_and(has_profile_url)
+        || embed.title.as_deref().is_some_and(has_profile_url)
+        || embed.fields.iter().any(|f| has_profile_url(&f.value))
+}
+
+fn resolve_blocked_discord_handles(
+    clean_username: &str,
+    raw_user_text: &str,
+    resolved_question: &str,
+    extra_handles: &[String],
+    confirmed_bot_texts: &[String],
+) -> Vec<String> {
+    let mut candidates = Vec::new();
+    if !clean_username.trim().is_empty() {
+        candidates.push(clean_username.trim().to_owned());
+    }
+    extract_discord_user_mentions(resolved_question, &mut candidates);
+    extract_at_handles(raw_user_text, &mut candidates);
+    candidates.extend(extra_handles.iter().cloned());
+
+    let mut blocked = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for raw in candidates {
+        let norm = raw.trim().to_ascii_lowercase();
+        if norm.is_empty() || !seen.insert(norm.clone()) {
+            continue;
+        }
+        let explicitly_typed = text_explicitly_mentions_plain_handle(raw_user_text, &norm);
+        let confirmed_by_bot = confirmed_bot_texts
+            .iter()
+            .any(|text| text_explicitly_mentions_plain_handle(text, &norm));
+        if !explicitly_typed && !confirmed_by_bot {
+            blocked.push(norm);
+        }
+    }
+    blocked
+}
+
+fn collect_blocked_discord_handles(
+    clean_username: &str,
+    raw_user_text: &str,
+    resolved_question: &str,
+    history: &[Message],
+    referenced_msg: Option<&Message>,
+) -> Vec<String> {
+    let mut extra_handles = Vec::new();
+    let mut confirmed_bot_texts = Vec::new();
+
+    for msg in history.iter().chain(referenced_msg) {
+        if !msg.author.bot {
+            let name = sanitize_llm_text(&msg.author.name);
+            if !name.trim().is_empty() {
+                extra_handles.push(name);
+            }
+        } else {
+            for embed in &msg.embeds {
+                if is_osu_profile_embed(embed) {
+                    if let Some(author) = embed.author.as_ref() {
+                        if !author.name.trim().is_empty() {
+                            confirmed_bot_texts.push(author.name.clone());
+                        }
+                    }
+                    if let Some(ref title) = embed.title {
+                        confirmed_bot_texts.push(title.clone());
+                    }
+                    if let Some(ref desc) = embed.description {
+                        confirmed_bot_texts.push(desc.clone());
+                    }
+                }
+            }
+        }
+        for mention in &msg.mentions {
+            if !mention.bot {
+                let name = sanitize_llm_text(&mention.name);
+                if !name.trim().is_empty() {
+                    extra_handles.push(name);
+                }
+            }
+        }
+    }
+
+    resolve_blocked_discord_handles(
+        clean_username,
+        raw_user_text,
+        resolved_question,
+        &extra_handles,
+        &confirmed_bot_texts,
+    )
+}
+
 /// Core entry point accepting image attachments and search-mode overrides.
 pub async fn execute_ai_question_with_options(
     ctx: &Context,
@@ -1117,6 +1293,15 @@ pub async fn execute_ai_question_with_options(
     };
 
     let slash_turns = ctx.ai().snapshot_slash_turns().await;
+
+    let raw_user_text = opts.raw_user_text.unwrap_or(question);
+    let blocked_discord_handles = collect_blocked_discord_handles(
+        &clean_username,
+        raw_user_text,
+        &clean_question,
+        &history,
+        opts.referenced_msg,
+    );
 
     let is_direct_reply = opts
         .referenced_msg
@@ -1222,7 +1407,10 @@ pub async fn execute_ai_question_with_options(
             channel_id,
             &messages,
             opts.search_mode,
-            Some(ctx.osu()),
+            Some(OsuToolContext {
+                osu: ctx.osu(),
+                blocked_discord_handles: &blocked_discord_handles,
+            }),
             opts.stream_tx,
         )
         .await?;
@@ -1577,7 +1765,39 @@ fn clean_ai_response(content: &str) -> String {
         }
     }
 
-    format_server_emojis(content)
+    strip_bathbot_closing_angle_brackets(&format_server_emojis(content))
+}
+
+/// Bathbot uses `<` as a command prefix without a closing `>` (e.g. `<osu @user`);
+/// strip accidental closing `>` characters that LLMs tend to add after `<osu ...>`.
+fn strip_bathbot_closing_angle_brackets(text: &str) -> String {
+    if !text.contains("<osu") {
+        return text.to_owned();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(pos) = rest.find("<osu") {
+        out.push_str(&rest[..pos + 4]);
+        rest = &rest[pos + 4..];
+
+        if let Some(after) = rest.strip_prefix('>') {
+            rest = after;
+            continue;
+        }
+
+        if let Some(after_space) = rest.strip_prefix(" @") {
+            let token_len = after_space
+                .find(|c: char| c.is_whitespace() || c == '<' || c == '>' || c == '`')
+                .unwrap_or(after_space.len());
+            if token_len > 0 && after_space[token_len..].starts_with('>') {
+                out.push_str(" @");
+                out.push_str(&after_space[..token_len]);
+                rest = &after_space[token_len + 1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Format custom server emoji shortcodes (like `:skullcamel:`) into Discord's `<:name:id>`
@@ -2098,5 +2318,117 @@ mod tests {
              - bob: lol\n\
              - Render Slave (you): Here you go! Enjoy the cat."
         );
+    }
+
+    #[test]
+    fn test_strip_bathbot_closing_angle_brackets() {
+        assert_eq!(
+            strip_bathbot_closing_angle_brackets("Try running <osu @milan.be> in chat or <osu>"),
+            "Try running <osu @milan.be in chat or <osu"
+        );
+        assert_eq!(
+            strip_bathbot_closing_angle_brackets("Run `<osu @milan.be>` for your stats."),
+            "Run `<osu @milan.be` for your stats."
+        );
+        assert_eq!(
+            strip_bathbot_closing_angle_brackets("Run `<osu @milan.be` in chat."),
+            "Run `<osu @milan.be` in chat."
+        );
+        assert_eq!(
+            strip_bathbot_closing_angle_brackets(
+                "Ping <@1313644055317446710> or see <https://osu.ppy.sh/users/7562902>"
+            ),
+            "Ping <@1313644055317446710> or see <https://osu.ppy.sh/users/7562902>"
+        );
+    }
+
+    #[test]
+    fn test_resolve_blocked_discord_handles_and_profile_embeds() {
+        // Requester asking "my profile" must block their Discord handle.
+        assert_eq!(
+            resolve_blocked_discord_handles("milan.be", "what is my rank?", "what is my rank?", &[], &[]),
+            vec!["milan.be"]
+        );
+
+        // Typing `@milan.be` blocks both the requester handle and the `@`-prefixed target.
+        assert_eq!(
+            resolve_blocked_discord_handles("other", "check @milan.be", "check @milan.be", &[], &[]),
+            vec!["other", "milan.be"]
+        );
+        assert_eq!(
+            resolve_blocked_discord_handles(
+                "other",
+                "check <@1313644055317446710>",
+                "check @milan.be (Discord user)",
+                &[],
+                &[],
+            ),
+            vec!["other", "milan.be"]
+        );
+        assert_eq!(
+            resolve_blocked_discord_handles(
+                "other",
+                "email foo@bar.com about bar.com",
+                "email foo@bar.com about bar.com",
+                &[],
+                &[],
+            ),
+            vec!["other"]
+        );
+        assert_eq!(
+            resolve_blocked_discord_handles(
+                "milan.be",
+                "check @milan.be",
+                "check @milan.be",
+                &[],
+                &[],
+            ),
+            vec!["milan.be"]
+        );
+
+        // Explicitly typing an osu! username without `@` exempts it.
+        assert_eq!(
+            resolve_blocked_discord_handles(
+                "milan.be",
+                "check osu player milan.be",
+                "check osu player milan.be",
+                &[],
+                &[],
+            ),
+            Vec::<String>::new()
+        );
+
+        // Confirmed Bathbot `<osu` embed with `osu.ppy.sh/users/` URL exempts matching author name.
+        let ok_embed: twilight_model::channel::message::Embed = serde_json::from_value(
+            serde_json::json!({
+                "type": "rich",
+                "author": {
+                    "name": "milan.be",
+                    "url": "https://osu.ppy.sh/users/7562902"
+                }
+            }),
+        )
+        .expect("valid embed");
+        assert!(is_osu_profile_embed(&ok_embed));
+        assert_eq!(
+            resolve_blocked_discord_handles(
+                "milan.be",
+                "what are my top plays?",
+                "what are my top plays?",
+                &[],
+                &["milan.be".to_owned()],
+            ),
+            Vec::<String>::new()
+        );
+
+        // Bathbot error embed without `osu.ppy.sh/users/` URL must NOT exempt.
+        let err_embed: twilight_model::channel::message::Embed = serde_json::from_value(
+            serde_json::json!({
+                "type": "rich",
+                "description": "User milan.be is not linked"
+            }),
+        )
+        .expect("valid embed");
+        assert!(!is_osu_profile_embed(&err_embed));
     }
 }

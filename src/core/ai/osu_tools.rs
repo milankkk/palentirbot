@@ -8,6 +8,13 @@ use rosu_v2::{
 
 const MAX_OSU_FILE_BYTES: usize = 5 * 1024 * 1024;
 
+/// Live osu! API client paired with Discord handles that must not be guessed as osu! IGNs.
+#[derive(Clone, Copy)]
+pub struct OsuToolContext<'a> {
+    pub osu: &'a Osu,
+    pub blocked_discord_handles: &'a [String],
+}
+
 pub fn parse_game_mode(raw: Option<&str>) -> GameMode {
     match raw
         .map(str::trim)
@@ -97,26 +104,31 @@ pub fn parse_beatmap_id(raw: &str) -> Option<u32> {
     None
 }
 
-/// Parse a user ID or username from tool call arguments or an `/users/<id>` profile URL.
-pub fn parse_osu_user_id(args: &serde_json::Value) -> Option<UserId> {
-    if let Some(id) = args
-        .get("user_id")
+fn extract_raw_player_u64(args: &serde_json::Value) -> Option<u64> {
+    args.get("user_id")
         .or_else(|| args.get("username"))
         .or_else(|| args.get("user"))
+        .or_else(|| args.get("player"))
         .and_then(|v| v.as_u64())
-        .and_then(|v| u32::try_from(v).ok())
-    {
-        return Some(UserId::Id(id));
-    }
+}
 
-    let raw = args
-        .get("username")
+fn extract_raw_player_str(args: &serde_json::Value) -> Option<&str> {
+    args.get("username")
         .or_else(|| args.get("user"))
         .or_else(|| args.get("player"))
         .or_else(|| args.as_str().map(|_| args))
         .and_then(|v| v.as_str())
         .map(str::trim)
-        .filter(|s| !s.is_empty())?;
+        .filter(|s| !s.is_empty())
+}
+
+/// Parse a user ID or username from tool call arguments or an `/users/<id>` profile URL.
+pub fn parse_osu_user_id(args: &serde_json::Value) -> Option<UserId> {
+    if let Some(id) = extract_raw_player_u64(args).and_then(|v| u32::try_from(v).ok()) {
+        return Some(UserId::Id(id));
+    }
+
+    let raw = extract_raw_player_str(args)?;
 
     if let Some(pos) = raw.find("/users/") {
         let rest = &raw[pos + "/users/".len()..];
@@ -162,27 +174,13 @@ fn summarize_score(score: &Score) -> serde_json::Value {
 }
 
 fn looks_like_discord_user_ref(args: &serde_json::Value) -> Option<String> {
-    if let Some(id) = args
-        .get("user_id")
-        .or_else(|| args.get("username"))
-        .or_else(|| args.get("user"))
-        .or_else(|| args.get("player"))
-        .and_then(|v| v.as_u64())
-    {
+    if let Some(id) = extract_raw_player_u64(args) {
         if id > u64::from(u32::MAX) {
             return Some(id.to_string());
         }
     }
 
-    let raw = args
-        .get("username")
-        .or_else(|| args.get("user"))
-        .or_else(|| args.get("player"))
-        .or_else(|| args.as_str().map(|_| args))
-        .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())?;
-
+    let raw = extract_raw_player_str(args)?;
     if (raw.starts_with("<@") && raw.ends_with('>'))
         || (raw.len() >= 17 && raw.bytes().all(|b| b.is_ascii_digit()))
     {
@@ -192,12 +190,59 @@ fn looks_like_discord_user_ref(args: &serde_json::Value) -> Option<String> {
     None
 }
 
+fn discord_ref_blocked_message(label: &str, kind: &str) -> String {
+    format!(
+        "[osu_player blocked: `{label}` is a {kind}, NOT a confirmed osu! IGN or user ID. Render Slave does NOT store Discord-to-osu! links and did NOT call the osu! API (do NOT tell the user the osu! API returned a 404). Check recent `[Bot ...]` embeds in chat or replies for an `osu.ppy.sh/users/<id>` profile URL or linked osu! IGN; if none is present, tell the user you don't know their osu! username yet and ask them to run `<osu` (for themselves) or `<osu @name` (for someone else — with ONLY the leading `<` and NO closing `>`) in chat first, or reply with their osu! IGN or profile URL.]"
+    )
+}
+
+/// Reject Discord IDs, mentions, `@handles`, or unconfirmed Discord usernames before hitting the osu! API.
+pub fn blocked_osu_player_error(
+    args: &serde_json::Value,
+    blocked_discord_handles: &[String],
+) -> Option<String> {
+    if let Some(discord_ref) = looks_like_discord_user_ref(args) {
+        return Some(discord_ref_blocked_message(
+            &discord_ref,
+            "Discord user ID/mention",
+        ));
+    }
+
+    let raw = extract_raw_player_str(args)?;
+    if raw.contains("/users/") || raw.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+
+    let had_at = raw.starts_with('@');
+    let stripped_suffix = raw
+        .strip_suffix("(Discord user)")
+        .map(str::trim)
+        .unwrap_or(raw);
+    let had_discord_suffix = stripped_suffix.len() != raw.len();
+    let cleaned = stripped_suffix.trim_start_matches('@').trim();
+
+    if had_at || had_discord_suffix {
+        return Some(discord_ref_blocked_message(raw, "Discord @mention/handle"));
+    }
+
+    if !cleaned.is_empty()
+        && blocked_discord_handles
+            .iter()
+            .any(|h| h.eq_ignore_ascii_case(cleaned))
+    {
+        return Some(discord_ref_blocked_message(
+            raw,
+            "unconfirmed Discord username",
+        ));
+    }
+
+    None
+}
+
 /// Look up live osu! profile stats, top 5 plays, and 3 most recent plays.
 pub async fn execute_osu_player_tool(osu: &Osu, args: &serde_json::Value) -> String {
-    if let Some(discord_ref) = looks_like_discord_user_ref(args) {
-        return format!(
-            "[osu_player error: `{discord_ref}` is a Discord user ID/mention, NOT an osu! user ID or username. Render Slave does not store Discord-to-osu! links. Check recent `[Bot ...]` embeds in chat/replies from `<osu @user` for an `osu.ppy.sh/users/...` profile link or osu! IGN, or ask the user to run `<osu @user` first or give their osu! username.]"
-        );
+    if let Some(err) = blocked_osu_player_error(args, &[]) {
+        return err;
     }
     let Some(user_id) = parse_osu_user_id(args) else {
         return "[osu_player error: missing `username` argument]".to_owned();
@@ -590,5 +635,23 @@ mod tests {
         assert!(!text_mentions_osu("let's focus on physics homework"));
         assert!(!text_mentions_osu("what is the AR-15 rifle or CS 2 rank?"));
         assert!(!text_mentions_osu("what was the football score yesterday?"));
+    }
+
+    #[test]
+    fn test_blocked_osu_player_error() {
+        let blocked = vec!["milan.be".to_owned(), "lovecats102".to_owned()];
+
+        assert!(blocked_osu_player_error(&serde_json::json!({ "username": "milan.be" }), &blocked).is_some());
+        assert!(blocked_osu_player_error(&serde_json::json!({ "username": "MILAN.BE" }), &blocked).is_some());
+        assert!(blocked_osu_player_error(&serde_json::json!({ "username": "@milan.be" }), &blocked).is_some());
+        assert!(blocked_osu_player_error(&serde_json::json!({ "username": "@otheruser" }), &blocked).is_some());
+        assert!(blocked_osu_player_error(&serde_json::json!({ "username": "@lovecats102 (Discord user)" }), &blocked).is_some());
+        assert!(blocked_osu_player_error(&serde_json::json!({ "username": "<@1313644055317446710>" }), &blocked).is_some());
+        assert!(blocked_osu_player_error(&serde_json::json!({ "username": "1313644055317446710" }), &blocked).is_some());
+
+        assert!(blocked_osu_player_error(&serde_json::json!({ "username": "mrekk" }), &blocked).is_none());
+        assert!(blocked_osu_player_error(&serde_json::json!({ "username": "7562902" }), &blocked).is_none());
+        assert!(blocked_osu_player_error(&serde_json::json!({ "username": "https://osu.ppy.sh/users/7562902" }), &blocked).is_none());
+        assert!(blocked_osu_player_error(&serde_json::json!({ "username": "milan.be" }), &[]).is_none());
     }
 }

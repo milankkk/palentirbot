@@ -17,6 +17,7 @@ pub use ollama::{
     describe_ai_error, normalize_num_predict, AiAttachmentFile, AiPersonaMode, AiReply,
     AiStreamEvent, AiThinkDepth, LastGenerationStats, OllamaClient, RuntimeAiConfig,
 };
+pub use osu_tools::OsuToolContext;
 pub use queue::{AiQueue, DEFAULT_MAX_AI_QUEUE_SIZE};
 #[allow(unused_imports)]
 pub use search::WebSearchClient;
@@ -234,7 +235,7 @@ impl AiClient {
         channel_id: Id<ChannelMarker>,
         messages: &[AiMessage],
         search_mode: SearchMode,
-        osu: Option<&rosu_v2::Osu>,
+        osu: Option<OsuToolContext<'_>>,
         stream_tx: Option<tokio::sync::mpsc::UnboundedSender<AiStreamEvent>>,
     ) -> Result<AiReply> {
         self.ollama

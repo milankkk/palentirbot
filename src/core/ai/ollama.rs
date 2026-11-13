@@ -3,12 +3,11 @@ use std::time::Duration;
 
 use eyre::{Context, Result};
 use reqwest::Client;
-use rosu_v2::Osu;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::UnboundedSender;
 use twilight_model::id::{marker::ChannelMarker, Id};
 
-use super::{sanitize_llm_text, AiMessage, SearchMode};
+use super::{sanitize_llm_text, AiMessage, OsuToolContext, SearchMode};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AiStreamEvent {
@@ -294,13 +293,13 @@ static AI_TOOLS: once_cell::sync::Lazy<[serde_json::Value; 7]> = once_cell::sync
             "type": "function",
             "function": {
                 "name": "osu_player",
-                "description": "Fetch live osu! player profile stats, rank, pp, accuracy, top 5 plays, and recent plays from the official osu! API. Only pass an explicit osu! username, numeric osu! ID, or osu.ppy.sh/users/<id> URL — NEVER guess a Discord username, Discord @mention, or Discord user ID.",
+                "description": "Fetch live osu! player profile stats, rank, pp, accuracy, top 5 plays, and recent plays from the official osu! API. ONLY call when you already know an explicit osu! IGN, numeric osu! ID, or `osu.ppy.sh/users/<id>` URL (explicitly stated by the user or shown inside a `[Bot ...]` embed from `<osu`). NEVER pass the requester's Discord handle, another Discord username, a `@mention`, or a Discord user ID.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "username": {
                             "type": "string",
-                            "description": "Explicit osu! IGN, numeric osu! ID, or osu.ppy.sh/users/<id> URL (never a Discord username or Discord snowflake ID)"
+                            "description": "Explicit osu! IGN, numeric osu! ID, or osu.ppy.sh/users/<id> URL — NEVER a Discord handle, @mention, or Discord snowflake ID"
                         },
                         "mode": {
                             "type": "string",
@@ -817,7 +816,7 @@ impl OllamaClient {
         name: &str,
         args: &serde_json::Value,
         search_mode: SearchMode,
-        osu: Option<&Osu>,
+        osu: Option<OsuToolContext<'_>>,
         state: &mut ToolExecState,
         stream_tx: Option<&UnboundedSender<AiStreamEvent>>,
     ) -> Option<String> {
@@ -1011,24 +1010,35 @@ impl OllamaClient {
                 )
             }
             "osu_player" => {
-                let Some(osu) = osu else {
+                let Some(osu_ctx) = osu else {
                     return Some("[osu_player unavailable]".to_owned());
                 };
                 let label = Self::extract_arg(args, "username");
+                if let Some(err_msg) = super::osu_tools::blocked_osu_player_error(
+                    args,
+                    osu_ctx.blocked_discord_handles,
+                ) {
+                    tracing::info!(
+                        %channel_id,
+                        player = %label,
+                        "Blocked Discord username/ID guess in AI osu_player lookup"
+                    );
+                    return Some(err_msg);
+                }
                 tracing::info!(%channel_id, player = %label, "Executing AI osu_player lookup");
                 Self::emit_status(stream_tx, format!("🎮 Checking osu! stats for `{label}`..."));
-                let out = super::osu_tools::execute_osu_player_tool(osu, args).await;
+                let out = super::osu_tools::execute_osu_player_tool(osu_ctx.osu, args).await;
                 Self::record_verified_urls(&mut state.verified_urls, &out);
                 Some(out)
             }
             "osu_beatmap" => {
-                let Some(osu) = osu else {
+                let Some(osu_ctx) = osu else {
                     return Some("[osu_beatmap unavailable]".to_owned());
                 };
                 let label = Self::extract_arg(args, "beatmap_id");
                 tracing::info!(%channel_id, map = %label, "Executing AI osu_beatmap lookup");
                 Self::emit_status(stream_tx, format!("🗺️ Calculating beatmap stats `{label}`..."));
-                let out = super::osu_tools::execute_osu_beatmap_tool(osu, &self.client, args).await;
+                let out = super::osu_tools::execute_osu_beatmap_tool(osu_ctx.osu, &self.client, args).await;
                 Self::record_verified_urls(&mut state.verified_urls, &out);
                 Some(out)
             }
@@ -1041,7 +1051,7 @@ impl OllamaClient {
         channel_id: Id<ChannelMarker>,
         messages: &[AiMessage],
         search_mode: SearchMode,
-        osu: Option<&Osu>,
+        osu: Option<OsuToolContext<'_>>,
         stream_tx: Option<UnboundedSender<AiStreamEvent>>,
     ) -> Result<AiReply> {
         let mut working_messages = messages.to_vec();
