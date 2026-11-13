@@ -363,6 +363,7 @@ fn compute_rosu_pp(osu_bytes: &[u8], mod_bits: u32) -> Option<serde_json::Value>
     }))
 }
 
+#[cfg(test)]
 const OSU_SUBSTRINGS: &[&str] = &[
     "osu.ppy.sh",
     ".osr",
@@ -388,6 +389,7 @@ const OSU_SUBSTRINGS: &[&str] = &[
     "osu_beatmap",
 ];
 
+#[cfg(test)]
 const OSU_WORDS: &[&str] = &[
     "osu",
     "taiko",
@@ -424,6 +426,7 @@ const OSU_WORDS: &[&str] = &[
     "shigetora",
 ];
 
+#[cfg(test)]
 fn contains_ascii_word(haystack: &str, word: &str) -> bool {
     let bytes = haystack.as_bytes();
     let mut start = 0usize;
@@ -440,6 +443,7 @@ fn contains_ascii_word(haystack: &str, word: &str) -> bool {
     false
 }
 
+#[cfg(test)]
 fn contains_pp_mention(haystack: &str) -> bool {
     let bytes = haystack.as_bytes();
     let mut start = 0usize;
@@ -459,6 +463,7 @@ fn contains_pp_mention(haystack: &str) -> bool {
     false
 }
 
+#[cfg(test)]
 fn contains_map_stat_token(haystack: &str) -> bool {
     let bytes = haystack.as_bytes();
     for stat in ["ar", "od"] {
@@ -481,6 +486,7 @@ fn contains_map_stat_token(haystack: &str) -> bool {
 }
 
 /// Return true when user text or a referenced score card actually mentions osu!.
+#[cfg(test)]
 pub fn text_mentions_osu(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     OSU_SUBSTRINGS.iter().any(|s| lower.contains(s))

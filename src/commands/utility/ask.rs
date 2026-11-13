@@ -19,8 +19,8 @@ use twilight_model::{
 use crate::{
     core::{
         ai::{
-            base64_encode, describe_ai_error, sanitize_llm_text, text_mentions_osu,
-            AiAttachmentFile, AiMessage, AiPersonaMode, AiStreamEvent, SearchMode,
+            base64_encode, describe_ai_error, sanitize_llm_text, AiAttachmentFile, AiMessage,
+            AiPersonaMode, AiStreamEvent, SearchMode,
         },
         Context,
     },
@@ -1028,10 +1028,6 @@ pub async fn execute_ai_question_with_options(
         .replace("{user_id}", &user_id.to_string());
 
     let runtime_cfg = ctx.ai().runtime_config();
-    let osu_mentioned = text_mentions_osu(question)
-        || opts
-            .referenced_msg
-            .is_some_and(|replied| text_mentions_osu(&format_message_text_and_embeds(replied)));
 
     match ctx.ai().channel_mode(channel_id) {
         AiPersonaMode::Default => {}
@@ -1041,12 +1037,6 @@ pub async fn execute_ai_question_with_options(
         AiPersonaMode::Brainrot => system_prompt.push_str(
             "\n\nCHANNEL PERSONA OVERRIDE (Brainrot Mode): Lean heavily into chaotic Discord banter and unhinged humor while still reporting verified tool facts accurately.",
         ),
-    }
-
-    if !osu_mentioned {
-        system_prompt.push_str(
-            "\n\nTOPIC GUARD: Stay strictly on the user's current topic. Do NOT bring up osu!, beatmaps, pp, accuracy, or rhythm-game jokes/references unless the user mentions osu!.",
-        );
     }
 
     system_prompt.push_str(
@@ -1193,7 +1183,7 @@ pub async fn execute_ai_question_with_options(
             channel_id,
             &messages,
             opts.search_mode,
-            osu_mentioned.then_some(ctx.osu()),
+            Some(ctx.osu()),
             opts.stream_tx,
         )
         .await?;
