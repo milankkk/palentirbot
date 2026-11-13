@@ -39,6 +39,9 @@ const HISTORY_MESSAGE_CHAR_LIMIT: usize = 1_500;
 /// Max image size (8 MB) and count (3) per request for local vision VLM.
 const MAX_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_IMAGES_PER_REQUEST: usize = 3;
+/// Max uploaded text/code file size (512 KB) and count (3) per request.
+const MAX_TEXT_FILE_BYTES: u64 = 512 * 1024;
+const MAX_TEXT_FILES_PER_REQUEST: usize = 3;
 /// Keep some room below Discord's 2,000-character message limit.
 const DISCORD_RESPONSE_CHAR_LIMIT: usize = 1_900;
 const MAX_DISCORD_CHUNKS: usize = 5;
@@ -52,6 +55,8 @@ pub struct Ask {
     question: String,
     /// Optional image attachment for vision analysis
     image: Option<Attachment>,
+    /// Optional text, code, log, or config file to include
+    file: Option<Attachment>,
     /// Keep the reply private to you (ephemeral)
     ephemeral: Option<bool>,
     /// Override web search behavior for this question
@@ -78,6 +83,12 @@ impl From<SlashSearchMode> for SearchMode {
     }
 }
 
+pub struct AttachedTextFile {
+    pub filename: String,
+    pub content: String,
+    pub truncated: bool,
+}
+
 pub struct AiQuestionOutput {
     pub chunks: Vec<String>,
     pub attachments: Vec<AiAttachmentFile>,
@@ -87,6 +98,7 @@ pub struct AiQuestionOptions<'a> {
     pub exclude_message_id: Option<Id<MessageMarker>>,
     pub referenced_msg: Option<&'a Message>,
     pub images: Vec<String>,
+    pub text_files: Vec<AttachedTextFile>,
     pub search_mode: SearchMode,
     pub stream_tx: Option<UnboundedSender<AiStreamEvent>>,
 }
@@ -97,6 +109,7 @@ impl Default for AiQuestionOptions<'_> {
             exclude_message_id: None,
             referenced_msg: None,
             images: Vec::new(),
+            text_files: Vec::new(),
             search_mode: SearchMode::Auto,
             stream_tx: None,
         }
@@ -308,6 +321,7 @@ async fn slash_ask(ctx: Arc<Context>, mut command: InteractionCommand) -> Result
     let Ask {
         question,
         image,
+        file,
         ephemeral,
         search,
     } = Ask::from_interaction(command.input_data())?;
@@ -323,13 +337,33 @@ async fn slash_ask(ctx: Arc<Context>, mut command: InteractionCommand) -> Result
 
     if image.is_some() && images.is_empty() {
         command
+            .error(&ctx, "Supported images: PNG/JPEG/WebP up to 8 MB.")
+            .await?;
+        return Ok(());
+    }
+
+    let text_files = if let Some(ref att) = file {
+        collect_text_files_from_attachments(
+            &ctx,
+            std::slice::from_ref(att),
+            max_attached_text_chars(ctx.ai().num_ctx()),
+        )
+        .await
+    } else {
+        Vec::new()
+    };
+
+    if file.is_some() && text_files.is_empty() {
+        command
             .error(
                 &ctx,
-                "Supported images: PNG/JPEG/WebP up to 8 MB.",
+                "Supported files: UTF-8 text, logs, markdown, configs, or source code up to 512 KB (use `image` for PNG/JPEG/WebP).",
             )
             .await?;
         return Ok(());
     }
+
+    let attached_file_names: Vec<String> = text_files.iter().map(|f| f.filename.clone()).collect();
 
     // Enter the fair FIFO AI queue to avoid overloading the backend
     let ticket = match ctx.ai().queue().enter().await {
@@ -374,6 +408,7 @@ async fn slash_ask(ctx: Arc<Context>, mut command: InteractionCommand) -> Result
         &question,
         AiQuestionOptions {
             images,
+            text_files,
             search_mode: search.map(Into::into).unwrap_or(SearchMode::Auto),
             stream_tx: Some(stream_tx),
             ..Default::default()
@@ -416,11 +451,16 @@ async fn slash_ask(ctx: Arc<Context>, mut command: InteractionCommand) -> Result
             let prompt_text = truncate_history_message(question.trim());
             let author_name = sanitize_llm_text(&user.name);
             let clean_q = sanitize_llm_text(&prompt_text);
-            if !clean_q.is_empty() {
+            let mut summary = String::new();
+            if !attached_file_names.is_empty() {
+                summary.push_str(&format!("[Attached file(s): {}] ", attached_file_names.join(", ")));
+            }
+            summary.push_str(&clean_q);
+            if !summary.trim().is_empty() {
                 ctx.ai()
                     .record_slash_turn(
                         sent_msg.id,
-                        format!("{author_name} (Discord ID {}): {clean_q}", user.id),
+                        format!("{author_name} (Discord ID {}): {}", user.id, summary.trim()),
                     )
                     .await;
             }
@@ -463,12 +503,18 @@ pub async fn handle_prefix_ask(
         }
     }
 
-    // Collect image attachments from both this message and any replied message
+    // Collect image and text/code attachments from both this message and any replied message
     let mut attachments: Vec<Attachment> = msg.attachments.clone();
     if let Some(replied) = msg.referenced_message.as_deref() {
         attachments.extend(replied.attachments.iter().cloned());
     }
     let images = collect_images_from_attachments(&ctx, &attachments).await;
+    let text_files = collect_text_files_from_attachments(
+        &ctx,
+        &attachments,
+        max_attached_text_chars(ctx.ai().num_ctx()),
+    )
+    .await;
 
     let is_reply_to_ai = msg
         .referenced_message
@@ -496,6 +542,8 @@ pub async fn handle_prefix_ask(
     if question.is_empty() {
         if !images.is_empty() {
             question = "What do you see in this image?".to_string();
+        } else if !text_files.is_empty() {
+            question = "Please inspect the attached file(s).".to_string();
         } else if is_reply_to_ai {
             question = "What do you think about what you said?".to_string();
         } else {
@@ -580,6 +628,7 @@ pub async fn handle_prefix_ask(
             exclude_message_id: Some(msg.id),
             referenced_msg: msg.referenced_message.as_deref(),
             images,
+            text_files,
             search_mode: SearchMode::Auto,
             stream_tx,
         },
@@ -708,6 +757,161 @@ pub(crate) async fn collect_images_from_attachments(
         }
     }
     images
+}
+
+fn max_attached_text_chars(num_ctx: u32) -> usize {
+    // Leave ample room for system prompt, chat history, tool outputs, and model generation.
+    ((num_ctx as usize).saturating_sub(6_500) * 2).clamp(4_000, 32_000)
+}
+
+fn is_supported_text_attachment(att: &Attachment) -> bool {
+    const TEXT_EXTS: &[&str] = &[
+        "txt", "md", "markdown", "log", "csv", "tsv", "json", "jsonl", "yaml", "yml", "toml",
+        "ini", "cfg", "conf", "xml", "html", "htm", "css", "scss", "js", "jsx", "mjs", "cjs",
+        "ts", "tsx", "py", "pyi", "rs", "go", "c", "h", "cpp", "hpp", "cc", "java", "kt", "cs",
+        "php", "rb", "sh", "bash", "zsh", "fish", "ps1", "sql", "diff", "patch", "env",
+        "gitignore", "dockerfile", "makefile", "lua", "zig", "nix", "svelte", "vue", "astro",
+        "prisma", "graphql", "tf", "hcl", "cmake", "hs", "ex", "exs", "erl", "clj", "scala",
+        "swift", "dart", "r", "jl", "tex", "bib", "svg", "osu",
+    ];
+
+    if att.size == 0 || att.size > MAX_TEXT_FILE_BYTES {
+        return false;
+    }
+
+    if let Some(ref ct) = att.content_type {
+        let mime = ct
+            .split(';')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+        if mime.starts_with("image/") || mime.starts_with("video/") || mime.starts_with("audio/") {
+            return false;
+        }
+        if mime.starts_with("text/")
+            || matches!(
+                mime.as_str(),
+                "application/json"
+                    | "application/xml"
+                    | "application/yaml"
+                    | "application/x-yaml"
+                    | "application/toml"
+                    | "application/javascript"
+                    | "application/x-javascript"
+                    | "application/typescript"
+                    | "application/x-sh"
+                    | "application/sql"
+                    | "application/xhtml+xml"
+            )
+        {
+            return true;
+        }
+        // Only fall back to filename extensions for generic binary/unspecified MIME types.
+        if mime != "application/octet-stream" && !mime.is_empty() {
+            return false;
+        }
+    }
+
+    let name = att.filename.trim();
+    if let Some((_, ext)) = name.rsplit_once('.') {
+        let lower = ext.to_ascii_lowercase();
+        TEXT_EXTS.contains(&lower.as_str())
+    } else {
+        matches!(
+            name.to_ascii_lowercase().as_str(),
+            "makefile" | "dockerfile" | "readme" | "license" | "changelog"
+        )
+    }
+}
+
+fn is_likely_plain_text(bytes: &[u8]) -> bool {
+    if bytes.is_empty() || bytes.contains(&0) {
+        return false;
+    }
+    let text = String::from_utf8_lossy(bytes);
+    let total = text.chars().count();
+    if total == 0 {
+        return false;
+    }
+    let bad_controls = text
+        .chars()
+        .filter(|&c| c.is_control() && !matches!(c, '\n' | '\r' | '\t'))
+        .count();
+    bad_controls * 100 <= total
+}
+
+pub(crate) async fn collect_text_files_from_attachments(
+    ctx: &Context,
+    attachments: &[Attachment],
+    max_total_chars: usize,
+) -> Vec<AttachedTextFile> {
+    let mut files = Vec::new();
+    let mut used_chars = 0usize;
+
+    for att in attachments {
+        if files.len() >= MAX_TEXT_FILES_PER_REQUEST || used_chars >= max_total_chars {
+            break;
+        }
+        if !is_supported_text_attachment(att) {
+            continue;
+        }
+        let Ok(bytes) = ctx.client().get_discord_attachment(att).await else {
+            tracing::debug!(filename = %att.filename, "failed to download text attachment for AI");
+            continue;
+        };
+        if (bytes.len() as u64) > MAX_TEXT_FILE_BYTES || !is_likely_plain_text(&bytes) {
+            continue;
+        }
+
+        let decoded = sanitize_llm_text(&String::from_utf8_lossy(&bytes));
+        let remaining_budget = max_total_chars.saturating_sub(used_chars);
+        let total_chars = decoded.chars().count();
+        let (content, truncated) = if total_chars > remaining_budget {
+            (truncate_chars(&decoded, remaining_budget), true)
+        } else {
+            (decoded, false)
+        };
+        used_chars += content.chars().count();
+
+        let clean_name = sanitize_llm_text(att.filename.trim());
+        files.push(AttachedTextFile {
+            filename: if clean_name.is_empty() {
+                "attachment.txt".to_owned()
+            } else {
+                clean_name
+            },
+            content,
+            truncated,
+        });
+    }
+
+    files
+}
+
+fn format_attached_files_section(files: &[AttachedTextFile]) -> String {
+    if files.is_empty() {
+        return String::new();
+    }
+    let mut out = String::new();
+    for file in files {
+        if !out.is_empty() {
+            out.push_str("\n\n");
+        }
+        let fence = if file.content.contains("```") {
+            "~~~~"
+        } else {
+            "```"
+        };
+        out.push_str(&format!(
+            "--- Attached File: `{}` ---\n{fence}\n{}\n{fence}",
+            file.filename, file.content
+        ));
+        if file.truncated {
+            out.push_str("\n[Note: file content was truncated to fit the context window]");
+        }
+    }
+    out
 }
 
 /// Format a Discord embed concisely for LLM consumption (score cards, rich links, etc.).
@@ -841,9 +1045,14 @@ pub async fn execute_ai_question_with_options(
         );
     }
 
-    let current_user_msg = format!(
-        "{clean_username} (Discord ID {user_id}): {clean_question}"
-    );
+    let files_section = format_attached_files_section(&opts.text_files);
+    let current_user_msg = if files_section.is_empty() {
+        format!("{clean_username} (Discord ID {user_id}): {clean_question}")
+    } else {
+        format!(
+            "{clean_username} (Discord ID {user_id}): {clean_question}\n\n{files_section}"
+        )
+    };
 
     if let Some(ref tx) = opts.stream_tx {
         let _ = tx.send(AiStreamEvent::Status("📚 Reading channel context...".into()));
@@ -1757,5 +1966,60 @@ mod tests {
         );
         assert_eq!(converted[3].role, "assistant");
         assert_eq!(converted[3].content, "She picked cyan.");
+    }
+
+    #[test]
+    fn test_text_attachment_detection_and_formatting() {
+        let make_att = |filename: &str, size: u64, content_type: Option<&str>| {
+            serde_json::from_value::<Attachment>(serde_json::json!({
+                "id": "12345",
+                "filename": filename,
+                "size": size,
+                "url": "https://cdn.discordapp.com/attachments/1/2/test",
+                "proxy_url": "https://media.discordapp.net/attachments/1/2/test",
+                "content_type": content_type,
+            }))
+            .expect("valid attachment")
+        };
+
+        assert!(is_supported_text_attachment(&make_att("main.rs", 2048, None)));
+        assert!(is_supported_text_attachment(&make_att(
+            "notes.unknownext",
+            512,
+            Some("text/plain; charset=utf-8")
+        )));
+        assert!(is_supported_text_attachment(&make_att(
+            "config.toml",
+            512,
+            Some("application/octet-stream")
+        )));
+        assert!(!is_supported_text_attachment(&make_att(
+            "photo.png",
+            1024,
+            Some("image/png")
+        )));
+        assert!(!is_supported_text_attachment(&make_att(
+            "archive.zip",
+            1024,
+            Some("application/zip")
+        )));
+        assert!(!is_supported_text_attachment(&make_att(
+            "huge.txt",
+            MAX_TEXT_FILE_BYTES + 1,
+            Some("text/plain")
+        )));
+
+        assert!(is_likely_plain_text(b"fn main() {\n\tprintln!(\"hi\");\n}\n"));
+        assert!(!is_likely_plain_text(b"\x7fELF\x00\x01\x02"));
+
+        let section = format_attached_files_section(&[AttachedTextFile {
+            filename: "snippet.md".to_owned(),
+            content: "```rust\nlet x = 1;\n```".to_owned(),
+            truncated: true,
+        }]);
+        assert!(section.contains("--- Attached File: `snippet.md` ---"));
+        assert!(section.contains("~~~~\n```rust"));
+        assert!(section.contains("truncated to fit"));
+        assert!(max_attached_text_chars(24_576) >= 16_000);
     }
 }

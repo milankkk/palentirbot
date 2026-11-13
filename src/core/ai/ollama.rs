@@ -18,8 +18,8 @@ pub enum AiStreamEvent {
 }
 
 pub const DEFAULT_MODEL: &str = "huihui_ai/qwen3.5-abliterated:9b";
-/// Kept small enough that weights + KV cache fit in 8 GB of VRAM (no CPU spill / reloads).
-pub const DEFAULT_NUM_CTX: u32 = 12_288;
+/// Large enough for multi-turn chat history, uploaded text files, and tool calls while fitting in 8 GB VRAM on Q8_0 KV cache.
+pub const DEFAULT_NUM_CTX: u32 = 24_576;
 /// How long Ollama keeps the model resident after a request.
 pub const DEFAULT_KEEP_ALIVE: &str = "30m";
 pub const DEFAULT_REPEAT_PENALTY: f32 = 1.05;
