@@ -19,8 +19,8 @@ use twilight_model::{
 use crate::{
     core::{
         ai::{
-            base64_encode, sanitize_llm_text, text_mentions_osu, AiAttachmentFile, AiMessage,
-            AiPersonaMode, AiStreamEvent, SearchMode,
+            base64_encode, describe_ai_error, sanitize_llm_text, text_mentions_osu,
+            AiAttachmentFile, AiMessage, AiPersonaMode, AiStreamEvent, SearchMode,
         },
         Context,
     },
@@ -392,8 +392,7 @@ async fn slash_ask(ctx: Arc<Context>, mut command: InteractionCommand) -> Result
                 "AI request failed"
             );
 
-            let builder = MessageBuilder::new()
-                .content("Something went wrong while asking the AI. Please try again later.");
+            let builder = MessageBuilder::new().content(describe_ai_error(&err));
 
             command.update(&ctx, &builder).await?;
 
@@ -543,6 +542,13 @@ pub async fn handle_prefix_ask(
     // Wait until it is this request's turn
     let _permit = ticket.wait().await;
 
+    tracing::info!(
+        user = %msg.author.name,
+        user_id = %msg.author.id,
+        channel_id = %msg.channel_id,
+        "Handling prefix AI request"
+    );
+
     let _ = ctx.http.create_typing_trigger(msg.channel_id).await;
 
     let (stream_tx, updater_handle) = placeholder
@@ -622,7 +628,7 @@ pub async fn handle_prefix_ask(
         }
         Err(err) => {
             tracing::error!(?err, user_id = %msg.author.id, "prefix AI request failed");
-            let error_content = "Something went wrong while asking the AI. Please try again later.";
+            let error_content = describe_ai_error(&err);
             if let Some(ref ph) = placeholder {
                 let _ = ph
                     .update(&ctx, &MessageBuilder::new().content(error_content))

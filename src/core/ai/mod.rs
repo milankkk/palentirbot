@@ -14,8 +14,8 @@ mod queue;
 pub mod search;
 
 pub use ollama::{
-    normalize_num_predict, AiAttachmentFile, AiPersonaMode, AiReply, AiStreamEvent, AiThinkDepth,
-    LastGenerationStats, OllamaClient, RuntimeAiConfig,
+    describe_ai_error, normalize_num_predict, AiAttachmentFile, AiPersonaMode, AiReply,
+    AiStreamEvent, AiThinkDepth, LastGenerationStats, OllamaClient, RuntimeAiConfig,
 };
 pub use osu_tools::text_mentions_osu;
 pub use queue::{AiQueue, DEFAULT_MAX_AI_QUEUE_SIZE};
@@ -172,9 +172,43 @@ impl AiClient {
             .unwrap_or(DEFAULT_MAX_AI_QUEUE_SIZE);
 
         let cutoffs = Self::load_cutoffs_from_disk().await;
+        let ollama = OllamaClient::new();
+        let configured_model = ollama.snapshot_config().model;
+
+        match ollama.list_models().await {
+            Ok(models) => {
+                let model_installed = models.iter().any(|m| {
+                    m == &configured_model
+                        || m.strip_suffix(":latest") == Some(configured_model.as_str())
+                });
+                if model_installed {
+                    tracing::info!(
+                        url = %ollama.url(),
+                        model = %configured_model,
+                        installed_models = models.len(),
+                        "Ollama AI backend reachable"
+                    );
+                } else {
+                    tracing::warn!(
+                        url = %ollama.url(),
+                        model = %configured_model,
+                        installed_models = models.len(),
+                        "Ollama AI backend reachable, but configured model was not found in /api/tags"
+                    );
+                }
+            }
+            Err(err) => {
+                tracing::warn!(
+                    ?err,
+                    url = %ollama.url(),
+                    model = %configured_model,
+                    "Ollama AI backend unreachable on startup; AI commands will retry when invoked"
+                );
+            }
+        }
 
         Self {
-            ollama: OllamaClient::new(),
+            ollama,
             queue: AiQueue::new(max_queue_size),
             cached_prompt: RwLock::new(prompt),
             context_cutoffs: RwLock::new(cutoffs),

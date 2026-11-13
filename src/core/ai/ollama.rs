@@ -33,6 +33,7 @@ pub const DEFAULT_NUM_PREDICT: i32 = 6_144;
 pub const DEFAULT_TOP_K: u32 = 20;
 pub const DEFAULT_MIN_P: f32 = 0.0;
 const DEFAULT_TIMEOUT_SECS: u64 = 300;
+const FIRST_BYTE_STALL_SECS: u64 = 90;
 const AI_RUNTIME_FILE_PATH: &str = "data/ai_runtime.json";
 
 fn default_num_predict() -> i32 {
@@ -138,6 +139,7 @@ pub struct LastGenerationStats {
 pub struct OllamaClient {
     client: Client,
     url: String,
+    timeout_secs: u64,
     repeat_penalty: f32,
     repeat_last_n: i32,
     presence_penalty: f32,
@@ -385,8 +387,14 @@ struct OllamaFunctionCall {
 
 impl OllamaClient {
     pub fn new() -> Self {
-        let url =
+        let raw_url =
             std::env::var("OLLAMA_URL").unwrap_or_else(|_| "http://127.0.0.1:11434".to_owned());
+        let url = raw_url.trim().trim_end_matches('/').to_owned();
+        let url = if url.is_empty() {
+            "http://127.0.0.1:11434".to_owned()
+        } else {
+            url
+        };
 
         let model =
             std::env::var("OLLAMA_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_owned());
@@ -453,11 +461,15 @@ impl OllamaClient {
         let timeout_secs = std::env::var("OLLAMA_TIMEOUT_SECS")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(DEFAULT_TIMEOUT_SECS);
+            .unwrap_or(DEFAULT_TIMEOUT_SECS)
+            .max(15);
 
+        // Intentionally omit a global `.timeout(...)` on the reqwest Client so
+        // actively streaming multi-minute thinking/tool responses are never
+        // aborted mid-stream; instead, `send_chat_request` enforces explicit
+        // pre-response stall and per-chunk idle timeouts.
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(timeout_secs))
             .build()
             .expect("failed to build AI HTTP client");
 
@@ -489,6 +501,7 @@ impl OllamaClient {
         Self {
             client,
             url,
+            timeout_secs,
             repeat_penalty,
             repeat_last_n,
             presence_penalty,
@@ -571,6 +584,40 @@ impl OllamaClient {
         Ok(snapshot)
     }
 
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
+    /// Ask Ollama to immediately unload an active model runner (`keep_alive: 0`).
+    /// This clears wedged runner state without requiring service-level privileges.
+    pub async fn unload_model(&self, model: &str) -> Result<()> {
+        #[derive(Serialize)]
+        struct UnloadRequest<'a> {
+            model: &'a str,
+            keep_alive: u64,
+        }
+
+        let resp = self
+            .client
+            .post(format!("{}/api/generate", self.url))
+            .timeout(Duration::from_secs(5))
+            .json(&UnloadRequest {
+                model,
+                keep_alive: 0,
+            })
+            .send()
+            .await
+            .with_context(|| format!("failed to unload Ollama model `{model}` at {}", self.url))?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            eyre::bail!("Ollama unload for `{model}` returned HTTP {status}: {body}");
+        }
+
+        Ok(())
+    }
+
     /// List locally installed Ollama models from `/api/tags`.
     pub async fn list_models(&self) -> Result<Vec<String>> {
         #[derive(Deserialize)]
@@ -585,11 +632,11 @@ impl OllamaClient {
 
         let resp = self
             .client
-            .get(format!("{}/api/tags", self.url.trim_end_matches('/')))
+            .get(format!("{}/api/tags", self.url))
             .timeout(Duration::from_secs(5))
             .send()
             .await
-            .context("failed to query Ollama /api/tags")?;
+            .with_context(|| format!("Ollama backend unreachable at {} (/api/tags)", self.url))?;
 
         let status = resp.status();
         if !status.is_success() {
@@ -1199,6 +1246,138 @@ impl OllamaClient {
             || (lower.contains("not support") && lower.contains("tools"))
     }
 
+    async fn post_chat_headers(
+        &self,
+        request: &OllamaRequest<'_>,
+        timeout: Duration,
+    ) -> std::result::Result<reqwest::Response, SendChatFailure> {
+        let endpoint = format!("{}/api/chat", self.url);
+        let send_fut = self.client.post(&endpoint).json(request).send();
+        match tokio::time::timeout(timeout, send_fut).await {
+            Ok(Ok(resp)) => Ok(resp),
+            Ok(Err(err)) if err.is_connect() => Err(SendChatFailure::Connect(
+                eyre::Report::new(err)
+                    .wrap_err(format!("Ollama backend unreachable at {}", self.url)),
+            )),
+            Ok(Err(err)) if err.is_timeout() => Err(SendChatFailure::StallBeforeFirstByte(
+                eyre::Report::new(err).wrap_err(format!(
+                    "Ollama timed out waiting to start response at {}",
+                    self.url
+                )),
+            )),
+            Ok(Err(err)) => Err(SendChatFailure::Fatal(
+                eyre::Report::new(err).wrap_err("failed to contact Ollama"),
+            )),
+            Err(_) => Err(SendChatFailure::StallBeforeFirstByte(eyre::eyre!(
+                "Ollama timed out after {}s before starting response at {}",
+                timeout.as_secs(),
+                self.url
+            ))),
+        }
+    }
+
+    async fn read_streaming_response(
+        mut response: reqwest::Response,
+        first_chunk_timeout: Duration,
+        idle_chunk_timeout: Duration,
+        url: &str,
+        stream_tx: Option<&UnboundedSender<AiStreamEvent>>,
+    ) -> std::result::Result<OllamaResponse, SendChatFailure> {
+        let mut acc = OllamaResponse::default();
+        let mut buf: Vec<u8> = Vec::new();
+        let mut received_any_chunk = false;
+
+        loop {
+            let chunk_timeout = if received_any_chunk {
+                idle_chunk_timeout
+            } else {
+                first_chunk_timeout
+            };
+
+            let chunk = match tokio::time::timeout(chunk_timeout, response.chunk()).await {
+                Ok(Ok(Some(chunk))) => chunk,
+                Ok(Ok(None)) => break,
+                Ok(Err(err)) if !received_any_chunk && err.is_timeout() => {
+                    return Err(SendChatFailure::StallBeforeFirstByte(
+                        eyre::Report::new(err).wrap_err(format!(
+                            "Ollama timed out before streaming any token at {url}"
+                        )),
+                    ));
+                }
+                Ok(Err(err)) => {
+                    return Err(SendChatFailure::Fatal(
+                        eyre::Report::new(err).wrap_err("failed while streaming Ollama response"),
+                    ));
+                }
+                Err(_) if !received_any_chunk => {
+                    return Err(SendChatFailure::StallBeforeFirstByte(eyre::eyre!(
+                        "Ollama timed out after {}s before streaming any token at {url}",
+                        first_chunk_timeout.as_secs()
+                    )));
+                }
+                Err(_) => {
+                    return Err(SendChatFailure::Fatal(eyre::eyre!(
+                        "Ollama stream timed out (no data received for {}s)",
+                        idle_chunk_timeout.as_secs()
+                    )));
+                }
+            };
+
+            received_any_chunk = true;
+            buf.extend_from_slice(&chunk);
+            while let Some(nl) = buf.iter().position(|&b| b == b'\n') {
+                let line: Vec<u8> = buf.drain(..=nl).collect();
+                Self::apply_ndjson_line(&line, &mut acc, stream_tx);
+            }
+        }
+        if !buf.is_empty() {
+            Self::apply_ndjson_line(&buf, &mut acc, stream_tx);
+        }
+
+        Ok(acc)
+    }
+
+    async fn read_buffered_response(
+        response: reqwest::Response,
+        timeout: Duration,
+    ) -> Result<OllamaResponse> {
+        let raw_bytes = tokio::time::timeout(timeout, response.bytes())
+            .await
+            .map_err(|_| {
+                eyre::eyre!(
+                    "Ollama timed out after {}s reading response body",
+                    timeout.as_secs()
+                )
+            })?
+            .context("failed to read Ollama response bytes")?;
+        let body_str = String::from_utf8_lossy(&raw_bytes);
+        serde_json::from_str(&body_str).context("failed to deserialize Ollama response")
+    }
+
+    async fn reset_stalled_runner(
+        &self,
+        model: &str,
+        reason: &eyre::Report,
+        phase: &str,
+        stream_tx: Option<&UnboundedSender<AiStreamEvent>>,
+    ) {
+        tracing::warn!(
+            err = ?reason,
+            %model,
+            url = %self.url,
+            %phase,
+            "Ollama stalled before first token; unloading model runner and retrying once"
+        );
+        Self::emit_status(
+            stream_tx,
+            "🔄 Ollama stalled — resetting model runner and retrying...",
+        );
+        if let Err(unload_err) = self.unload_model(model).await {
+            tracing::debug!(?unload_err, %model, "failed to unload stalled Ollama model runner");
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
     async fn send_chat_request(
         &self,
         messages: &[AiMessage],
@@ -1220,8 +1399,17 @@ impl OllamaClient {
             .read()
             .expect("unsupported_tools RwLock poisoned")
             .contains(&cfg.model);
+        let mut retried_connect = false;
+        let mut retried_after_reset = false;
+        let idle_timeout = Duration::from_secs(self.timeout_secs.max(1));
 
-        let response = loop {
+        loop {
+            let start_timeout = if streaming && !retried_after_reset {
+                Duration::from_secs(self.timeout_secs.clamp(1, FIRST_BYTE_STALL_SECS))
+            } else {
+                idle_timeout
+            };
+
             let request = OllamaRequest {
                 model: &cfg.model,
                 messages,
@@ -1243,17 +1431,54 @@ impl OllamaClient {
                 },
             };
 
-            let resp = self
-                .client
-                .post(format!("{}/api/chat", self.url.trim_end_matches('/')))
-                .json(&request)
-                .send()
-                .await
-                .context("failed to contact Ollama")?;
+            let resp = match self.post_chat_headers(&request, start_timeout).await {
+                Ok(resp) => resp,
+                Err(SendChatFailure::Connect(report)) if !retried_connect => {
+                    retried_connect = true;
+                    tracing::warn!(err = ?report, url = %self.url, "Ollama connection failed; retrying once");
+                    tokio::time::sleep(Duration::from_millis(750)).await;
+                    continue;
+                }
+                Err(SendChatFailure::StallBeforeFirstByte(report)) if !retried_after_reset => {
+                    retried_after_reset = true;
+                    self.reset_stalled_runner(&cfg.model, &report, "headers", stream_tx)
+                        .await;
+                    continue;
+                }
+                Err(
+                    SendChatFailure::Connect(report)
+                    | SendChatFailure::StallBeforeFirstByte(report)
+                    | SendChatFailure::Fatal(report),
+                ) => return Err(report),
+            };
 
             let status = resp.status();
             if status.is_success() {
-                break resp;
+                if !streaming {
+                    return Self::read_buffered_response(resp, idle_timeout).await;
+                }
+                match Self::read_streaming_response(
+                    resp,
+                    start_timeout,
+                    idle_timeout,
+                    &self.url,
+                    stream_tx,
+                )
+                .await
+                {
+                    Ok(acc) => return Ok(acc),
+                    Err(SendChatFailure::StallBeforeFirstByte(report)) if !retried_after_reset => {
+                        retried_after_reset = true;
+                        self.reset_stalled_runner(&cfg.model, &report, "first_chunk", stream_tx)
+                            .await;
+                        continue;
+                    }
+                    Err(
+                        SendChatFailure::Connect(report)
+                        | SendChatFailure::StallBeforeFirstByte(report)
+                        | SendChatFailure::Fatal(report),
+                    ) => return Err(report),
+                }
             }
 
             let error_bytes = resp.bytes().await.unwrap_or_default();
@@ -1287,38 +1512,33 @@ impl OllamaClient {
             }
 
             eyre::bail!("Ollama returned HTTP {status}: {error_text}");
-        };
-
-        if !streaming {
-            let raw_bytes = response
-                .bytes()
-                .await
-                .context("failed to read Ollama response bytes")?;
-            let body_str = String::from_utf8_lossy(&raw_bytes);
-            return serde_json::from_str(&body_str)
-                .context("failed to deserialize Ollama response");
         }
+    }
+}
 
-        let mut acc = OllamaResponse::default();
-        let mut buf: Vec<u8> = Vec::new();
-        let mut response = response;
+enum SendChatFailure {
+    Connect(eyre::Report),
+    StallBeforeFirstByte(eyre::Report),
+    Fatal(eyre::Report),
+}
 
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .context("failed while streaming Ollama response")?
-        {
-            buf.extend_from_slice(&chunk);
-            while let Some(nl) = buf.iter().position(|&b| b == b'\n') {
-                let line: Vec<u8> = buf.drain(..=nl).collect();
-                Self::apply_ndjson_line(&line, &mut acc, stream_tx);
-            }
-        }
-        if !buf.is_empty() {
-            Self::apply_ndjson_line(&buf, &mut acc, stream_tx);
-        }
-
-        Ok(acc)
+/// Map an internal AI backend error chain to a safe, user-facing Discord status message.
+pub fn describe_ai_error(err: &eyre::Report) -> &'static str {
+    let chain = format!("{err:#}").to_ascii_lowercase();
+    if chain.contains("unreachable")
+        || chain.contains("connection refused")
+        || chain.contains("error sending request")
+        || chain.contains("dns error")
+        || chain.contains("failed to connect")
+    {
+        "⚠️ Could not reach the Ollama AI backend right now (connection failed). Make sure Ollama is running and try again."
+    } else if chain.contains("timed out") || chain.contains("timeout") {
+        "⚠️ The Ollama AI backend timed out before completing a response. Please try again in a moment."
+    } else if chain.contains("http 404") || (chain.contains("model") && chain.contains("not found"))
+    {
+        "⚠️ The configured AI model could not be found in Ollama."
+    } else {
+        "Something went wrong while asking the AI. Please try again later."
     }
 }
 
@@ -1466,5 +1686,187 @@ mod tests {
             OllamaClient::sanitize_attachment_filename("", "txt"),
             "attachment.txt"
         );
+    }
+
+    fn test_client(url: String, timeout_secs: u64) -> OllamaClient {
+        OllamaClient {
+            client: Client::builder()
+                .connect_timeout(Duration::from_secs(2))
+                .build()
+                .expect("client"),
+            url,
+            timeout_secs,
+            repeat_penalty: DEFAULT_REPEAT_PENALTY,
+            repeat_last_n: DEFAULT_REPEAT_LAST_N,
+            presence_penalty: DEFAULT_PRESENCE_PENALTY,
+            frequency_penalty: DEFAULT_FREQUENCY_PENALTY,
+            top_p: DEFAULT_TOP_P,
+            top_k: DEFAULT_TOP_K,
+            min_p: DEFAULT_MIN_P,
+            keep_alive: DEFAULT_KEEP_ALIVE.to_owned(),
+            search: super::super::search::WebSearchClient::new(),
+            runtime: std::sync::RwLock::new(RuntimeAiConfig {
+                model: "test-model".to_owned(),
+                think_enabled: false,
+                think_depth: AiThinkDepth::Low,
+                temperature: 0.6,
+                num_ctx: 4096,
+                num_predict: 256,
+                channel_modes: HashMap::new(),
+            }),
+            runtime_save_lock: tokio::sync::Mutex::new(()),
+            unsupported_thinking_models: std::sync::RwLock::new(HashSet::new()),
+            unsupported_tools_models: std::sync::RwLock::new(HashSet::new()),
+            last_stats: tokio::sync::RwLock::new(HashMap::new()),
+        }
+    }
+
+    fn read_http_request_head(stream: &mut std::net::TcpStream) -> String {
+        use std::io::Read;
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+        let mut buf = [0_u8; 4096];
+        let mut acc = Vec::new();
+        loop {
+            match stream.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    acc.extend_from_slice(&buf[..n]);
+                    if acc.windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+            }
+        }
+        String::from_utf8_lossy(&acc).into_owned()
+    }
+
+    #[test]
+    fn test_describe_ai_error_categories() {
+        let unreachable = eyre::eyre!("Ollama backend unreachable at http://127.0.0.1:11434");
+        assert!(describe_ai_error(&unreachable).contains("connection failed"));
+
+        let timed_out = eyre::eyre!("Ollama stream timed out (no data received for 300s)");
+        assert!(describe_ai_error(&timed_out).contains("timed out"));
+
+        let missing = eyre::eyre!("Ollama returned HTTP 404 Not Found: model 'foo' not found");
+        assert!(describe_ai_error(&missing).contains("could not be found"));
+
+        let unknown = eyre::eyre!("unexpected parse failure");
+        assert!(describe_ai_error(&unknown).contains("Something went wrong"));
+    }
+
+    #[tokio::test]
+    async fn test_send_chat_request_recovers_after_pre_first_byte_stall() {
+        use std::io::Write;
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        let unloaded = Arc::new(AtomicUsize::new(0));
+        let unloaded_clone = Arc::clone(&unloaded);
+
+        let handle = std::thread::spawn(move || {
+            let mut chat_calls = 0usize;
+            for incoming in listener.incoming().take(3) {
+                let mut stream = incoming.expect("accept");
+                let head = read_http_request_head(&mut stream);
+                if head.starts_with("POST /api/generate ") {
+                    unloaded_clone.fetch_add(1, Ordering::SeqCst);
+                    let body = r#"{"done":true,"done_reason":"unload"}"#;
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                } else if head.starts_with("POST /api/chat ") {
+                    chat_calls += 1;
+                    if chat_calls == 1 {
+                        // Simulate wedged llama-server: hold socket open silently past 1s stall timeout
+                        std::thread::sleep(Duration::from_millis(1600));
+                    } else {
+                        let line = concat!(
+                            r#"{"message":{"role":"assistant","content":"recovered!"},"done":true}"#,
+                            "\n"
+                        );
+                        let resp = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            line.len(),
+                            line
+                        );
+                        let _ = stream.write_all(resp.as_bytes());
+                        break;
+                    }
+                }
+            }
+        });
+
+        let client = test_client(format!("http://{addr}"), 1);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let res = client
+            .send_chat_request(&[AiMessage::user("hi")], false, None, 64, Some(&tx))
+            .await
+            .expect("should recover via unload and retry");
+
+        assert_eq!(res.message.content, "recovered!");
+        assert_eq!(unloaded.load(Ordering::SeqCst), 1);
+
+        let mut saw_retry_status = false;
+        while let Ok(ev) = rx.try_recv() {
+            if let AiStreamEvent::Status(s) = ev {
+                if s.contains("resetting model runner") {
+                    saw_retry_status = true;
+                }
+            }
+        }
+        assert!(saw_retry_status, "expected runner reset status event");
+        let _ = handle.join();
+    }
+
+    #[tokio::test]
+    async fn test_send_chat_request_allows_active_stream_longer_than_idle_timeout() {
+        use std::io::Write;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let _ = read_http_request_head(&mut stream);
+            let _ = stream.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+            );
+
+            let chunks = [
+                "{\"message\":{\"role\":\"assistant\",\"content\":\"one \"},\"done\":false}\n",
+                "{\"message\":{\"role\":\"assistant\",\"content\":\"two \"},\"done\":false}\n",
+                "{\"message\":{\"role\":\"assistant\",\"content\":\"three\"},\"done\":true}\n",
+            ];
+            for (idx, body) in chunks.iter().enumerate() {
+                if idx > 0 {
+                    // 3 chunks spaced 450ms apart after headers => total > 1s idle timeout
+                    std::thread::sleep(Duration::from_millis(450));
+                }
+                let frame = format!("{:x}\r\n{}\r\n", body.len(), body);
+                if stream.write_all(frame.as_bytes()).is_err() {
+                    return;
+                }
+                let _ = stream.flush();
+            }
+            let _ = stream.write_all(b"0\r\n\r\n");
+        });
+
+        let client = test_client(format!("http://{addr}"), 1);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let res = client
+            .send_chat_request(&[AiMessage::user("hi")], false, None, 64, Some(&tx))
+            .await
+            .expect("active multi-chunk stream longer than idle timeout should complete");
+
+        assert_eq!(res.message.content, "one two three");
+        let _ = handle.join();
     }
 }
