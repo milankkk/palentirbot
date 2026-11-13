@@ -1041,7 +1041,7 @@ pub async fn execute_ai_question_with_options(
     );
     if opts.search_mode != SearchMode::Off {
         system_prompt.push_str(
-            "\nVISUAL CONTEXT (IMAGES): If a picture, diagram, meme, or reference image would genuinely add helpful context or the user asks for pictures, call `image_search` (or pick a verified image URL returned by `browse_url`) and call `attach_image` so the image embeds directly with your message. NEVER fabricate image URLs.",
+            "\nVISUAL CONTEXT (IMAGES): Whenever the user asks for a picture, photo, meme, GIF, wallpaper, or diagram — or when a visual reference genuinely helps — call `image_search` FIRST. `image_search` automatically verifies and attaches a working image upload directly to your Discord reply (and only use `attach_image` for an additional verified image URL returned by `browse_url`). NEVER fabricate or guess image URLs, and NEVER paste raw image URLs or Markdown `![alt](url)` links in your text reply.",
         );
     }
 

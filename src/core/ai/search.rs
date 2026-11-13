@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     net::{IpAddr, SocketAddr},
     time::Duration,
 };
@@ -19,6 +20,15 @@ pub struct ImageSearchItem {
     pub title: String,
     pub image_url: String,
     pub source_url: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct VerifiedImageResult {
+    pub title: String,
+    pub image_url: String,
+    pub source_url: String,
+    pub filename: String,
+    pub bytes: Vec<u8>,
 }
 
 #[derive(Deserialize, Debug, Clone, Default)]
@@ -286,6 +296,9 @@ impl WebSearchClient {
             return Ok(Vec::new());
         }
 
+        let mut combined = Vec::new();
+        let mut seen = HashSet::new();
+
         if let Some(base_url) = self.searxng_url.as_deref() {
             let url = format!("{base_url}/search");
             if let Ok(resp) = self
@@ -302,21 +315,17 @@ impl WebSearchClient {
             {
                 if resp.status().is_success() {
                     if let Ok(parsed) = resp.json::<SearxImageResponse>().await {
-                        let items: Vec<ImageSearchItem> = parsed
-                            .results
-                            .into_iter()
-                            .filter_map(|r| {
-                                let img = r.img_src.filter(|u| is_http_url(u))?;
-                                Some(ImageSearchItem {
-                                    title: r.title.unwrap_or_else(|| "Image".to_owned()),
-                                    image_url: img,
-                                    source_url: r.url.unwrap_or_default(),
-                                })
-                            })
-                            .take(6)
-                            .collect();
-                        if !items.is_empty() {
-                            return Ok(items);
+                        for r in parsed.results {
+                            if let Some(img) = r.img_src.filter(|u| is_usable_candidate_image_url(u))
+                            {
+                                if seen.insert(img.clone()) {
+                                    combined.push(ImageSearchItem {
+                                        title: r.title.unwrap_or_else(|| "Image".to_owned()),
+                                        image_url: img,
+                                        source_url: r.url.unwrap_or_default(),
+                                    });
+                                }
+                            }
                         }
                     }
                 }
@@ -324,12 +333,57 @@ impl WebSearchClient {
         }
 
         if let Ok(bing) = self.search_bing_images(clean_query).await {
-            if !bing.is_empty() {
-                return Ok(bing);
+            for item in bing {
+                if seen.insert(item.image_url.clone()) {
+                    combined.push(item);
+                }
             }
         }
 
-        self.search_wikimedia_images(clean_query).await
+        if combined.len() < 4 {
+            if let Ok(wiki) = self.search_wikimedia_images(clean_query).await {
+                for item in wiki {
+                    if seen.insert(item.image_url.clone()) {
+                        combined.push(item);
+                    }
+                }
+            } else if combined.is_empty() {
+                return self.search_wikimedia_images(clean_query).await;
+            }
+        }
+
+        combined.truncate(10);
+        Ok(combined)
+    }
+
+    /// Search for images and download-verify candidates (HTTP 200 + raster magic bytes + >= 1 KB)
+    /// so broken/hotlink-blocked URLs are discarded before the model sees them.
+    pub async fn search_verified_images(
+        &self,
+        query: &str,
+        max_bytes: usize,
+        max_verified: usize,
+    ) -> Result<Vec<VerifiedImageResult>> {
+        let candidates = self.search_images(query).await?;
+        let mut verified = Vec::new();
+        for item in candidates.into_iter().take(8) {
+            match self.download_image(&item.image_url, max_bytes).await {
+                Ok((filename, bytes)) if bytes.len() >= 1024 => {
+                    verified.push(VerifiedImageResult {
+                        title: item.title,
+                        image_url: item.image_url,
+                        source_url: item.source_url,
+                        filename,
+                        bytes,
+                    });
+                    if verified.len() >= max_verified {
+                        break;
+                    }
+                }
+                _ => continue,
+            }
+        }
+        Ok(verified)
     }
 
     async fn search_bing_images(&self, query: &str) -> Result<Vec<ImageSearchItem>> {
@@ -441,6 +495,19 @@ fn is_http_url(raw: &str) -> bool {
     raw.starts_with("https://") || raw.starts_with("http://")
 }
 
+fn is_usable_candidate_image_url(raw: &str) -> bool {
+    if !is_http_url(raw) {
+        return false;
+    }
+    let lower = raw.to_ascii_lowercase();
+    !lower.contains(".svg")
+        && !lower.contains("tiktok.com/api/img")
+        && !lower.contains("lookaside.fbsbx.com")
+        && !lower.contains("bing.com/th/id/ogc")
+        && !lower.contains("1x1")
+        && !lower.contains("pixel.")
+}
+
 pub fn detect_image_extension(bytes: &[u8]) -> Option<&'static str> {
     if bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]) {
         Some("png")
@@ -470,29 +537,6 @@ pub fn derive_image_filename(url: &reqwest::Url, ext: &str) -> String {
         clean = "image".to_owned();
     }
     format!("{clean}.{ext}")
-}
-
-pub fn format_image_search_results(query: &str, results: &[ImageSearchItem], max_items: usize) -> String {
-    if results.is_empty() {
-        return format!("Image search `{query}` returned no results.\n");
-    }
-    let mut out = format!("Image search results for `{query}`:\n");
-    for (idx, item) in results.iter().take(max_items).enumerate() {
-        let source_note = if item.source_url.is_empty() {
-            String::new()
-        } else {
-            format!(" (source: {})", item.source_url)
-        };
-        out.push_str(&format!(
-            "{}. {} — {}{}\n",
-            idx + 1,
-            item.title,
-            item.image_url,
-            source_note
-        ));
-    }
-    out.push_str("Call `attach_image` with a direct image URL above to attach a picture to your Discord message.\n");
-    out
 }
 
 fn take_bounded_utf8(s: &str, max_bytes: usize) -> &str {
@@ -526,16 +570,13 @@ pub fn parse_bing_image_results(html: &str) -> Vec<ImageSearchItem> {
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| "Image".to_owned());
 
-        if is_http_url(&raw_url)
-            && !raw_url.to_ascii_lowercase().contains(".svg")
-            && seen.insert(raw_url.clone())
-        {
+        if is_usable_candidate_image_url(&raw_url) && seen.insert(raw_url.clone()) {
             items.push(ImageSearchItem {
                 title,
                 image_url: raw_url,
                 source_url: String::new(),
             });
-            if items.len() >= 6 {
+            if items.len() >= 10 {
                 break;
             }
         }
@@ -1025,6 +1066,303 @@ pub fn extract_article_text(html: &str) -> String {
         .join(" ")
 }
 
+const IMAGE_REQUEST_NOUNS: &[&str] = &[
+    "picture",
+    "pictures",
+    "pic",
+    "pics",
+    "photo",
+    "photos",
+    "image",
+    "images",
+    "meme",
+    "memes",
+    "gif",
+    "gifs",
+    "wallpaper",
+    "wallpapers",
+    "pfp",
+    "fanart",
+    "diagram",
+    "diagrams",
+    "screenshot",
+    "screenshots",
+];
+
+const IMAGE_REQUEST_VERBS: &[&str] = &[
+    "search", "find", "show", "send", "give", "get", "fetch", "lookup", "pull", "grab", "link",
+    "post", "attach", "share", "drop",
+];
+
+/// Returns true when user text asks to search for, show, or send an image/picture/meme.
+pub fn text_requests_image(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    let words: Vec<&str> = lower
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
+
+    let has_noun = words.iter().any(|w| IMAGE_REQUEST_NOUNS.contains(w));
+    if !has_noun {
+        return false;
+    }
+
+    if words.iter().any(|w| IMAGE_REQUEST_VERBS.contains(w)) {
+        return true;
+    }
+
+    words.windows(2).any(|pair| {
+        matches!(pair[1], "of" | "about") && IMAGE_REQUEST_NOUNS.contains(&pair[0])
+    })
+}
+
+fn trim_extracted_url_tail(candidate: &str) -> &str {
+    const TRAILING_PUNCT: [char; 6] = ['.', ',', ';', ':', '!', '?'];
+    let mut s = candidate.trim_end_matches(TRAILING_PUNCT);
+    // Strip unbalanced trailing ')' (e.g. closing a Markdown link) while keeping Wikipedia `Foo_(bar)`.
+    while s.ends_with(')') {
+        let opens = s.bytes().filter(|&b| b == b'(').count();
+        let closes = s.bytes().filter(|&b| b == b')').count();
+        if closes > opens {
+            s = &s[..s.len() - 1];
+            s = s.trim_end_matches(TRAILING_PUNCT);
+        } else {
+            break;
+        }
+    }
+    s
+}
+
+fn scan_http_url_end(text: &str, start: usize) -> usize {
+    let bytes = text.as_bytes();
+    let mut end = start;
+    while end < bytes.len() {
+        let b = bytes[end];
+        if b.is_ascii_whitespace() || matches!(b, b'<' | b'>' | b'"' | b'\'' | b'`' | b'[' | b']' | b'\\')
+        {
+            break;
+        }
+        end += 1;
+    }
+    let trimmed = trim_extracted_url_tail(&text[start..end]);
+    start + trimmed.len()
+}
+
+/// Extracts all unique `http://` and `https://` URLs from text, preserving order.
+pub fn extract_http_urls(text: &str) -> Vec<String> {
+    let lower = text.to_ascii_lowercase();
+    let mut urls = Vec::new();
+    let mut seen = HashSet::new();
+    let mut pos = 0usize;
+
+    while pos < lower.len() {
+        let rest = &lower[pos..];
+        let next_http = rest.find("http://");
+        let next_https = rest.find("https://");
+        let rel = match (next_http, next_https) {
+            (Some(a), Some(b)) => a.min(b),
+            (Some(a), None) => a,
+            (None, Some(b)) => b,
+            (None, None) => break,
+        };
+
+        let start = pos + rel;
+        let scheme_len = if lower[start..].starts_with("https://") {
+            8
+        } else {
+            7
+        };
+        let end = scan_http_url_end(text, start);
+        if end > start + scheme_len {
+            let url = &text[start..end];
+            if url[scheme_len..]
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphanumeric())
+                && seen.insert(url.to_owned())
+            {
+                urls.push(url.to_owned());
+            }
+        }
+        pos = end.max(start + scheme_len);
+    }
+
+    urls
+}
+
+fn canonical_url_key(url: &str) -> String {
+    let without_frag = url.split('#').next().unwrap_or(url).trim();
+    let without_slash = without_frag.trim_end_matches('/');
+    if let Some(scheme_pos) = without_slash.find("://") {
+        let scheme = &without_slash[..scheme_pos].to_ascii_lowercase();
+        let after_scheme = &without_slash[scheme_pos + 3..];
+        if let Some(slash_pos) = after_scheme.find('/') {
+            let host = after_scheme[..slash_pos].to_ascii_lowercase();
+            let path = &after_scheme[slash_pos..];
+            format!("{scheme}://{host}{path}")
+        } else {
+            format!("{scheme}://{}", after_scheme.to_ascii_lowercase())
+        }
+    } else {
+        without_slash.to_ascii_lowercase()
+    }
+}
+
+fn build_canonical_set(verified: &HashSet<String>) -> HashSet<String> {
+    verified.iter().map(|u| canonical_url_key(u)).collect()
+}
+
+fn looks_like_image_url(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    let before_frag = lower.split('#').next().unwrap_or(&lower);
+    let path_only = before_frag.split('?').next().unwrap_or(before_frag);
+    if [".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".avif"]
+        .iter()
+        .any(|ext| path_only.ends_with(ext))
+    {
+        return true;
+    }
+    ["format=jpg", "format=jpeg", "format=png", "format=webp", "format=gif", "tiktok.com/api/img", "bing.com/th"]
+        .iter()
+        .any(|pat| before_frag.contains(pat))
+}
+
+/// Returns URLs present in `text` that were not observed in `verified`.
+pub fn find_unverified_urls(text: &str, verified: &HashSet<String>) -> Vec<String> {
+    let canon = build_canonical_set(verified);
+    extract_http_urls(text)
+        .into_iter()
+        .filter(|u| !verified.contains(u) && !canon.contains(&canonical_url_key(u)))
+        .collect()
+}
+
+fn is_url_verified(url: &str, verified: &HashSet<String>, canon: &HashSet<String>) -> bool {
+    verified.contains(url) || canon.contains(&canonical_url_key(url))
+}
+
+fn strip_markdown_links(
+    text: &str,
+    verified: &HashSet<String>,
+    canon: &HashSet<String>,
+    strip_images: bool,
+) -> (String, bool) {
+    let mut out = String::with_capacity(text.len());
+    let mut did_strip = false;
+    let mut i = 0usize;
+
+    while i < text.len() {
+        let is_md_image = text[i..].starts_with("![");
+        let is_md_link = !is_md_image && text[i..].starts_with('[');
+        if is_md_image || is_md_link {
+            if let Some(label_end_rel) = text[i..].find("](") {
+                let target_start = i + label_end_rel + 2;
+                if let Some(target_end_rel) = text[target_start..].find(')') {
+                    let raw_target = text[target_start..target_start + target_end_rel].trim();
+                    let target_lower = raw_target.to_ascii_lowercase();
+                    if target_lower.starts_with("http://")
+                        || target_lower.starts_with("https://")
+                        || target_lower.starts_with("attachment://")
+                    {
+                        let end = target_start + target_end_rel + 1;
+                        let should_strip = if is_md_image || target_lower.starts_with("attachment://")
+                        {
+                            true
+                        } else {
+                            let url_end = scan_http_url_end(raw_target, 0);
+                            let url = &raw_target[..url_end];
+                            !is_url_verified(url, verified, canon)
+                                || (strip_images && looks_like_image_url(url))
+                        };
+                        if should_strip {
+                            did_strip = true;
+                            i = end;
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+
+        let ch = text[i..].chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+
+    (out, did_strip)
+}
+
+/// Strips Markdown image links, unverified/hallucinated URLs, and redundant bare image URLs
+/// (when images are attached), while keeping verified non-image webpage URLs intact.
+pub fn clean_image_links_and_unverified_urls(
+    text: &str,
+    verified: &HashSet<String>,
+    has_attached_images: bool,
+) -> String {
+    let canon = build_canonical_set(verified);
+    let (stage1, mut did_strip) = strip_markdown_links(text, verified, &canon, has_attached_images);
+
+    let lower = stage1.to_ascii_lowercase();
+    let mut out = String::with_capacity(stage1.len());
+    let mut i = 0usize;
+
+    while i < stage1.len() {
+        let rest = &lower[i..];
+        let starts_http = rest.starts_with("http://") || rest.starts_with("https://");
+        if starts_http {
+            let scheme_len = if rest.starts_with("https://") { 8 } else { 7 };
+            let end = scan_http_url_end(&stage1, i);
+            if end > i + scheme_len {
+                let url = &stage1[i..end];
+                let drop_url =
+                    !is_url_verified(url, verified, &canon) || (has_attached_images && looks_like_image_url(url));
+                if drop_url {
+                    did_strip = true;
+                    // Clean enclosing `<url>` autolink brackets if present.
+                    if out.ends_with('<') && stage1[end..].starts_with('>') {
+                        out.pop();
+                        i = end + 1;
+                    } else {
+                        i = end;
+                    }
+                    continue;
+                }
+                out.push_str(url);
+                i = end;
+                continue;
+            }
+        }
+
+        let ch = stage1[i..].chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+
+    if !did_strip {
+        return text.to_owned();
+    }
+
+    // Tidy spaces around stripped URLs while preserving leading code indentation.
+    let mut lines = Vec::new();
+    for line in out.lines() {
+        let body = line.trim_start_matches([' ', '\t']);
+        let indent = &line[..line.len() - body.len()];
+        let collapsed: String = body.split_whitespace().collect::<Vec<_>>().join(" ");
+        if collapsed.is_empty() {
+            lines.push(String::new());
+        } else {
+            lines.push(format!("{indent}{collapsed}"));
+        }
+    }
+    let mut cleaned_lines: Vec<String> = Vec::with_capacity(lines.len());
+    for line in lines {
+        if line.is_empty() && cleaned_lines.last().is_some_and(|prev| prev.is_empty()) {
+            continue;
+        }
+        cleaned_lines.push(line);
+    }
+    cleaned_lines.join("\n").trim().to_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1099,5 +1437,61 @@ mod tests {
                 "https://cdn.example.com/chart.webp".to_owned(),
             ]
         );
+    }
+
+    #[test]
+    fn test_text_requests_image_detects_prompts_without_false_positives() {
+        assert!(text_requests_image("can you search a picture of a cute cat"));
+        assert!(text_requests_image("show me a funny Kai Cenat meme"));
+        assert!(text_requests_image("find pics of aurora borealis please"));
+        assert!(text_requests_image("picture of a golden retriever"));
+        assert!(text_requests_image("send a gif of a dancing raccoon"));
+
+        assert!(!text_requests_image("what topic should we discuss today"));
+        assert!(!text_requests_image("that is a typical compiler error"));
+        assert!(!text_requests_image("attach a python script file for sorting"));
+        assert!(!text_requests_image("who won OWC 2025?"));
+    }
+
+    #[test]
+    fn test_extract_and_verify_urls_handles_markdown_and_parentheses() {
+        let input = "See ![bad](https://fake.example.com/a.jpg) and https://en.wikipedia.org/wiki/Osu!_(video_game) plus [docs](https://docs.rs/tokio).";
+        let extracted = extract_http_urls(input);
+        assert_eq!(
+            extracted,
+            vec![
+                "https://fake.example.com/a.jpg".to_owned(),
+                "https://en.wikipedia.org/wiki/Osu!_(video_game)".to_owned(),
+                "https://docs.rs/tokio".to_owned(),
+            ]
+        );
+
+        let verified = HashSet::from([
+            "https://en.wikipedia.org/wiki/Osu!_(video_game)".to_owned(),
+            "https://docs.rs/tokio/".to_owned(),
+        ]);
+        assert_eq!(
+            find_unverified_urls(input, &verified),
+            vec!["https://fake.example.com/a.jpg".to_owned()]
+        );
+    }
+
+    #[test]
+    fn test_clean_image_links_and_unverified_urls() {
+        let verified = HashSet::from([
+            "https://docs.rs/serenity".to_owned(),
+            "https://i.imgur.com/verified.png".to_owned(),
+        ]);
+        let raw = "Check [serenity](https://docs.rs/serenity) and ![meme](https://i.imgur.com/verified.png)\nAlso fake: <https://broken.example.com/nope.jpg> and direct https://i.imgur.com/verified.png";
+        let cleaned = clean_image_links_and_unverified_urls(raw, &verified, true);
+        assert_eq!(cleaned, "Check [serenity](https://docs.rs/serenity) and\nAlso fake: and direct");
+    }
+
+    #[test]
+    fn test_usable_candidate_image_url_filters_known_bad_hosts() {
+        assert!(is_usable_candidate_image_url("https://i.imgflip.com/9abc.jpg"));
+        assert!(!is_usable_candidate_image_url("https://www.tiktok.com/api/img/?itemId=123"));
+        assert!(!is_usable_candidate_image_url("https://example.com/logo.svg"));
+        assert!(!is_usable_candidate_image_url("https://www.bing.com/th/id/ogc123"));
     }
 }
