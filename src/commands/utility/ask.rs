@@ -1624,6 +1624,7 @@ pub(crate) fn is_transient_status(content: &str) -> bool {
         "🌐 Browsing",
         "🌐 Reading ",
         "🎮 Checking osu!",
+        "🔎 Searching osu! beatmaps",
         "🗺️ Calculating beatmap",
         "⚡ Analyzing",
         "⚡ Writing",
@@ -2317,6 +2318,7 @@ mod tests {
         assert!(is_transient_status("🔍 Searching the web for `mrekk`..."));
         assert!(is_transient_status("🌐 Reading linked page..."));
         assert!(is_transient_status("🎮 Checking osu! stats for `milan.be`..."));
+        assert!(is_transient_status("🔎 Searching osu! beatmaps for `Sidetracked Day`..."));
         assert!(is_transient_status("🗺️ Calculating beatmap stats `2101986`..."));
         assert!(is_transient_status("⚡ Analyzing tool results..."));
         assert!(is_transient_status("⚡ Writing response..."));

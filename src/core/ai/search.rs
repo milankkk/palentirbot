@@ -127,44 +127,69 @@ impl WebSearchClient {
 
     /// Direct DuckDuckGo HTML search (no API key or external container required).
     pub async fn search_duckduckgo(&self, query: &str) -> Result<Vec<SearchResultItem>> {
-        let url = "https://html.duckduckgo.com/html/";
-        let res = self
-            .client
-            .post(url)
-            .header(reqwest::header::USER_AGENT, USER_AGENT)
-            .header(
-                reqwest::header::ACCEPT,
-                "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            )
-            .header(
-                reqwest::header::CONTENT_TYPE,
-                "application/x-www-form-urlencoded",
-            )
-            .header(reqwest::header::REFERER, "https://html.duckduckgo.com/")
-            .form(&[("q", query), ("kl", "wt-wt"), ("kp", "-2")])
-            .send()
-            .await
-            .context("failed to query DuckDuckGo")?;
+        let mut last_err: Option<eyre::Report> = None;
+        for attempt in 0..2 {
+            let sent = self
+                .client
+                .post("https://html.duckduckgo.com/html/")
+                .header(reqwest::header::USER_AGENT, USER_AGENT)
+                .header(
+                    reqwest::header::ACCEPT,
+                    "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                )
+                .header(
+                    reqwest::header::CONTENT_TYPE,
+                    "application/x-www-form-urlencoded",
+                )
+                .header(reqwest::header::REFERER, "https://html.duckduckgo.com/")
+                .form(&[("q", query), ("kl", "wt-wt"), ("kp", "-2")])
+                .send()
+                .await;
 
-        let status = res.status();
-        if status == reqwest::StatusCode::ACCEPTED || status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            eyre::bail!("DuckDuckGo rate-limited / challenged automated search (HTTP {status})");
+            match sent {
+                Ok(res) => {
+                    let status = res.status();
+                    if status == reqwest::StatusCode::ACCEPTED
+                        || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+                    {
+                        eyre::bail!(
+                            "DuckDuckGo rate-limited / challenged automated search (HTTP {status})"
+                        );
+                    }
+                    if status.is_server_error() && attempt == 0 {
+                        last_err = Some(eyre::eyre!("DuckDuckGo returned HTTP {status}"));
+                        tokio::time::sleep(Duration::from_millis(250)).await;
+                        continue;
+                    }
+                    if !status.is_success() {
+                        eyre::bail!("DuckDuckGo returned HTTP {status}");
+                    }
+
+                    let body = res
+                        .text()
+                        .await
+                        .context("failed to read DuckDuckGo response")?;
+
+                    let results = parse_duckduckgo_html(&body);
+                    if results.is_empty() && is_duckduckgo_challenge_html(&body) {
+                        eyre::bail!(
+                            "DuckDuckGo CAPTCHA/anomaly challenge prevented search results"
+                        );
+                    }
+
+                    return Ok(results);
+                }
+                Err(err) if attempt == 0 => {
+                    last_err = Some(eyre::Report::from(err).wrap_err("failed to query DuckDuckGo"));
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
+                Err(err) => {
+                    return Err(err).context("failed to query DuckDuckGo");
+                }
+            }
         }
-        if !status.is_success() {
-            eyre::bail!("DuckDuckGo returned HTTP {status}");
-        }
 
-        let body = res
-            .text()
-            .await
-            .context("failed to read DuckDuckGo response")?;
-
-        let results = parse_duckduckgo_html(&body);
-        if results.is_empty() && is_duckduckgo_challenge_html(&body) {
-            eyre::bail!("DuckDuckGo CAPTCHA/anomaly challenge prevented search results");
-        }
-
-        Ok(results)
+        Err(last_err.unwrap_or_else(|| eyre::eyre!("failed to query DuckDuckGo")))
     }
 
     /// Fetch raw bytes from a URL using up to 3 SSRF-validated redirects and DNS-pinned lookup.
@@ -586,17 +611,62 @@ pub fn parse_bing_image_results(html: &str) -> Vec<ImageSearchItem> {
     items
 }
 
+fn extract_html_attr(tag: &str, tag_lower: &str, attr_name: &str) -> Option<String> {
+    let needle = format!("{attr_name}=");
+    let mut from = 0usize;
+    while let Some(rel) = tag_lower[from..].find(&needle) {
+        let pos = from + rel;
+        let boundary_ok = pos > 0
+            && matches!(
+                tag_lower.as_bytes()[pos - 1],
+                b' ' | b'\t' | b'\n' | b'\r' | b'/'
+            );
+        if boundary_ok {
+            if let Some(val) = extract_quoted_attr(&tag[pos + needle.len()..]) {
+                return Some(val);
+            }
+        }
+        from = pos + needle.len();
+    }
+    None
+}
+
 pub fn extract_page_image_urls(html: &str, base_url: &reqwest::Url) -> Vec<String> {
     let mut urls = Vec::new();
     let mut seen = std::collections::HashSet::new();
     let lower = html.to_ascii_lowercase();
 
-    for marker in ["og:image", "twitter:image"] {
-        if let Some(pos) = lower.find(marker) {
-            let window = take_bounded_utf8(&html[pos..], 400);
-            let window_lower = take_bounded_utf8(&lower[pos..], 400);
-            if let Some(cpos) = window_lower.find("content=") {
-                if let Some(extracted) = extract_quoted_attr(&window[cpos + "content=".len()..]) {
+    let mut meta_offset = 0usize;
+    while urls.len() < 3 {
+        let Some(meta_rel) = lower[meta_offset..].find("<meta") else {
+            break;
+        };
+        let tag_start = meta_offset + meta_rel;
+        let after_name = tag_start + "<meta".len();
+        let next_ok = lower
+            .as_bytes()
+            .get(after_name)
+            .is_some_and(|b| matches!(b, b' ' | b'\t' | b'\n' | b'\r' | b'/'));
+        let Some(tag_end_rel) = html[tag_start..].find('>') else {
+            break;
+        };
+        if next_ok {
+            let tag = &html[tag_start..tag_start + tag_end_rel + 1];
+            let tag_lower = &lower[tag_start..tag_start + tag_end_rel + 1];
+            let key = extract_html_attr(tag, tag_lower, "property")
+                .or_else(|| extract_html_attr(tag, tag_lower, "name"))
+                .map(|v| v.trim().to_ascii_lowercase());
+            if matches!(
+                key.as_deref(),
+                Some(
+                    "og:image"
+                        | "og:image:url"
+                        | "og:image:secure_url"
+                        | "twitter:image"
+                        | "twitter:image:src"
+                )
+            ) {
+                if let Some(extracted) = extract_html_attr(tag, tag_lower, "content") {
                     if let Some(resolved) = normalize_candidate_image_url(&extracted, base_url) {
                         if seen.insert(resolved.clone()) {
                             urls.push(resolved);
@@ -605,6 +675,7 @@ pub fn extract_page_image_urls(html: &str, base_url: &reqwest::Url) -> Vec<Strin
                 }
             }
         }
+        meta_offset = tag_start + tag_end_rel + 1;
     }
 
     let mut offset = 0usize;
@@ -618,12 +689,10 @@ pub fn extract_page_image_urls(html: &str, base_url: &reqwest::Url) -> Vec<Strin
         };
         let tag = &html[tag_start..tag_start + tag_end_rel + 1];
         let tag_lower = &lower[tag_start..tag_start + tag_end_rel + 1];
-        if let Some(src_pos) = tag_lower.find("src=") {
-            if let Some(raw_src) = extract_quoted_attr(&tag[src_pos + 4..]) {
-                if let Some(resolved) = normalize_candidate_image_url(&raw_src, base_url) {
-                    if seen.insert(resolved.clone()) {
-                        urls.push(resolved);
-                    }
+        if let Some(raw_src) = extract_html_attr(tag, tag_lower, "src") {
+            if let Some(resolved) = normalize_candidate_image_url(&raw_src, base_url) {
+                if seen.insert(resolved.clone()) {
+                    urls.push(resolved);
                 }
             }
         }
@@ -684,7 +753,8 @@ fn build_pinned_client(host: &str, addrs: &[SocketAddr]) -> Result<Client> {
     let mut builder = Client::builder()
         .timeout(Duration::from_secs(8))
         .connect_timeout(Duration::from_secs(5))
-        .redirect(reqwest::redirect::Policy::none());
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy();
 
     if !addrs.is_empty() && host.parse::<IpAddr>().is_err() {
         builder = builder.resolve_to_addrs(host, addrs);
@@ -834,14 +904,24 @@ pub fn is_private_or_local_ip(ip: std::net::IpAddr) -> bool {
     match ip {
         std::net::IpAddr::V4(v4) => is_private_or_local_ip_v4(v4),
         std::net::IpAddr::V6(v6) => {
+            let segs = v6.segments();
             v6.is_loopback()
                 || v6.is_unspecified()
                 || v6.is_multicast()
                 || v6.to_ipv4_mapped().is_some_and(is_private_or_local_ip_v4)
                 || v6.to_ipv4().is_some_and(is_private_or_local_ip_v4)
-                || (v6.segments()[0] & 0xfe00) == 0xfc00
-                || (v6.segments()[0] & 0xffc0) == 0xfe80
-                || (v6.segments()[0] == 0x2001 && v6.segments()[1] == 0x0db8)
+                || (segs[0] & 0xfe00) == 0xfc00
+                || (segs[0] & 0xffc0) == 0xfe80
+                || (segs[0] & 0xffc0) == 0xfec0
+                || (segs[0] == 0x2001 && segs[1] == 0x0db8)
+                || (segs[0] == 0x2001 && segs[1] == 0x0000)
+                || (segs[0] == 0x2001 && segs[1] == 0x0002 && segs[2] == 0)
+                || (segs[0] == 0x2001 && (segs[1] & 0xfff0) == 0x0020)
+                || segs[0] == 0x2002
+                || (segs[0] == 0x0064 && segs[1] == 0xff9b && segs[2] == 0 && segs[3] == 0 && segs[4] == 0 && segs[5] == 0)
+                || (segs[0] == 0x0064 && segs[1] == 0xff9b && segs[2] == 0x0001)
+                || (segs[0] == 0 && segs[1] == 0 && segs[2] == 0 && segs[3] == 0 && segs[4] == 0xffff)
+                || (segs[0] == 0x0100 && segs[1] == 0 && segs[2] == 0 && segs[3] == 0)
         }
     }
 }
@@ -862,7 +942,11 @@ pub async fn validate_and_resolve_url(url_str: &str) -> Result<ValidatedTarget> 
         .ok_or_else(|| eyre::eyre!("URL has no host"))?
         .trim_start_matches('[')
         .trim_end_matches(']')
+        .trim_end_matches('.')
         .to_owned();
+    if host.is_empty() {
+        eyre::bail!("URL has empty host");
+    }
     let host_lower = host.to_ascii_lowercase();
 
     if host_lower == "localhost"
@@ -879,6 +963,10 @@ pub async fn validate_and_resolve_url(url_str: &str) -> Result<ValidatedTarget> 
     }
 
     let port = parsed.port_or_known_default().unwrap_or(80);
+    if !matches!(port, 80 | 443) {
+        eyre::bail!("Only ports 80 and 443 are permitted (got {port})");
+    }
+
     if let Ok(ip) = host.parse::<IpAddr>() {
         if is_private_or_local_ip(ip) {
             eyre::bail!("Private or local IP addresses are not allowed: {ip}");
@@ -890,9 +978,13 @@ pub async fn validate_and_resolve_url(url_str: &str) -> Result<ValidatedTarget> 
         });
     }
 
-    let addrs = tokio::net::lookup_host((host.as_str(), port))
-        .await
-        .context("failed to resolve host for security check")?;
+    let addrs = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::net::lookup_host((host.as_str(), port)),
+    )
+    .await
+    .context("DNS lookup timed out")?
+    .context("failed to resolve host for security check")?;
 
     let mut pinned_addrs = Vec::new();
     for addr in addrs {
@@ -941,13 +1033,48 @@ pub fn decode_html_entities(input: &str) -> String {
 
 pub fn strip_html_tags(input: &str) -> String {
     let mut output = String::with_capacity(input.len());
+    let mut tag_buf = String::new();
     let mut inside = false;
     for c in input.chars() {
-        if c == '<' {
+        if c == '<' && !inside {
             inside = true;
-        } else if c == '>' {
+            tag_buf.clear();
+        } else if c == '>' && inside {
             inside = false;
-        } else if !inside {
+            let tag_name = tag_buf
+                .trim()
+                .trim_start_matches('/')
+                .split(|ch: char| ch.is_ascii_whitespace() || ch == '/')
+                .next()
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if matches!(
+                tag_name.as_str(),
+                "p" | "br"
+                    | "div"
+                    | "li"
+                    | "tr"
+                    | "td"
+                    | "th"
+                    | "h1"
+                    | "h2"
+                    | "h3"
+                    | "h4"
+                    | "h5"
+                    | "h6"
+                    | "section"
+                    | "article"
+                    | "blockquote"
+            ) && !output.is_empty()
+                && !output.ends_with(char::is_whitespace)
+            {
+                output.push(' ');
+            }
+        } else if inside {
+            if tag_buf.len() < 64 {
+                tag_buf.push(c);
+            }
+        } else {
             output.push(c);
         }
     }
@@ -1260,10 +1387,109 @@ fn looks_like_image_url(url: &str) -> bool {
         .any(|pat| before_frag.contains(pat))
 }
 
-/// Returns URLs present in `text` that were not observed in `verified`.
+fn collect_code_protected_ranges(text: &str) -> Vec<(usize, usize)> {
+    let bytes = text.as_bytes();
+    let mut ranges = Vec::new();
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        let at_line_start = i == 0 || bytes[i - 1] == b'\n';
+        if at_line_start {
+            let mut nonws = i;
+            while nonws < bytes.len() && matches!(bytes[nonws], b' ' | b'\t') {
+                nonws += 1;
+            }
+            if bytes[nonws..].starts_with(b"```") {
+                let mut fence_len = 0usize;
+                while nonws + fence_len < bytes.len() && bytes[nonws + fence_len] == b'`' {
+                    fence_len += 1;
+                }
+                let mut pos = match bytes[nonws + fence_len..].iter().position(|&b| b == b'\n') {
+                    Some(rel) => nonws + fence_len + rel + 1,
+                    None => bytes.len(),
+                };
+                let mut close_end = bytes.len();
+                while pos < bytes.len() {
+                    let line_end = bytes[pos..]
+                        .iter()
+                        .position(|&b| b == b'\n')
+                        .map_or(bytes.len(), |rel| pos + rel);
+                    let trimmed = text[pos..line_end].trim();
+                    if trimmed.len() >= fence_len && trimmed.bytes().all(|b| b == b'`') {
+                        close_end = line_end;
+                        break;
+                    }
+                    pos = if line_end < bytes.len() {
+                        line_end + 1
+                    } else {
+                        bytes.len()
+                    };
+                }
+                ranges.push((nonws, close_end));
+                i = close_end;
+                continue;
+            }
+        }
+
+        if bytes[i] == b'`' {
+            let mut ticks = 0usize;
+            while i + ticks < bytes.len() && bytes[i + ticks] == b'`' {
+                ticks += 1;
+            }
+            let search_start = i + ticks;
+            let limit = text[search_start..]
+                .find("\n\n")
+                .map_or(bytes.len(), |rel| search_start + rel);
+            let mut j = search_start;
+            let mut found_end = None;
+            while j < limit {
+                if bytes[j] == b'`' {
+                    let mut run = 0usize;
+                    while j + run < limit && bytes[j + run] == b'`' {
+                        run += 1;
+                    }
+                    if run == ticks {
+                        found_end = Some(j + run);
+                        break;
+                    }
+                    j += run;
+                } else {
+                    j += 1;
+                }
+            }
+            if let Some(end) = found_end {
+                ranges.push((i, end));
+                i = end;
+                continue;
+            }
+            i += ticks;
+            continue;
+        }
+
+        i += text[i..].chars().next().map_or(1, char::len_utf8);
+    }
+
+    ranges
+}
+
+/// Returns URLs present in `text` that were not observed in `verified`, ignoring code spans/blocks.
 pub fn find_unverified_urls(text: &str, verified: &HashSet<String>) -> Vec<String> {
+    let ranges = collect_code_protected_ranges(text);
+    let prose = if ranges.is_empty() {
+        text.to_owned()
+    } else {
+        let mut buf = String::with_capacity(text.len());
+        let mut last = 0usize;
+        for (start, end) in ranges {
+            buf.push_str(&text[last..start]);
+            buf.push(' ');
+            last = end;
+        }
+        buf.push_str(&text[last..]);
+        buf
+    };
     let canon = build_canonical_set(verified);
-    extract_http_urls(text)
+    extract_http_urls(&prose)
         .into_iter()
         .filter(|u| !verified.contains(u) && !canon.contains(&canonical_url_key(u)))
         .collect()
@@ -1393,8 +1619,31 @@ pub fn clean_image_links_and_unverified_urls(
     verified: &HashSet<String>,
     has_attached_images: bool,
 ) -> String {
+    let protected_ranges = collect_code_protected_ranges(text);
+    let mut masked_source = String::with_capacity(text.len());
+    let mut placeholders: Vec<(String, String)> = Vec::with_capacity(protected_ranges.len());
+
+    if protected_ranges.is_empty() {
+        masked_source.push_str(text);
+    } else {
+        let mut nonce = String::from("0");
+        while text.contains(&format!("\u{E000}CODE_{nonce}_")) {
+            nonce.push('x');
+        }
+        let mut last = 0usize;
+        for (idx, (start, end)) in protected_ranges.into_iter().enumerate() {
+            masked_source.push_str(&text[last..start]);
+            let token = format!("\u{E000}CODE_{nonce}_{idx}\u{E001}");
+            placeholders.push((token.clone(), text[start..end].to_owned()));
+            masked_source.push_str(&token);
+            last = end;
+        }
+        masked_source.push_str(&text[last..]);
+    }
+
     let canon = build_canonical_set(verified);
-    let (stage1, mut did_strip) = strip_markdown_links(text, verified, &canon, has_attached_images);
+    let (stage1, mut did_strip) =
+        strip_markdown_links(&masked_source, verified, &canon, has_attached_images);
 
     let lower = stage1.to_ascii_lowercase();
     let mut out = String::with_capacity(stage1.len());
@@ -1436,7 +1685,7 @@ pub fn clean_image_links_and_unverified_urls(
         return text.to_owned();
     }
 
-    // Tidy spaces around stripped URLs while preserving leading code indentation.
+    // Tidy spaces around stripped URLs while preserving leading indentation and restored code spans.
     let mut lines = Vec::new();
     for line in out.lines() {
         let body = line.trim_start_matches([' ', '\t']);
@@ -1455,7 +1704,11 @@ pub fn clean_image_links_and_unverified_urls(
         }
         cleaned_lines.push(line);
     }
-    cleaned_lines.join("\n").trim().to_owned()
+    let mut joined = cleaned_lines.join("\n").trim().to_owned();
+    for (token, original) in placeholders {
+        joined = joined.replace(&token, &original);
+    }
+    joined
 }
 
 #[cfg(test)]
@@ -1479,9 +1732,17 @@ mod tests {
     async fn test_ssrf_protection() {
         assert!(validate_url_for_ssrf("http://127.0.0.1:8080").await.is_err());
         assert!(validate_url_for_ssrf("http://localhost/admin").await.is_err());
+        assert!(validate_url_for_ssrf("http://localhost./admin").await.is_err());
+        assert!(validate_url_for_ssrf("http://api.internal./secret").await.is_err());
+        assert!(validate_url_for_ssrf("http://1.1.1.1:8080/").await.is_err());
         assert!(validate_url_for_ssrf("http://[::1]/").await.is_err());
         assert!(validate_url_for_ssrf("http://[fe80::1]/").await.is_err());
         assert!(validate_url_for_ssrf("http://[fd00::1]/").await.is_err());
+        assert!(validate_url_for_ssrf("http://[fec0::1]/").await.is_err());
+        assert!(validate_url_for_ssrf("http://[2002:7f00:0001::]/").await.is_err());
+        assert!(validate_url_for_ssrf("http://[64:ff9b::10.0.0.1]/").await.is_err());
+        assert!(validate_url_for_ssrf("http://[2001:0::1]/").await.is_err());
+        assert!(validate_url_for_ssrf("http://[100::1]/").await.is_err());
         assert!(validate_url_for_ssrf("http://[::ffff:127.0.0.1]/").await.is_err());
         assert!(validate_url_for_ssrf("file:///etc/passwd").await.is_err());
     }
@@ -1523,7 +1784,7 @@ mod tests {
         assert_eq!(bing[0].title, "Funny Cat");
 
         let base = reqwest::Url::parse("https://example.com/post/1").unwrap();
-        let page = r#"<html><head><meta property="og:image" content="/hero.png"></head><body><img src="data:image/png;base64,abc"><img src="/icon.svg"><img src="https://cdn.example.com/chart.webp"></body></html>"#;
+        let page = r#"<html><head><meta content="/hero.png" property="og:image"></head><body><img data-src="/lazy.png" src="https://cdn.example.com/chart.webp"><img src="data:image/png;base64,abc"><img src="/icon.svg"></body></html>"#;
         let imgs = extract_page_image_urls(page, &base);
         assert_eq!(
             imgs,
@@ -1532,6 +1793,14 @@ mod tests {
                 "https://cdn.example.com/chart.webp".to_owned(),
             ]
         );
+        assert!(!imgs.iter().any(|u| u.contains("/lazy.png")));
+    }
+
+    #[test]
+    fn test_strip_html_tags_block_spacing() {
+        let html = "<p>First</p><p>Second</p><div>Third<br/>Fourth</div>";
+        let stripped = strip_html_tags(html);
+        assert_eq!(stripped.trim(), "First Second Third Fourth");
     }
 
     #[test]
@@ -1577,9 +1846,16 @@ mod tests {
             "https://docs.rs/serenity".to_owned(),
             "https://i.imgur.com/verified.png".to_owned(),
         ]);
-        let raw = "Check [serenity](https://docs.rs/serenity) and ![meme](https://i.imgur.com/verified.png)\nFake: <https://broken.example.com/nope.jpg> ![puffy mouth meme](url) and direct https://i.imgur.com/verified.png";
+        let raw = "Check [serenity](https://docs.rs/serenity) and ![meme](https://i.imgur.com/verified.png)\nFake: <https://broken.example.com/nope.jpg> ![puffy mouth meme](url) and direct https://i.imgur.com/verified.png\nInline `https://sample.local/kept`.\n```py\nurl = \"https://example.org/kept\"\n```";
         let cleaned = clean_image_links_and_unverified_urls(raw, &verified, true);
-        assert_eq!(cleaned, "Check [serenity](https://docs.rs/serenity) and\nFake: and direct");
+        assert_eq!(
+            cleaned,
+            "Check [serenity](https://docs.rs/serenity) and\nFake: and direct\nInline `https://sample.local/kept`.\n```py\nurl = \"https://example.org/kept\"\n```"
+        );
+        assert!(find_unverified_urls(
+            "Code: `https://sample.local/ignored` prose: https://unverified.example/a",
+            &verified
+        ) == vec!["https://unverified.example/a".to_owned()]);
     }
 
     #[test]
