@@ -69,11 +69,6 @@ async fn async_main() -> Result<()> {
 
     ReplayQueue::process(Arc::clone(&ctx));
 
-    let ctx_bandwidth = Arc::clone(&ctx);
-    tokio::spawn(async move {
-        ctx_bandwidth.client().measure_bandwidth().await;
-    });
-
     let shard_handles = event_loop(Arc::clone(&ctx), shards);
     let mut all_shards = futures::future::join_all(shard_handles);
 

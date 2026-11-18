@@ -166,7 +166,7 @@ pub enum ReplayStatus {
     Downloading,
     MapFound,
     Rendering(u8),
-    Uploading(u64),
+    Uploading,
 }
 
 #[derive(Copy, Clone, Debug, Default, PartialEq)]

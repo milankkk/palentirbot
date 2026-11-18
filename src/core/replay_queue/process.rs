@@ -571,7 +571,7 @@ async fn process_single_replay(
 
         info!("Started upload to server");
         ctx.replay_queue
-            .set_status(ReplayStatus::Uploading(0))
+            .set_status(ReplayStatus::Uploading)
             .await;
         let beatmap_link = format!("https://osu.ppy.sh/beatmapsets/{mapset_id}");
 
@@ -655,59 +655,6 @@ async fn process_single_replay(
             .await;
         }
 
-        if let Ok(warmup_msg) = input_channel
-            .create_message(&ctx, &MessageBuilder::new().content(uploaded_link.clone()))
-            .await
-        {
-            sleep(Duration::from_millis(1200)).await;
-            let _ = warmup_msg.delete(&ctx).await;
-        }
-        let file_size_bytes = tokio::fs::metadata(&new_filepath)
-            .await
-            .map(|m| m.len())
-            .unwrap_or(0);
-        let upload_mbps = ctx.client().upload_speed_mbps();
-        let wait_secs = calculate_warmup_delay_secs(file_size_bytes, upload_mbps);
-        tracing::debug!(
-            "Wait time for dc cache: {}s (calculated at {:.1} Mbps)",
-            wait_secs,
-            upload_mbps
-        );
-
-        let mut remaining = wait_secs;
-        while remaining > 0 {
-            if cancelled.load(Ordering::Acquire) {
-                return handle_cancelled_cleanup(
-                    &ctx,
-                    queue_message,
-                    &path,
-                    Some(&new_filepath),
-                    input_channel,
-                    user,
-                )
-                .await;
-            }
-            ctx.replay_queue
-                .set_status(ReplayStatus::Uploading(remaining))
-                .await;
-            ctx.replay_queue.notify.notify_waiters();
-            tokio::select! {
-                biased;
-                _ = cancel_notify.notified() => {
-                    return handle_cancelled_cleanup(
-                        &ctx,
-                        queue_message,
-                        &path,
-                        Some(&new_filepath),
-                        input_channel,
-                        user,
-                    )
-                    .await;
-                }
-                _ = sleep(Duration::from_secs(1)) => {}
-            }
-            remaining = remaining.saturating_sub(1);
-        }
         ctx.replay_queue.notify.notify_waiters();
 
         (uploaded_link, uploaded_video_url, Some(new_filepath))
@@ -1003,9 +950,36 @@ async fn process_single_replay(
         let _ = ctx.http.delete_message(channel_id, msg_id).await;
     }
 
-    if let Err(err) = input_channel.create_message(&ctx, &builder).await {
-        let err = err.wrap_err("failed to send video link to channel");
-        warn!("{err:?}");
+    match input_channel.create_message(&ctx, &builder).await {
+        Ok(sent_msg) => {
+            let ctx_verify = Arc::clone(&ctx);
+            let watch_url_retry = watch_url.clone();
+            let msg_id = sent_msg.id;
+            tokio::spawn(async move {
+                sleep(Duration::from_secs(6)).await;
+                let has_video = match ctx_verify.http.message(input_channel, msg_id).await {
+                    Ok(resp) => match resp.model().await {
+                        Ok(m) => m.embeds.iter().any(|e| e.video.is_some()),
+                        Err(_) => true,
+                    },
+                    Err(_) => true,
+                };
+                if !has_video {
+                    let sep = if watch_url_retry.contains('?') { '&' } else { '?' };
+                    let busted = format!("{watch_url_retry}{sep}v=2");
+                    let retry_builder = MessageBuilder::new()
+                        .content(format!("<@{user}> [Replay]({busted})"))
+                        .allowed_user_mention(user);
+                    let _ = (msg_id, input_channel)
+                        .update(&ctx_verify, &retry_builder)
+                        .await;
+                }
+            });
+        }
+        Err(err) => {
+            let err = err.wrap_err("failed to send video link to channel");
+            warn!("{err:?}");
+        }
     }
 
     // 1. Delete generated .mp4 from Replays folder
@@ -2270,21 +2244,6 @@ async fn find_beatmap_osu_file(
     }
 
     eyre::bail!("no matching .osu file found in {items_dir:?} for map_id {map_id} ({version})")
-}
-
-fn calculate_warmup_delay_secs(file_size_bytes: u64, upload_mbps: f64) -> u64 {
-    const EFFICIENCY: f64 = 0.85;
-    const FRACTION: f64 = 0.90;
-    const MIN_WAIT_SECS: f64 = 2.0;
-    const EXTRA_BUFFER_SECS: f64 = 4.0;
-    const MAX_WAIT_SECS: f64 = 60.0;
-
-    let effective_mbps = upload_mbps.max(1.0);
-    let bytes_per_sec = (effective_mbps * 1_000_000.0 / 8.0) * EFFICIENCY;
-    let full_transfer_secs = file_size_bytes as f64 / bytes_per_sec;
-    let wait_secs = (full_transfer_secs * FRACTION) + EXTRA_BUFFER_SECS;
-
-    wait_secs.clamp(MIN_WAIT_SECS, MAX_WAIT_SECS).ceil() as u64
 }
 
 async fn handle_cancelled_cleanup(

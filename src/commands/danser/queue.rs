@@ -66,10 +66,7 @@ pub async fn build_queue_embed(ctx: &Context) -> EmbedBuilder {
                 _ => ProcessStatus::Done,
             },
             uploading = match status {
-                ReplayStatus::Uploading(secs) if secs > 0 => {
-                    ProcessStatus::WaitingForCache(secs) // reuse Running for display
-                }
-                ReplayStatus::Uploading(_) => ProcessStatus::Running(None),
+                ReplayStatus::Uploading => ProcessStatus::Running(None),
                 _ => ProcessStatus::Waiting,
             },
         );
@@ -246,7 +243,6 @@ enum ProcessStatus {
     Running(Option<u8>),
     Waiting,
     MapFound,
-    WaitingForCache(u64),
 }
 
 impl Display for ProcessStatus {
@@ -257,9 +253,6 @@ impl Display for ProcessStatus {
             ProcessStatus::Done => write!(f, "✅"),
             ProcessStatus::Running(Some(progress)) => write!(f, "🏃 {progress}%"),
             ProcessStatus::Running(None) => write!(f, "🏃"),
-            ProcessStatus::WaitingForCache(secs) => {
-                write!(f, "Waiting for discord cache:⏳ {}s left", secs)
-            }
             ProcessStatus::Waiting => write!(f, "🛜"),
             ProcessStatus::MapFound => write!(f, "⬇️"),
         }
