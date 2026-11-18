@@ -277,14 +277,19 @@ pub(crate) fn parse_osu_profile_ref(raw: &str) -> Option<OsuProfileTarget> {
     Some(OsuProfileTarget::OsuUsername(unquoted.to_owned()))
 }
 
-fn escape_md_link_text(s: &str) -> String {
+/// Sanitize text placed inside a Discord `[label](url)` markdown link or bold span.
+/// Discord's embed link parser does NOT unescape `\[` / `\]` and breaks across lines
+/// if brackets inside `[...](url)` are unbalanced, so brackets are mapped to parentheses
+/// and `*`/`\`/`` ` `` are neutralized without adding backslashes.
+fn sanitize_md_link_label(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {
         match ch {
-            '[' | ']' | '\\' => {
-                out.push('\\');
-                out.push(ch);
-            }
+            '[' => out.push('('),
+            ']' => out.push(')'),
+            '*' => out.push('∗'),
+            '`' => out.push('\''),
+            '\\' => out.push('/'),
             '\n' | '\r' => out.push(' '),
             _ => out.push(ch),
         }
@@ -317,12 +322,48 @@ fn format_grade_emoji(grade: Grade) -> String {
     }
 }
 
-fn format_mods(mods: &GameMods) -> String {
-    if mods.is_empty() {
-        "NM".to_owned()
-    } else {
-        format!("+{mods}")
+fn format_score_mods(mods: &GameMods, set_on_lazer: bool) -> String {
+    let mut filtered = GameMods::new();
+    for m in mods.iter() {
+        // osu! API v2 attaches `CL` to every legacy osu!stable score; hide it for stable
+        // plays while preserving `+CL` when explicitly selected on osu!lazer.
+        if !set_on_lazer && m.acronym().as_str() == "CL" {
+            continue;
+        }
+        filtered.insert(m.clone());
     }
+    if filtered.is_empty() {
+        return "NM".to_owned();
+    }
+    if let Some(bits) = filtered.checked_bits() {
+        let legacy = rosu_v2::prelude::GameModsLegacy::from_bits(bits);
+        if !legacy.is_empty() {
+            return format!("+{legacy}");
+        }
+    }
+    format!("+{filtered}")
+}
+
+fn format_map_link_parts(map_id: u32, raw_title: &str, diff: Option<&str>) -> String {
+    let safe_title = sanitize_md_link_label(&truncate_chars(raw_title, 52));
+    let map_url = format!("https://osu.ppy.sh/beatmaps/{map_id}");
+
+    match diff.map(str::trim).filter(|d| !d.is_empty()) {
+        Some(d) => {
+            let safe_diff = sanitize_md_link_label(&truncate_chars(d, 28));
+            format!("**[{safe_title}]({map_url}) [{safe_diff}]**")
+        }
+        None => format!("**[{safe_title}]({map_url})**"),
+    }
+}
+
+fn format_score_map_link(score: &Score) -> String {
+    let raw_title = match score.mapset.as_ref() {
+        Some(ms) => format!("{} - {}", ms.artist, ms.title),
+        None => format!("Beatmap #{}", score.map_id),
+    };
+    let diff = score.map.as_ref().map(|m| m.version.as_str());
+    format_map_link_parts(score.map_id, &raw_title, diff)
 }
 
 fn score_map_display(score: &Score) -> String {
@@ -545,10 +586,8 @@ fn build_session_message(session: &ProfileScoreSession) -> MessageBuilder<'stati
             ListKind::Top => format!("**#{}**", entry.display_index),
         };
         let grade = format_grade_emoji(score.grade);
-        let raw_map = truncate_chars(&score_map_display(score), 72);
-        let escaped_map = escape_md_link_text(&raw_map);
-        let map_url = format!("https://osu.ppy.sh/beatmaps/{}", score.map_id);
-        let mods = format_mods(&score.mods);
+        let map_link = format_score_map_link(score);
+        let mods = format_score_mods(&score.mods, score.set_on_lazer);
 
         let primary_stat = if let Some(pp) = score.pp {
             format!("**{pp:.1}pp**")
@@ -569,7 +608,7 @@ fn build_session_message(session: &ProfileScoreSession) -> MessageBuilder<'stati
 
         let _ = writeln!(
             desc,
-            "{idx_label} {grade} [**{escaped_map}**]({map_url}) `{mods}`\n\
+            "{idx_label} {grade} {map_link} `{mods}`\n\
              {primary_stat} • **{acc:.2}%** • **{combo}** • `{hits}` • <t:{ts}:R>"
         );
     }
@@ -993,9 +1032,9 @@ async fn execute_link_profile(
         .color(ACCENT_COLOR)
         .author(author)
         .description(format!(
-            "Your Discord account is now linked to [**{}**]({profile_url}) (`#{}`).\n\
+            "Your Discord account is now linked to **[{}]({profile_url})** (`#{}`).\n\
              You can now use `{prefix}rr`, `{prefix}rtop`, and `{prefix}rrn` without typing a username.",
-            escape_md_link_text(osu_user.username.as_str()),
+            sanitize_md_link_label(osu_user.username.as_str()),
             osu_user.user_id
         ));
 
@@ -1436,7 +1475,7 @@ pub async fn handle_profile_render_button(
     defer_ephemeral_reply(&ctx, &component).await?;
 
     let map_label = score_map_display(&entry.score);
-    let mods_label = format_mods(&entry.score.mods);
+    let mods_label = format_score_mods(&entry.score.mods, entry.score.set_on_lazer);
 
     let mut replay_data = match prepare_score_replay_data(
         &ctx,
@@ -1616,5 +1655,56 @@ mod tests {
         assert_eq!(page_bounds(11, 1, 5), (5, 10));
         assert_eq!(page_bounds(11, 2, 5), (10, 11));
         assert_eq!(page_bounds(11, 99, 5), (10, 11));
+    }
+
+    #[test]
+    fn long_map_titles_and_brackets_never_break_discord_markdown_links() {
+        // Exact regression case: long title whose diff used to be truncated mid-[bracket]
+        let rendered = format_map_link_parts(
+            5335659,
+            "Masayoshi Minoshima feat. misato - Necro Fantasia (Eunomia Ver.)",
+            Some("Unimaginable"),
+        );
+        // Extract the `[label](url)` link text and verify zero brackets/backslashes/asterisks inside
+        let after_open = rendered.strip_prefix("**[").expect("starts with **[");
+        let (label, rest) = after_open
+            .split_once("](https://osu.ppy.sh/beatmaps/5335659)")
+            .expect("valid markdown link");
+        assert!(!label.contains('[') && !label.contains(']'));
+        assert!(!label.contains('\\') && !label.contains('*'));
+        assert_eq!(rest, " [Unimaginable]**");
+
+        // Titles with raw `[brackets]`, `**stars**`, and `\` inside title & diff
+        let nasty = format_map_link_parts(
+            12345,
+            "Camellia [feat. Nanahira] - **Song\\Name**",
+            Some("[Super Long Difficulty Name That Exceeds Twenty Eight Chars]"),
+        );
+        let after_open = nasty.strip_prefix("**[").expect("starts with **[");
+        let (label, rest) = after_open
+            .split_once("](https://osu.ppy.sh/beatmaps/12345)")
+            .expect("valid markdown link");
+        assert!(!label.contains('[') && !label.contains(']') && !label.contains('\\'));
+        assert!(!label.contains('*'));
+        assert!(rest.starts_with(" [") && rest.ends_with("]**"));
+        assert!(!rest.contains('\\'));
+    }
+
+    #[test]
+    fn hides_implicit_classic_mod_on_stable_only() {
+        use rosu_v2::prelude::GameMod;
+        let mut mods = GameMods::new();
+        mods.insert(GameMod::ClassicOsu(Default::default()));
+        assert_eq!(format_score_mods(&mods, false), "NM");
+        assert_eq!(format_score_mods(&mods, true), "+CL");
+
+        mods.insert(GameMod::HiddenOsu(Default::default()));
+        mods.insert(GameMod::DoubleTimeOsu(Default::default()));
+        assert_eq!(format_score_mods(&mods, false), "+HDDT");
+        let lazer_mods = format_score_mods(&mods, true);
+        assert!(lazer_mods.starts_with('+'));
+        assert!(lazer_mods.contains("HD"));
+        assert!(lazer_mods.contains("DT"));
+        assert!(lazer_mods.contains("CL"));
     }
 }

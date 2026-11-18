@@ -2105,7 +2105,8 @@ async fn create_title(
         None
     };
 
-    let (pp_2025, pp_2024, pp_2022, pp_2021) = if include_historical_pp && !is_lazer {
+    let (pp_2025, pp_2024, pp_2022, pp_2021) =
+        if include_historical_pp && !is_lazer && show_pp_select_menu() {
         let osu_bytes_old = Arc::clone(&osu_bytes);
         tokio::task::spawn_blocking(move || {
             let pp_2025 = rosu_pp_2025::Beatmap::from_bytes(&osu_bytes_old)
@@ -2456,7 +2457,7 @@ fn build_replay_info_embed(
         );
     }
 
-    let pp_select_row = if options.len() > 1 {
+    let pp_select_row = if show_pp_select_menu() && options.len() > 1 {
         Some(
             twilight_model::channel::message::component::Component::ActionRow(
                 twilight_model::channel::message::component::ActionRow {
@@ -2933,6 +2934,17 @@ pub(crate) fn adaptive_discord_max_mb() -> u64 {
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())
         .unwrap_or(460)
+}
+
+pub(crate) fn show_pp_select_menu() -> bool {
+    std::env::var("SHOW_PP_SELECT_MENU")
+        .ok()
+        .is_some_and(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
 }
 
 pub(crate) fn pp_select_timeout_secs() -> u64 {
