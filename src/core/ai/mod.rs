@@ -1,8 +1,12 @@
 use std::collections::{hash_map::Entry, HashMap, VecDeque};
+use std::path::PathBuf;
 
 use eyre::{Context as _, Result};
 use serde::Serialize;
-use tokio::sync::{Mutex, RwLock};
+use tokio::{
+    io::AsyncWriteExt as _,
+    sync::{Mutex, RwLock},
+};
 use twilight_model::id::{
     marker::{ChannelMarker, MessageMarker},
     Id,
@@ -16,6 +20,7 @@ pub mod search;
 pub use ollama::{
     describe_ai_error, normalize_num_predict, AiAttachmentFile, AiPersonaMode, AiReply,
     AiStreamEvent, AiThinkDepth, LastGenerationStats, OllamaClient, RuntimeAiConfig,
+    DEFAULT_NUM_CTX,
 };
 pub use osu_tools::OsuToolContext;
 pub use queue::{AiQueue, DEFAULT_MAX_AI_QUEUE_SIZE};
@@ -120,18 +125,33 @@ pub fn base64_encode(bytes: &[u8]) -> String {
 /// Sanitize untrusted text before inserting into LLM prompts by stripping null
 /// bytes, disallowed control characters, and ChatML/special tokenizer delimiters.
 pub fn sanitize_llm_text(text: &str) -> String {
-    text.chars()
+    let mut current: String = text
+        .chars()
         .filter(|&c| c == '\n' || c == '\r' || c == '\t' || !c.is_control())
-        .collect::<String>()
-        .replace("<|im_start|>", "")
-        .replace("<|im_end|>", "")
-        .replace("<|endoftext|>", "")
+        .collect();
+    for _ in 0..5 {
+        let next = current
+            .replace("<|im_start|>", "")
+            .replace("<|im_end|>", "")
+            .replace("<|endoftext|>", "");
+        if next == current {
+            break;
+        }
+        current = next;
+    }
+    current
 }
 
 const SYSTEM_PROMPT_ENV: &str = "AI_SYSTEM_PROMPT";
-const CUTOFFS_FILE_PATH: &str = "data/ai_cutoffs.json";
+const CUTOFFS_FILE_NAME: &str = "ai_cutoffs.json";
 const FALLBACK_SYSTEM_PROMPT: &str =
     "You are a helpful, witty Discord assistant. Reply concisely in plain text.";
+
+fn cutoffs_file_path() -> PathBuf {
+    crate::core::BotConfig::try_get()
+        .map(|c| c.paths.folders().join(CUTOFFS_FILE_NAME))
+        .unwrap_or_else(|| PathBuf::from("data").join(CUTOFFS_FILE_NAME))
+}
 
 pub struct AiClient {
     ollama: OllamaClient,
@@ -172,7 +192,7 @@ impl AiClient {
             .unwrap_or(DEFAULT_MAX_AI_QUEUE_SIZE);
 
         let cutoffs = Self::load_cutoffs_from_disk().await;
-        let ollama = OllamaClient::new();
+        let ollama = OllamaClient::new().await;
         let configured_model = ollama.snapshot_config().model;
 
         match ollama.list_models().await {
@@ -346,7 +366,8 @@ impl AiClient {
     }
 
     async fn load_cutoffs_from_disk() -> HashMap<Id<ChannelMarker>, i64> {
-        let Ok(bytes) = tokio::fs::read(CUTOFFS_FILE_PATH).await else {
+        let path = cutoffs_file_path();
+        let Ok(bytes) = tokio::fs::read(&path).await else {
             return HashMap::new();
         };
         let Ok(raw) = serde_json::from_slice::<HashMap<String, i64>>(&bytes) else {
@@ -363,13 +384,16 @@ impl AiClient {
             .map(|(k, &v)| (k.get().to_string(), v))
             .collect();
         let json = serde_json::to_vec_pretty(&raw)?;
-        let path = std::path::Path::new(CUTOFFS_FILE_PATH);
+        let path = cutoffs_file_path();
         if let Some(parent) = path.parent() {
             let _ = tokio::fs::create_dir_all(parent).await;
         }
         let tmp = path.with_extension("json.tmp");
-        tokio::fs::write(&tmp, json).await?;
-        tokio::fs::rename(&tmp, path).await?;
+        let mut file = tokio::fs::File::create(&tmp).await?;
+        file.write_all(&json).await?;
+        file.sync_all().await?;
+        drop(file);
+        tokio::fs::rename(&tmp, &path).await?;
         Ok(())
     }
 

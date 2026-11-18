@@ -6,9 +6,7 @@ use twilight_interactions::command::CreateCommand;
 
 use crate::{
     core::Context,
-    util::{
-        builder::MessageBuilder, interaction::InteractionCommand, InteractionCommandExt, MessageExt,
-    },
+    util::{builder::MessageBuilder, interaction::InteractionCommand, InteractionCommandExt},
 };
 
 #[derive(CreateCommand, SlashCommand)]
@@ -23,21 +21,13 @@ use crate::{
 pub struct Ping;
 
 async fn slash_ping(ctx: Arc<Context>, command: InteractionCommand) -> Result<()> {
-    let builder = MessageBuilder::new().content("Pong");
     let start = Instant::now();
-    command.callback(&ctx, builder, false).await?;
-    let elapsed = (Instant::now() - start).as_millis();
-
-    let response = ctx
-        .interaction()
-        .response(&command.token)
-        .await?
-        .model()
-        .await?;
+    command.defer(&ctx, false).await?;
+    let elapsed = start.elapsed().as_millis();
 
     let content = format!(":ping_pong: Pong! ({elapsed}ms)");
     let builder = MessageBuilder::new().content(content);
-    response.update(&ctx, &builder).await?;
+    command.update(&ctx, &builder).await?;
 
     Ok(())
 }

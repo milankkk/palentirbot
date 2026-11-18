@@ -5,9 +5,9 @@ use eyre::Result;
 use twilight_interactions::command::{CommandModel, CommandOption, CreateCommand, CreateOption};
 
 use crate::{
-    core::Context,
+    core::{BotConfig, Context},
     util::{
-        builder::MessageBuilder, interaction::InteractionCommand, InteractionCommandExt,
+        builder::MessageBuilder, interaction::InteractionCommand, Authored, InteractionCommandExt,
     },
 };
 
@@ -32,7 +32,20 @@ pub struct AiClear {
 
 async fn slash_aiclear(ctx: Arc<Context>, mut command: InteractionCommand) -> Result<()> {
     let AiClear { action } = AiClear::from_interaction(command.input_data())?;
+    let user_id = command.user_id()?;
+    let is_owner = BotConfig::get().owners.contains(&user_id);
     let channel_id = command.channel_id;
+
+    if matches!(action, Some(AiClearAction::PromptOnly)) && !is_owner {
+        command
+            .error_callback(
+                &ctx,
+                "Only the bot owner can reload `prompt.txt`.",
+                true,
+            )
+            .await?;
+        return Ok(());
+    }
 
     let do_context = match action {
         None | Some(AiClearAction::Both) | Some(AiClearAction::ContextOnly) => true,
@@ -40,7 +53,7 @@ async fn slash_aiclear(ctx: Arc<Context>, mut command: InteractionCommand) -> Re
     };
 
     let do_prompt = match action {
-        None | Some(AiClearAction::Both) | Some(AiClearAction::PromptOnly) => true,
+        None | Some(AiClearAction::Both) | Some(AiClearAction::PromptOnly) => is_owner,
         Some(AiClearAction::ContextOnly) => false,
     };
 
@@ -65,6 +78,8 @@ async fn slash_aiclear(ctx: Arc<Context>, mut command: InteractionCommand) -> Re
                 response.push_str("⚠️ Failed to reload system prompt from file.");
             }
         }
+    } else if matches!(action, None | Some(AiClearAction::Both)) {
+        response.push_str("ℹ️ System prompt reload is restricted to the bot owner.");
     }
 
     let queued = ctx.ai().queue_len().await;

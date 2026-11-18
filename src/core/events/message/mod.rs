@@ -18,14 +18,14 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
         .and_then(|gid| ctx.guild_settings(gid, |s| s.effective_prefix().to_owned()))
         .unwrap_or_else(|| DEFAULT_PREFIX.to_owned());
 
-    let bot_id = ctx.cache.current_user(|u| u.id).ok();
+    let bot_id = ctx.bot_user_id();
 
     // Check if the message is a direct reply to a conversational AI message sent by the bot
     let is_reply_to_bot = msg
         .referenced_message
         .as_deref()
         .map(|replied| {
-            Some(replied.author.id) == bot_id
+            replied.author.id == bot_id
                 && crate::commands::utility::is_conversational_ai_message(replied)
         })
         .unwrap_or(false);
@@ -34,12 +34,15 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
         Some(rest) => rest.trim_start(),
         None => {
             let trimmed = msg.content.trim();
-            if is_reply_to_bot && (!trimmed.is_empty() || !msg.attachments.is_empty()) {
+            if is_reply_to_bot
+                && (!trimmed.is_empty() || !msg.attachments.is_empty())
+                && !crate::commands::utility::is_non_ai_command_with_prefix(trimmed, Some(&prefix))
+            {
                 crate::commands::utility::handle_prefix_ask(ctx, &msg, &msg.content, &prefix).await;
                 return;
             }
             if let Some(stripped) =
-                bot_id.and_then(|id| crate::commands::utility::strip_bot_mention(&msg.content, id))
+                crate::commands::utility::strip_bot_mention(&msg.content, bot_id)
             {
                 if !crate::commands::utility::is_non_ai_command_with_prefix(&stripped, Some(&prefix))
                 {
@@ -79,6 +82,12 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
 
         // ── aicontext / context ───────────────────────────────────────────────
         "aicontext" | "context" | "aic" => {
+            if let Err(reason) =
+                crate::commands::utility::check_ai_access(&ctx, msg.author.id, msg.guild_id).await
+            {
+                let _ = msg.error(&ctx, reason).await;
+                return;
+            }
             use crate::util::builder::MessageBuilder;
             let embed = crate::commands::utility::create_context_embed(&ctx, msg.channel_id).await;
             let _ = msg

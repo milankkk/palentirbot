@@ -11,7 +11,9 @@ use twilight_model::{
 
 use crate::{
     core::{
-        ai::{normalize_num_predict, AiPersonaMode, AiThinkDepth, RuntimeAiConfig},
+        ai::{
+            normalize_num_predict, AiPersonaMode, AiThinkDepth, RuntimeAiConfig, DEFAULT_NUM_CTX,
+        },
         BotConfig, Context,
     },
     util::{
@@ -223,7 +225,7 @@ async fn reply_embed(
         builder = builder.footer(FooterBuilder::new(f));
     }
     command
-        .callback(ctx, MessageBuilder::new().embed(builder.build()), false)
+        .callback(ctx, MessageBuilder::new().embed(builder.build()), true)
         .await?;
     Ok(())
 }
@@ -257,7 +259,13 @@ pub async fn handle_owner_ai(
                 .update_runtime_config(|c| c.model = next_model.clone())
                 .await?;
 
-            let note = if !installed.is_empty() && !installed.iter().any(|m| m == &cfg.model) {
+            let tag_matches = installed.is_empty()
+                || installed.iter().any(|m| {
+                    m == &cfg.model
+                        || m.strip_suffix(":latest") == Some(cfg.model.as_str())
+                        || cfg.model.strip_suffix(":latest") == Some(m.as_str())
+                });
+            let note = if !tag_matches {
                 format!(
                     "Switched active model to `{}`.\n⚠️ Note: Ollama `/api/tags` did not list this exact tag right now — ensure it is pulled if requests fail.",
                     cfg.model
@@ -332,7 +340,9 @@ pub async fn handle_owner_ai(
             .await
         }
         OwnerAi::Ctx(OwnerAiCtx { tokens }) => {
-            let ctx_size = u32::try_from(tokens).unwrap_or(12_288).clamp(2_048, 131_072);
+            let ctx_size = u32::try_from(tokens)
+                .unwrap_or(DEFAULT_NUM_CTX)
+                .clamp(2_048, 131_072);
             let cfg = ctx
                 .ai()
                 .update_runtime_config(|c| c.num_ctx = ctx_size)
@@ -395,10 +405,17 @@ pub async fn handle_owner_model_autocomplete(
     }
 
     let needle = focused_input.trim().to_ascii_lowercase();
-    let models = ctx.ai().list_models().await.unwrap_or_default();
+    let models = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        ctx.ai().list_models(),
+    )
+    .await
+    .ok()
+    .and_then(Result::ok)
+    .unwrap_or_default();
     let choices: Vec<CommandOptionChoice> = models
         .into_iter()
-        .filter(|m| needle.is_empty() || m.to_ascii_lowercase().contains(&needle))
+        .filter(|m| m.len() <= 100 && (needle.is_empty() || m.to_ascii_lowercase().contains(&needle)))
         .take(25)
         .map(|m| CommandOptionChoice {
             name: m.clone(),

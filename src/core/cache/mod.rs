@@ -13,7 +13,6 @@ use twilight_model::{
         marker::{ChannelMarker, GuildMarker, RoleMarker, UserMarker},
         Id,
     },
-    user::CurrentUser,
 };
 
 mod permissions;
@@ -56,15 +55,6 @@ impl Cache {
             .with_context(|| format!("missing channel {channel}"))?;
 
         Ok(f(&channel))
-    }
-
-    pub fn current_user<F, T>(&self, f: F) -> Result<T>
-    where
-        F: FnOnce(&CurrentUser) -> T,
-    {
-        let user = self.inner.current_user().context("missing current user")?;
-
-        Ok(f(&user))
     }
 
     pub fn guild<F, T>(&self, guild: Id<GuildMarker>, f: F) -> Result<T>

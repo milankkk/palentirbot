@@ -16,7 +16,7 @@ use crate::{
     util::{
         builder::{EmbedBuilder, MessageBuilder},
         interaction::InteractionCommand,
-        InteractionCommandExt,
+        Authored, InteractionCommandExt,
     },
 };
 
@@ -27,6 +27,12 @@ use crate::{
 pub struct AiContext;
 
 async fn slash_aicontext(ctx: Arc<Context>, command: InteractionCommand) -> Result<()> {
+    let user_id = command.user_id()?;
+    if let Err(reason) = super::ask::check_ai_access(&ctx, user_id, command.guild_id).await {
+        command.error_callback(&ctx, reason, true).await?;
+        return Ok(());
+    }
+
     command.defer(&ctx, true).await?;
     let embed = create_context_embed(&ctx, command.channel_id).await;
     let builder = MessageBuilder::new().embed(embed);
@@ -37,17 +43,14 @@ async fn slash_aicontext(ctx: Arc<Context>, command: InteractionCommand) -> Resu
 
 /// Build the rich context breakdown embed for both slash and prefix commands.
 pub async fn create_context_embed(ctx: &Context, channel_id: Id<ChannelMarker>) -> Embed {
-    let bot_id = ctx
-        .cache
-        .current_user(|user| user.id)
-        .expect("missing CurrentUser in cache");
+    let bot_id = ctx.bot_user_id();
 
     // 1. System prompt metrics
     let prompt = ctx.ai().get_prompt().await;
     let prompt_chars = prompt.chars().count();
     let prompt_bytes = prompt.len();
-    // In English & slang text with Qwen tokenizer, 1 token is ~3.8 characters
-    let prompt_tokens = (prompt_chars as f64 / 3.8).round() as usize;
+    // Align with ask.rs trim_history_to_budget (~3.5 chars/token)
+    let prompt_tokens = (prompt_chars as f64 / 3.5).ceil() as usize;
 
     let guild_prefix = ctx
         .cache
@@ -98,7 +101,7 @@ pub async fn create_context_embed(ctx: &Context, channel_id: Id<ChannelMarker>) 
     }
     let total_messages = user_messages + bot_messages;
 
-    let history_tokens = (history_chars as f64 / 3.8).round() as usize;
+    let history_tokens = (history_chars as f64 / 3.5).ceil() as usize;
 
     // 3. Overall window metrics
     let total_used_tokens = prompt_tokens + history_tokens;

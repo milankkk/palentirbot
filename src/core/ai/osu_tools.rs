@@ -13,6 +13,9 @@ const MAX_OSU_FILE_BYTES: usize = 5 * 1024 * 1024;
 pub struct OsuToolContext<'a> {
     pub osu: &'a Osu,
     pub blocked_discord_handles: &'a [String],
+    pub raw_user_prompt: Option<&'a str>,
+    #[allow(dead_code)]
+    pub ctx: Option<&'a crate::core::Context>,
 }
 
 pub fn parse_game_mode(raw: Option<&str>) -> GameMode {
