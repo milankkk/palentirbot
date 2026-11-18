@@ -20,7 +20,6 @@ static MY_USER_AGENT: &str = env!("CARGO_PKG_NAME");
 #[repr(u8)]
 enum Site {
     DiscordAttachment,
-    DownloadChimu,
     DownloadKitsu,
     DownloadNerinyan,
     DownloadCatboy,
@@ -29,7 +28,7 @@ enum Site {
 
 pub struct CustomClient {
     client: Client,
-    ratelimiters: [LeakyBucket; 6],
+    ratelimiters: [LeakyBucket; 5],
     upload: UploadData,
     upload_speed_bits: AtomicU64,
 }
@@ -72,7 +71,6 @@ impl CustomClient {
 
         let ratelimiters = [
             ratelimiter(2), // DiscordAttachment
-            ratelimiter(1), // DownloadChimu
             ratelimiter(1), // DownloadKitsu
             ratelimiter(1), // DownloadNerinyan
             ratelimiter(1), // DownloadCatboy
@@ -81,8 +79,9 @@ impl CustomClient {
 
         let default_speed: f64 = std::env::var("UPLOAD_MBPS")
             .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(70.0);
+            .and_then(|s| s.parse::<f64>().ok())
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .unwrap_or(25.0);
 
         Self {
             client,
@@ -186,9 +185,9 @@ impl CustomClient {
 
     async fn make_get_request(&self, url: impl AsRef<str>, site: Site) -> Result<Bytes> {
         let url = url.as_ref();
+        let redacted_url = url.split('?').next().unwrap_or(url);
         self.ratelimit(site).await;
-        trace!("GET request to url {url}");
-        warn!("Sending GET request to: {url}");
+        tracing::debug!("Sending GET request to: {redacted_url}");
 
         let response = self
             .client
@@ -196,19 +195,19 @@ impl CustomClient {
             .timeout(Duration::from_secs(90))
             .send()
             .await
-            .with_context(|| format!("failed to receive GET response from {url}"))?;
+            .with_context(|| format!("failed to receive GET response from {redacted_url}"))?;
 
         let status = response.status();
-        warn!("Response status: {status} for url: {url}");
+        tracing::debug!("Response status: {status} for url: {redacted_url}");
 
         if !status.is_success() {
-            bail!("failed with status code {status} when requesting {url}");
+            bail!("failed with status code {status} when requesting {redacted_url}");
         }
 
-        let bytes = Self::read_response_bytes_limited(response, url, MAX_DOWNLOAD_BYTES).await?;
+        let bytes = Self::read_response_bytes_limited(response, redacted_url, MAX_DOWNLOAD_BYTES).await?;
 
-        warn!(
-            "Got {} bytes from {url}, starts_with PK: {}",
+        tracing::debug!(
+            "Got {} bytes from {redacted_url}, starts_with PK: {}",
             bytes.len(),
             bytes.starts_with(b"PK")
         );
@@ -230,6 +229,7 @@ impl CustomClient {
             let target = crate::core::ai::search::validate_and_resolve_url(&current_url).await?;
             let mut client_builder = Client::builder()
                 .user_agent(MY_USER_AGENT)
+                .no_proxy()
                 .connect_timeout(Duration::from_secs(10))
                 .timeout(Duration::from_secs(120))
                 .redirect(reqwest::redirect::Policy::none());
@@ -272,13 +272,6 @@ impl CustomClient {
         }
 
         bail!("too many redirects while downloading skin")
-    }
-
-    pub async fn download_chimu_mapset(&self, mapset_id: u32) -> Result<Bytes> {
-        let url = format!("https://api.chimu.moe/v1/download/{mapset_id}");
-        let bytes = self.make_get_request(url, Site::DownloadChimu).await?;
-        ensure!(bytes.starts_with(b"PK"), "chimu returned invalid data");
-        Ok(bytes)
     }
 
     pub async fn download_kitsu_mapset(&self, mapset_id: u32) -> Result<Bytes> {
@@ -352,6 +345,7 @@ impl CustomClient {
         let response = self
             .client
             .post(self.upload.url)
+            .header("X-Upload-Secret", self.upload.secret)
             .timeout(Duration::from_secs(600))
             .multipart(form)
             .send()

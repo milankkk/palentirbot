@@ -66,13 +66,11 @@ impl Context {
         )
     }
 
-    #[allow(dead_code)]
     pub fn is_osu_auth_error(err: &OsuError) -> bool {
         matches!(err, OsuError::NoToken)
             || matches!(err, OsuError::Response { status, .. } if status.as_u16() == 401)
     }
 
-    #[allow(dead_code)]
     pub async fn refresh_osu_client(&self) -> Result<Arc<Osu>> {
         let mut guard = self.osu_refresh_lock.lock().await;
         if let Some(last) = *guard {

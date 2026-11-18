@@ -117,6 +117,10 @@ pub struct Emojis {
 }
 
 impl BotConfig {
+    pub fn try_get() -> Option<&'static Self> {
+        CONFIG.get()
+    }
+
     pub fn get() -> &'static Self {
         CONFIG
             .get()

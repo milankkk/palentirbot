@@ -9,19 +9,27 @@ use eyre::{Context as _, Report, Result};
 use rosu_pp::Beatmap;
 use rosu_v2::prelude::GameModsLegacy;
 use std::{
+    collections::HashMap,
     error::Error as StdError,
     ffi::OsStr,
     fmt::{Display, Formatter, Result as FmtResult},
-    io::Cursor,
+    io::{BufWriter, Cursor, Read, Write},
     path::{Path, PathBuf},
     process::Stdio,
     sync::{
-        atomic::Ordering,
+        atomic::{AtomicU64, Ordering},
         Arc,
     },
 };
+use once_cell::sync::Lazy;
 use tokio::process::Command;
+use tokio::sync::Mutex as AsyncMutex;
+use tokio::task::JoinHandle;
 use tokio::time::{sleep, Duration};
+use twilight_model::id::{
+    marker::{ChannelMarker, MessageMarker, UserMarker},
+    Id,
+};
 use zip::ZipArchive;
 
 use super::{PpTriple, ReplayData, ReplayQueue, ReplaySlim};
@@ -95,32 +103,49 @@ async fn process_single_replay(
     }
 
     let replay_hash = replay.replay_hash.as_deref().unwrap_or("");
+    let beatmap_hash = replay.beatmap_hash.as_deref();
 
-    let (mapset_id, map_id, map_version, mapset_title) = match replay.beatmap_hash.as_deref() {
-        Some(hash) => match ctx.osu().beatmap().checksum(hash).await {
-            Ok(map) => match map.mapset {
-                Some(mapset) => (
-                    mapset.mapset_id,
-                    map.map_id,
-                    map.version,
-                    format!("{} - {}", mapset.artist, mapset.title),
-                ),
-                None => {
-                    warn!("map without mapset");
-                    let content = "The mapset was not received when requesting the map from the osu!api";
-                    let _ = input_channel.error(&ctx, content).await;
-                    eyre::bail!("map without mapset");
+    let (mapset_id, map_id, map_version, mapset_title) = match beatmap_hash {
+        Some(hash) => {
+            let mut res = ctx.osu().beatmap().checksum(hash).await;
+            if let Err(ref err) = res {
+                if Context::is_osu_auth_error(err) {
+                    if let Ok(fresh) = ctx.refresh_osu_client().await {
+                        res = fresh.beatmap().checksum(hash).await;
+                    }
                 }
-            },
-            Err(err) => {
-                let context = format!("failed to request map with hash {hash}");
-                let err = Report::from(err).wrap_err(context);
-                warn!("{err:?}");
-                let content = "Failed to retrieve map. Maybe it's not submitted?";
-                let _ = input_channel.error(&ctx, content).await;
-                return Err(err);
             }
-        },
+            match res {
+                Ok(map) => match map.mapset {
+                    Some(mapset) => (
+                        mapset.mapset_id,
+                        map.map_id,
+                        map.version,
+                        format!("{} - {}", mapset.artist, mapset.title),
+                    ),
+                    None => {
+                        warn!("map without mapset");
+                        let content =
+                            "The mapset was not received when requesting the map from the osu!api";
+                        let _ = input_channel.error(&ctx, content).await;
+                        eyre::bail!("map without mapset");
+                    }
+                },
+                Err(err) => {
+                    let is_not_found = matches!(err, rosu_v2::error::OsuError::NotFound);
+                    let context = format!("failed to request map with hash {hash}");
+                    let err = Report::from(err).wrap_err(context);
+                    warn!("{err:?}");
+                    let content = if is_not_found {
+                        "Failed to retrieve map. Maybe it's not submitted?"
+                    } else {
+                        "Failed to contact the osu! API while looking up the beatmap. Please try again in a moment."
+                    };
+                    let _ = input_channel.error(&ctx, content).await;
+                    return Err(err);
+                }
+            }
+        }
         None => {
             warn!("missing hash in replay requested by user {user}");
             let content = "Missing the beatmap hash in the replay file";
@@ -133,28 +158,33 @@ async fn process_single_replay(
     let mut mapset_path = config.paths.songs();
     mapset_path.push(mapset_id.to_string());
 
-    if tokio::fs::try_exists(&mapset_path).await.unwrap_or(false) {
-        warn!("Mapset {mapset_id} already exists locally, skipping download.");
+    let mapset_already_cached = tokio::fs::try_exists(&mapset_path).await.unwrap_or(false);
+    if mapset_already_cached {
+        tracing::debug!("Mapset {mapset_id} already exists locally, verifying difficulty.");
         ctx.replay_queue.set_status(ReplayStatus::MapFound).await;
         ctx.replay_queue.notify.notify_waiters();
-        sleep(Duration::from_secs(1)).await;
     } else {
-        warn!("Started map download");
+        tracing::debug!("Started map download for mapset {mapset_id}");
         ctx.replay_queue.set_status(ReplayStatus::Downloading).await;
         ctx.replay_queue.notify.notify_waiters();
 
-        if let Err(err) = download_mapset(&ctx, mapset_id).await {
-            warn!("{err:?}");
-            let content = "Failed to download map. Mirrors are likely down, try again later.";
-            let _ = input_channel
-                .create_message(
-                    &ctx,
-                    &crate::util::builder::MessageBuilder::new().content(content),
-                )
-                .await;
-            return Err(err);
+        let dl_cancelled = tokio::select! {
+            biased;
+            _ = cancel_notify.notified() => true,
+            res = download_mapset_inner(&ctx, mapset_id, false) => {
+                if let Err(err) = res {
+                    warn!("{err:?}");
+                    let content = "Failed to download map. Mirrors are likely down, try again later.";
+                    let _ = input_channel.error(&ctx, content).await;
+                    return Err(err);
+                }
+                false
+            }
+        };
+        if dl_cancelled || cancelled.load(Ordering::Acquire) {
+            return handle_cancelled_cleanup(&ctx, queue_message, &path, None, input_channel, user).await;
         }
-        warn!("Finished map download");
+        tracing::debug!("Finished map download for mapset {mapset_id}");
     }
 
     let mut settings_path = config.paths.danser().to_owned();
@@ -185,8 +215,25 @@ async fn process_single_replay(
         }
     };
 
-    let map_osu_file = match find_beatmap_osu_file(mapset_id, map_id, &map_version).await {
-        Ok(osu_file) => osu_file,
+    let mut found = find_beatmap_osu_file(mapset_id, map_id, &map_version, beatmap_hash).await;
+    let needs_refresh = match &found {
+        Ok((_, md5_ok)) => !md5_ok && mapset_already_cached,
+        Err(_) => mapset_already_cached,
+    };
+    if needs_refresh {
+        tracing::info!(
+            mapset_id,
+            map_id,
+            "Cached mapset missing expected beatmap or checksum mismatch; re-downloading"
+        );
+        ctx.replay_queue.set_status(ReplayStatus::Downloading).await;
+        ctx.replay_queue.notify.notify_waiters();
+        download_mapset_inner(&ctx, mapset_id, true).await?;
+        found = find_beatmap_osu_file(mapset_id, map_id, &map_version, beatmap_hash).await;
+    }
+
+    let (map_osu_file, _) = match found {
+        Ok(res) => res,
         Err(err) => {
             let err = err.wrap_err("failed to find beatmap osu file");
             warn!("{err:?}");
@@ -203,6 +250,7 @@ async fn process_single_replay(
 
     let TitleResult {
         title: video_title,
+        stars,
         pp_v4,
         pp_latest,
         pp_2025,
@@ -228,15 +276,15 @@ async fn process_single_replay(
     ctx.replay_queue.notify.notify_waiters();
 
     if cancelled.load(Ordering::Acquire) {
-        if let Some((msg_id, channel_id)) = queue_message {
-            let _ = ctx.http.delete_message(channel_id, msg_id).await;
-        }
-        let _ = tokio::fs::remove_file(&path).await;
-        return Ok(());
+        return handle_cancelled_cleanup(&ctx, queue_message, &path, None, input_channel, user).await;
     }
 
+    let osr_bytes = tokio::fs::read(&path)
+        .await
+        .context("failed to read queued .osr file for cache key")?;
     let cache_key = crate::core::replay_queue::cache::build_render_cache_key(
-        replay_hash,
+        &osr_bytes,
+        beatmap_hash.unwrap_or(""),
         &settings_bytes,
         time_points.start,
         time_points.end,
@@ -249,7 +297,9 @@ async fn process_single_replay(
     let cached_hit = if !force_rerender {
         if let Some(ref key) = cache_key {
             if let Some(cached) = ctx.replay_queue.cache.get(key).await {
-                if ctx.client().check_url_exists(&cached.watch_url).await {
+                let probe_url =
+                    derive_mp4_probe_url(&cached.watch_url, cached.video_url.as_deref());
+                if ctx.client().check_url_exists(&probe_url).await {
                     info!(key = %key, url = %cached.watch_url, "render cache hit");
                     Some((cached.watch_url, cached.video_url))
                 } else {
@@ -269,17 +319,26 @@ async fn process_single_replay(
     let (link, video_url, rendered_mp4_path) = if let Some((watch_url, vid_url)) = cached_hit {
         (watch_url, vid_url, None)
     } else {
-        tracing::warn!(mods = replay.mods, "replay mods being sent to danser");
+        tracing::debug!(mods = replay.mods, "replay mods being sent to danser");
 
         let canonical_path = tokio::fs::canonicalize(&path)
             .await
             .context("failed to canonicalize replay path")?;
 
+        let ld_library_path = match std::env::var("LD_LIBRARY_PATH") {
+            Ok(existing) if !existing.trim().is_empty() => {
+                format!("{}:{existing}", config.paths.danser().display())
+            }
+            _ => config.paths.danser().display().to_string(),
+        };
+
         let mut command = Command::new(danser_path);
-        warn!("danser dir: {:?}", config.paths.danser());
-        warn!("danser path: {:?}", danser_path);
+        tracing::debug!(danser_dir = ?config.paths.danser(), ?danser_path, "launching danser");
+        #[cfg(unix)]
+        command.process_group(0);
         command
             .current_dir(config.paths.danser())
+            .env("LD_LIBRARY_PATH", ld_library_path)
             .kill_on_drop(true)
             .arg("-noupdatecheck")
             .arg("-replay")
@@ -324,11 +383,7 @@ async fn process_single_replay(
         cancel_fut.as_mut().enable();
 
         if cancelled.load(Ordering::Acquire) {
-            if let Some((msg_id, channel_id)) = queue_message {
-                let _ = ctx.http.delete_message(channel_id, msg_id).await;
-            }
-            let _ = tokio::fs::remove_file(&path).await;
-            return Ok(());
+            return handle_cancelled_cleanup(&ctx, queue_message, &path, None, input_channel, user).await;
         }
 
         let mut child = match command.spawn() {
@@ -336,6 +391,7 @@ async fn process_single_replay(
             Err(err) => {
                 let err = Report::from(err).wrap_err("failed to start danser command");
                 tracing::warn!("{:?}", err);
+                let _ = cleanup_danser_outputs(config.paths.replays(), filename, &path).await;
                 let content = "Failed to run danser on the replay";
                 let _ = input_channel.error(&ctx, content).await;
                 return Err(err);
@@ -372,43 +428,41 @@ async fn process_single_replay(
         }
 
         if was_cancelled || cancelled.load(Ordering::Acquire) {
-            let _ = child.kill().await;
-            let _ = tokio::join!(stdout_handle, stderr_handle);
-            if let Some((msg_id, channel_id)) = queue_message {
-                let _ = ctx.http.delete_message(channel_id, msg_id).await;
-            }
-            let _ = tokio::fs::remove_file(&path).await;
-            let mut partial_mp4 = config.paths.replays().clone();
-            partial_mp4.push(format!("{filename}.mp4"));
-            let _ = tokio::fs::remove_file(&partial_mp4).await;
-            let _ = input_channel
-                .create_message(
-                    &ctx,
-                    &MessageBuilder::new().content(format!("🛑 <@{user}> Render cancelled.")),
-                )
-                .await;
-            return Ok(());
+            terminate_danser_group(&mut child).await;
+            drain_or_abort_stdio(stdout_handle, stderr_handle).await;
+            cleanup_danser_outputs(config.paths.replays(), filename, &path).await;
+            return handle_cancelled_cleanup(
+                &ctx,
+                queue_message,
+                &path,
+                None,
+                input_channel,
+                user,
+            )
+            .await;
         }
 
         tracing::trace!("Danser finished");
 
         match childres.expect("select finished via timeout branch") {
             Ok(Ok(status)) => {
-                let (out_tail, err_tail) = tokio::join!(stdout_handle, stderr_handle);
+                let (out_tail, err_tail) = drain_or_abort_stdio(stdout_handle, stderr_handle).await;
                 if !status.success() {
                     warn!(
-                        stdout_tail = ?out_tail.ok(),
-                        stderr_tail = ?err_tail.ok(),
+                        stdout_tail = ?out_tail,
+                        stderr_tail = ?err_tail,
                         "danser exited with non-zero status: {status}"
                     );
+                    cleanup_danser_outputs(config.paths.replays(), filename, &path).await;
                     let content = "Danser crashed or exited with an error code.";
                     let _ = input_channel.error(&ctx, content).await;
                     eyre::bail!("danser exited with non-zero status: {status}");
                 }
             }
             Ok(Err(err)) => {
-                let _ = child.kill().await;
-                let _ = tokio::join!(stdout_handle, stderr_handle);
+                terminate_danser_group(&mut child).await;
+                drain_or_abort_stdio(stdout_handle, stderr_handle).await;
+                cleanup_danser_outputs(config.paths.replays(), filename, &path).await;
                 let err = Report::from(err).wrap_err("failed to run danser command");
                 tracing::warn!("{:?}", err);
                 let content = "Failed to run danser on the replay";
@@ -416,40 +470,20 @@ async fn process_single_replay(
                 return Err(err);
             }
             Err(_) => {
-                let _ = child.kill().await;
-                let _ = tokio::join!(stdout_handle, stderr_handle);
+                terminate_danser_group(&mut child).await;
+                drain_or_abort_stdio(stdout_handle, stderr_handle).await;
+                cleanup_danser_outputs(config.paths.replays(), filename, &path).await;
                 let content = "Danser render timed out after 30 minutes.";
                 let _ = input_channel.error(&ctx, content).await;
                 eyre::bail!("danser render timed out after 1800s");
             }
         }
 
-        warn!("parsed replay mods bits: {}", replay.mods);
-        warn!(
-            "parsed replay mods: {:?}",
-            GameModsLegacy::from_bits(replay.mods)
+        tracing::debug!(
+            mods_bits = replay.mods,
+            mods = ?GameModsLegacy::from_bits(replay.mods),
+            "Finished replay processing"
         );
-        info!("Finished replay processing");
-
-        let without_prefix = video_title.trim_start_matches('[');
-        let (stars, rest) = without_prefix
-            .split_once("⭐] ")
-            .unwrap_or(("0.00", without_prefix));
-        let (player, rest) = rest.split_once(" | ").unwrap_or(("Unknown", rest));
-
-        let (rest, acc) = rest
-            .rsplit_once(" (")
-            .map(|(before, acc_part)| (before, acc_part.trim_end_matches(')').trim_end_matches('%')))
-            .unwrap_or_else(|| {
-                let trimmed = rest.trim_end_matches(')').trim_end_matches('%');
-                trimmed.rsplit_once(' ').unwrap_or((trimmed, "100.00"))
-            });
-
-        let (map_name, mods) = if let Some((m, md)) = rest.rsplit_once(" +") {
-            (m, md)
-        } else {
-            (rest, "NM")
-        };
 
         let sanitize = |s: &str| -> String {
             let mut res = String::new();
@@ -476,26 +510,36 @@ async fn process_single_replay(
             .unwrap_or_default()
             .as_secs();
 
+        let stars_str = format!("{stars:.2}");
+        let player_str = replay.player_name.as_deref().unwrap_or("Unknown");
+        let acc_str = format!("{:.2}", replay.accuracy());
+        let legacy_mods = GameModsLegacy::from_bits(replay.mods);
+        let mods_str = if legacy_mods.is_empty() {
+            "NM".to_owned()
+        } else {
+            legacy_mods.to_string()
+        };
         let hash_prefix: String = replay_hash.chars().take(8).collect();
-        let safe_filename = format!(
+        let raw_safe_filename = format!(
             "{}-{}-{}-{}-{}_{}_{}",
-            sanitize(stars),
-            sanitize(player),
-            sanitize(map_name),
-            sanitize(mods),
-            sanitize(acc),
+            sanitize(&stars_str),
+            sanitize(player_str),
+            sanitize(&title_for_display),
+            sanitize(&mods_str),
+            sanitize(&acc_str),
             hash_prefix,
             timestamp
         );
+        let safe_filename = clamp_utf8_bytes(&raw_safe_filename, 160);
 
         let mut old_filepath = config.paths.replays().clone();
-        old_filepath.push(format!("{}.mp4", filename));
+        old_filepath.push(format!("{filename}.mp4"));
 
         let mut new_filepath = config.paths.replays().clone();
-        new_filepath.push(format!("{}.mp4", safe_filename));
+        new_filepath.push(format!("{safe_filename}.mp4"));
 
         if let Err(err) = tokio::fs::rename(&old_filepath, &new_filepath).await {
-            warn!("Failed to rename MP4 file: {:?}", err);
+            tracing::debug!("Failed to rename MP4 file: {err:?}");
             new_filepath = old_filepath;
         }
 
@@ -503,7 +547,7 @@ async fn process_single_replay(
         ctx.replay_queue
             .set_status(ReplayStatus::Uploading(0))
             .await;
-        let beatmap_link = format!("https://osu.ppy.sh/beatmapsets/{}", mapset_id);
+        let beatmap_link = format!("https://osu.ppy.sh/beatmapsets/{mapset_id}");
 
         let upload_hash = if replay_hash.is_empty() {
             "nohash"
@@ -518,7 +562,25 @@ async fn process_single_replay(
             upload_hash,
         );
 
-        let (uploaded_link, uploaded_video_url) = match upload_fut.await {
+        let upload_res = tokio::select! {
+            biased;
+            _ = cancel_notify.notified() => None,
+            res = upload_fut => Some(res),
+        };
+
+        let Some(upload_res) = upload_res else {
+            return handle_cancelled_cleanup(
+                &ctx,
+                queue_message,
+                &path,
+                Some(&new_filepath),
+                input_channel,
+                user,
+            )
+            .await;
+        };
+
+        let (uploaded_link, uploaded_video_url) = match upload_res {
             Ok(res) if res.error != 0 => {
                 let err = format!("failed to upload: `{}`", res.text);
                 warn!("{err}");
@@ -538,7 +600,7 @@ async fn process_single_replay(
         };
 
         info!("Finished upload to server");
-        warn!("upload returned link: {}", uploaded_link);
+        tracing::debug!("upload returned link: {}", uploaded_link);
 
         if let Some(ref key) = cache_key {
             let created_at = time::OffsetDateTime::now_utc().unix_timestamp();
@@ -555,6 +617,18 @@ async fn process_single_replay(
                 .await;
         }
 
+        if cancelled.load(Ordering::Acquire) {
+            return handle_cancelled_cleanup(
+                &ctx,
+                queue_message,
+                &path,
+                Some(&new_filepath),
+                input_channel,
+                user,
+            )
+            .await;
+        }
+
         if let Ok(warmup_msg) = output_channel
             .create_message(&ctx, &MessageBuilder::new().content(uploaded_link.clone()))
             .await
@@ -568,18 +642,44 @@ async fn process_single_replay(
             .unwrap_or(0);
         let upload_mbps = ctx.client().upload_speed_mbps();
         let wait_secs = calculate_warmup_delay_secs(file_size_bytes, upload_mbps);
-        warn!(
+        tracing::debug!(
             "Wait time for dc cache: {}s (calculated at {:.1} Mbps)",
-            wait_secs, upload_mbps
+            wait_secs,
+            upload_mbps
         );
 
         let mut remaining = wait_secs;
         while remaining > 0 {
+            if cancelled.load(Ordering::Acquire) {
+                return handle_cancelled_cleanup(
+                    &ctx,
+                    queue_message,
+                    &path,
+                    Some(&new_filepath),
+                    input_channel,
+                    user,
+                )
+                .await;
+            }
             ctx.replay_queue
                 .set_status(ReplayStatus::Uploading(remaining))
                 .await;
             ctx.replay_queue.notify.notify_waiters();
-            sleep(Duration::from_secs(1)).await;
+            tokio::select! {
+                biased;
+                _ = cancel_notify.notified() => {
+                    return handle_cancelled_cleanup(
+                        &ctx,
+                        queue_message,
+                        &path,
+                        Some(&new_filepath),
+                        input_channel,
+                        user,
+                    )
+                    .await;
+                }
+                _ = sleep(Duration::from_secs(1)) => {}
+            }
             remaining = remaining.saturating_sub(1);
         }
         ctx.replay_queue.notify.notify_waiters();
@@ -613,7 +713,7 @@ async fn process_single_replay(
         _ => emojis.grade_fail.to_string(),
     };
 
-    let is_perfect_fc = replay.max_combo == max_possible_combo && replay.count_miss == 0;
+    let is_perfect_fc = u32::from(replay.max_combo) == max_possible_combo && replay.count_miss == 0;
     let replay_datetime: Option<time::OffsetDateTime> = replay
         .timestamp
         .and_then(|ts: i64| time::OffsetDateTime::from_unix_timestamp(ts).ok());
@@ -628,11 +728,7 @@ async fn process_single_replay(
         None => "Unknown play date".to_string(),
     };
 
-    let (aim_pp, speed_pp, acc_pp) = (
-        active_pp.aim_pp.or(pp_v4.aim_pp),
-        active_pp.speed_pp.or(pp_v4.speed_pp),
-        active_pp.acc_pp.or(pp_v4.acc_pp),
-    );
+    let (aim_pp, speed_pp, acc_pp) = (active_pp.aim_pp, active_pp.speed_pp, active_pp.acc_pp);
 
     let mut embed_fields = vec![
         EmbedField {
@@ -700,9 +796,17 @@ async fn process_single_replay(
         },
     ]);
 
+    let embed_title = if video_title.chars().count() > 256 {
+        let mut s: String = video_title.chars().take(253).collect();
+        s.push_str("...");
+        s
+    } else {
+        video_title.clone()
+    };
+
     let embed_builder = EmbedBuilder::new()
         .color(0x96DFE3)
-        .title(video_title)
+        .title(embed_title)
         .url(format!("https://osu.ppy.sh/beatmaps/{map_id}"))
         .fields(embed_fields);
 
@@ -711,12 +815,19 @@ async fn process_single_replay(
 
     let mut options = Vec::new();
     let mut push_opt = |id: &str, label: &str, desc: &str, t: PpTriple, is_default: bool| {
-        let mut value = format!(
+        let base_val = format!(
             "{id}|{is_perfect_fc}|{:.2}|{:.2}|{:.2}",
             t.pp, t.max_pp, t.nochoke_pp
         );
+        if base_val.len() > 100 {
+            return;
+        }
+        let mut value = base_val.clone();
         if let (Some(aim), Some(speed), Some(acc_val)) = (t.aim_pp, t.speed_pp, t.acc_pp) {
-            value.push_str(&format!("|{aim:.1}|{speed:.1}|{acc_val:.1}"));
+            let ext = format!("{base_val}|{aim:.1}|{speed:.1}|{acc_val:.1}");
+            if ext.len() <= 100 {
+                value = ext;
+            }
         }
         options.push(
             twilight_model::channel::message::component::SelectMenuOption {
@@ -837,6 +948,18 @@ async fn process_single_replay(
         ),
     );
 
+    if cancelled.load(Ordering::Acquire) {
+        return handle_cancelled_cleanup(
+            &ctx,
+            queue_message,
+            &path,
+            rendered_mp4_path.as_deref(),
+            input_channel,
+            user,
+        )
+        .await;
+    }
+
     let embed_builder = MessageBuilder::new().embed(embed).components(components);
     if let Err(err) = output_channel.create_message(&ctx, &embed_builder).await {
         warn!(
@@ -847,14 +970,24 @@ async fn process_single_replay(
 
     let content = format!("<@{user}> [Replay]({watch_url})");
 
-    let builder = MessageBuilder::new().content(content);
+    let builder = MessageBuilder::new()
+        .content(content.clone())
+        .allowed_user_mention(user);
     if let Some((msg_id, channel_id)) = queue_message {
         let _ = ctx.http.delete_message(channel_id, msg_id).await;
     }
 
     if let Err(err) = output_channel.create_message(&ctx, &builder).await {
-        let err = err.wrap_err("failed to send video link");
+        let err = err.wrap_err("failed to send video link to output channel");
         warn!("{err:?}");
+        if output_channel != input_channel {
+            let fallback = MessageBuilder::new()
+                .content(format!(
+                    "<@{user}> Rendered replay (failed to post in <#{output_channel}>): {watch_url}"
+                ))
+                .allowed_user_mention(user);
+            let _ = input_channel.create_message(&ctx, &fallback).await;
+        }
     }
 
     // 1. Delete generated .mp4 from Replays folder
@@ -864,7 +997,7 @@ async fn process_single_replay(
                 warn!("Failed to delete local MP4 file {:?}: {}", new_filepath, err);
             }
         } else {
-            warn!("Cleaned up local MP4 file at: {:?}.", new_filepath);
+            tracing::debug!("Cleaned up local MP4 file at: {:?}.", new_filepath);
         }
     }
 
@@ -874,7 +1007,7 @@ async fn process_single_replay(
             warn!("Failed to delete local OSR file {:?}: {}", path, err);
         }
     } else {
-        warn!("Cleaned up local OSR file at: {:?}.", path);
+        tracing::debug!("Cleaned up local OSR file at: {:?}.", path);
     }
 
     Ok(())
@@ -939,7 +1072,6 @@ struct MapsetDownloadError {
     kitsu: Report,
     nerinyan: Report,
     catboy: Report,
-    chimu: Report,
 }
 
 impl Display for MapsetDownloadError {
@@ -950,9 +1082,8 @@ impl Display for MapsetDownloadError {
             "failed to download mapset:\n\
             kitsu: {:?}\n\
             nerinyan: {:?}\n\
-            catboy: {:?}\n\
-            chimu: {:?}",
-            self.kitsu, self.nerinyan, self.catboy, self.chimu
+            catboy: {:?}",
+            self.kitsu, self.nerinyan, self.catboy
         )
     }
 }
@@ -964,84 +1095,164 @@ impl StdError for MapsetDownloadError {
     }
 }
 
-pub(crate) async fn download_mapset(ctx: &Context, mapset_id: u32) -> Result<()> {
-    const MAX_UNCOMPRESSED_MAPSET_BYTES: u64 = 500 * 1024 * 1024;
-    let bytes = request_mapset(ctx, mapset_id).await?;
-    let mut out_path = BotConfig::get().paths.songs();
-    out_path.push(mapset_id.to_string());
-    let cleanup_path = out_path.clone();
+static MAPSET_LOCKS: Lazy<AsyncMutex<HashMap<u32, Arc<AsyncMutex<()>>>>> =
+    Lazy::new(|| AsyncMutex::new(HashMap::new()));
+static TEMP_SEQ: AtomicU64 = AtomicU64::new(1);
 
-    let extract_res = tokio::task::spawn_blocking(move || -> Result<()> {
-        let cursor = Cursor::new(bytes);
-        let mut archive = ZipArchive::new(cursor).context("failed to create zip archive")?;
-        let mut total_size: u64 = 0;
-        for i in 0..archive.len() {
-            let entry = archive
-                .by_index(i)
-                .context("corrupt zip entry in beatmapset archive")?;
-            if entry.enclosed_name().is_none() {
-                eyre::bail!("beatmapset archive contains unsafe path traversal entry");
-            }
-            total_size = total_size
-                .checked_add(entry.size())
-                .ok_or_else(|| eyre::eyre!("beatmapset archive size overflow"))?;
-            if total_size > MAX_UNCOMPRESSED_MAPSET_BYTES {
-                eyre::bail!("beatmapset archive exceeds 500MB uncompressed limit");
-            }
+async fn lock_for_mapset(mapset_id: u32) -> Arc<AsyncMutex<()>> {
+    let mut map = MAPSET_LOCKS.lock().await;
+    Arc::clone(
+        map.entry(mapset_id)
+            .or_insert_with(|| Arc::new(AsyncMutex::new(()))),
+    )
+}
+
+/// Extract a ZIP archive safely with strict true decompressed byte caps, entry limits, and no `0o000` chmod.
+pub(crate) fn extract_zip_safely(
+    bytes: &[u8],
+    dest: &Path,
+    max_total_bytes: u64,
+    max_entries: usize,
+) -> Result<()> {
+    let cursor = Cursor::new(bytes);
+    let mut archive = ZipArchive::new(cursor).context("failed to create zip archive")?;
+    eyre::ensure!(
+        archive.len() <= max_entries,
+        "zip archive has {} entries (max {max_entries})",
+        archive.len()
+    );
+    std::fs::create_dir_all(dest).with_context(|| format!("failed to create extract dir {dest:?}"))?;
+
+    let mut written_total: u64 = 0;
+    for i in 0..archive.len() {
+        let entry = archive
+            .by_index(i)
+            .context("corrupt zip entry in archive")?;
+        let rel = entry
+            .enclosed_name()
+            .ok_or_else(|| eyre::eyre!("zip archive contains unsafe path traversal entry"))?
+            .to_owned();
+        if rel.as_os_str().is_empty() {
+            continue;
         }
-        archive
-            .extract(&out_path)
-            .with_context(|| format!("failed to extract zip archive at `{out_path:?}`"))?;
-        Ok(())
+        let out_path = dest.join(&rel);
+        if entry.is_dir() {
+            std::fs::create_dir_all(&out_path)?;
+            continue;
+        }
+        if let Some(parent) = out_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let remaining = max_total_bytes.saturating_sub(written_total);
+        let limit = remaining.saturating_add(1);
+        let file = std::fs::File::create(&out_path)
+            .with_context(|| format!("failed to create extracted file {out_path:?}"))?;
+        let mut writer = BufWriter::new(file);
+        let mut limited = entry.take(limit);
+        let copied = std::io::copy(&mut limited, &mut writer)
+            .with_context(|| format!("failed extracting {rel:?}"))?;
+        writer.flush()?;
+        written_total = written_total
+            .checked_add(copied)
+            .ok_or_else(|| eyre::eyre!("zip archive size overflow"))?;
+        eyre::ensure!(
+            written_total <= max_total_bytes,
+            "zip archive exceeds {} MB uncompressed limit",
+            max_total_bytes / (1024 * 1024)
+        );
+    }
+    Ok(())
+}
+
+pub(crate) async fn download_mapset(ctx: &Context, mapset_id: u32) -> Result<()> {
+    download_mapset_inner(ctx, mapset_id, false).await
+}
+
+async fn download_mapset_inner(
+    ctx: &Context,
+    mapset_id: u32,
+    force_redownload: bool,
+) -> Result<()> {
+    const MAX_UNCOMPRESSED_MAPSET_BYTES: u64 = 500 * 1024 * 1024;
+    const MAX_MAPSET_ENTRIES: usize = 4_096;
+
+    let mapset_lock = lock_for_mapset(mapset_id).await;
+    let _guard = mapset_lock.lock().await;
+
+    let songs_root = BotConfig::get().paths.songs();
+    let out_path = songs_root.join(mapset_id.to_string());
+    if !force_redownload && tokio::fs::try_exists(&out_path).await.unwrap_or(false) {
+        return Ok(());
+    }
+
+    let bytes = request_mapset(ctx, mapset_id).await?;
+    let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp_path = songs_root.join(format!(".tmp_{mapset_id}_{seq}"));
+    let tmp_clone = tmp_path.clone();
+
+    let extract_res = tokio::task::spawn_blocking(move || {
+        extract_zip_safely(&bytes, &tmp_clone, MAX_UNCOMPRESSED_MAPSET_BYTES, MAX_MAPSET_ENTRIES)
     })
     .await
     .context("blocking zip extraction task panicked")?;
 
     if extract_res.is_err() {
-        let _ = tokio::fs::remove_dir_all(&cleanup_path).await;
+        let _ = tokio::fs::remove_dir_all(&tmp_path).await;
+        return extract_res;
     }
 
-    extract_res
+    if tokio::fs::try_exists(&out_path).await.unwrap_or(false) {
+        let old_tmp = songs_root.join(format!(".old_{mapset_id}_{seq}"));
+        if tokio::fs::rename(&out_path, &old_tmp).await.is_ok() {
+            if let Err(err) = tokio::fs::rename(&tmp_path, &out_path).await {
+                let _ = tokio::fs::rename(&old_tmp, &out_path).await;
+                let _ = tokio::fs::remove_dir_all(&tmp_path).await;
+                return Err(err).context("failed moving extracted beatmapset into place");
+            }
+            let _ = tokio::fs::remove_dir_all(&old_tmp).await;
+        } else {
+            let _ = tokio::fs::remove_dir_all(&out_path).await;
+            if let Err(err) = tokio::fs::rename(&tmp_path, &out_path).await {
+                let _ = tokio::fs::remove_dir_all(&tmp_path).await;
+                return Err(err).context("failed replacing cached beatmapset");
+            }
+        }
+    } else if let Err(err) = tokio::fs::rename(&tmp_path, &out_path).await {
+        let _ = tokio::fs::remove_dir_all(&tmp_path).await;
+        return Err(err).context("failed moving extracted beatmapset into place");
+    }
+
+    Ok(())
 }
 
 async fn request_mapset(ctx: &Context, mapset_id: u32) -> Result<Bytes> {
     let kitsu = match ctx.client().download_kitsu_mapset(mapset_id).await {
         Ok(bytes) => {
-            warn!("osu.direct success");
+            tracing::debug!("osu.direct success");
             return Ok(bytes);
         }
         Err(err) => {
-            warn!("osu.direct failed: {err}");
+            tracing::debug!("osu.direct failed: {err}");
             err
         }
     };
     let nerinyan = match ctx.client().download_nerinyan_mapset(mapset_id).await {
         Ok(bytes) => {
-            warn!("nerinyan success");
+            tracing::debug!("nerinyan success");
             return Ok(bytes);
         }
         Err(err) => {
-            warn!("nerinyan failed: {err}");
+            tracing::debug!("nerinyan failed: {err}");
             err
         }
     };
     let catboy = match ctx.client().download_catboy_mapset(mapset_id).await {
         Ok(bytes) => {
-            warn!("catboy/nekoha success");
+            tracing::debug!("catboy/nekoha success");
             return Ok(bytes);
         }
         Err(err) => {
-            warn!("catboy/nekoha failed: {err}");
-            err
-        }
-    };
-    let chimu = match ctx.client().download_chimu_mapset(mapset_id).await {
-        Ok(bytes) => {
-            warn!("chimu success");
-            return Ok(bytes);
-        }
-        Err(err) => {
-            warn!("chimu failed: {err}");
+            tracing::debug!("catboy/nekoha failed: {err}");
             err
         }
     };
@@ -1050,19 +1261,19 @@ async fn request_mapset(ctx: &Context, mapset_id: u32) -> Result<Bytes> {
         kitsu,
         nerinyan,
         catboy,
-        chimu,
     }))
 }
 
 struct TitleResult {
     title: String,
+    stars: f64,
     pp_v4: PpTriple,
     pp_latest: Option<PpTriple>,
     pp_2025: Option<PpTriple>,
     pp_2024: Option<PpTriple>,
     pp_2022: Option<PpTriple>,
     pp_2021: Option<PpTriple>,
-    max_possible_combo: u16,
+    max_possible_combo: u32,
 }
 
 #[derive(Copy, Clone)]
@@ -1291,6 +1502,12 @@ async fn create_title(
     map_title: &str,
     is_lazer: bool,
 ) -> Result<TitleResult> {
+    let osu_bytes: Arc<[u8]> = Arc::from(
+        tokio::fs::read(&map_path)
+            .await
+            .with_context(|| format!("failed to read map at {map_path:?}"))?,
+    );
+    let osu_bytes_v4 = Arc::clone(&osu_bytes);
     let map_path_v4 = map_path.clone();
     let mods_val = replay.mods;
     let count_300 = replay.count_300 as u32;
@@ -1302,7 +1519,7 @@ async fn create_title(
     let score_val = replay.score;
 
     let (pp_v4, stars, max_possible_combo) = tokio::task::spawn_blocking(move || -> Result<_> {
-        let map = Beatmap::from_path(&map_path_v4)
+        let map = Beatmap::from_bytes(&osu_bytes_v4)
             .with_context(|| format!("failed to parse map at {map_path_v4:?}"))?;
 
         let diff_attrs = rosu_pp::Difficulty::new()
@@ -1370,9 +1587,9 @@ async fn create_title(
     let pp_latest = calc_latest_pp(&map_path, replay, max_possible_combo, is_lazer).await;
 
     let (pp_2025, pp_2024, pp_2022, pp_2021) = if !is_lazer {
-        let map_path_old = map_path.clone();
+        let osu_bytes_old = Arc::clone(&osu_bytes);
         tokio::task::spawn_blocking(move || {
-            let pp_2025 = rosu_pp_2025::Beatmap::from_path(&map_path_old)
+            let pp_2025 = rosu_pp_2025::Beatmap::from_bytes(&osu_bytes_old)
                 .ok()
                 .map(|map_2025| {
                     let diff_2025 = rosu_pp_2025::Difficulty::new()
@@ -1403,7 +1620,7 @@ async fn create_title(
                     PpTriple::basic(pp, nochoke_pp, max_pp)
                 });
 
-            let pp_2024 = rosu_pp_2024::Beatmap::from_path(&map_path_old)
+            let pp_2024 = rosu_pp_2024::Beatmap::from_bytes(&osu_bytes_old)
                 .ok()
                 .map(|map_2024| {
                     let diff_2024 = rosu_pp_2024::Difficulty::new()
@@ -1434,7 +1651,7 @@ async fn create_title(
                     PpTriple::basic(pp, nochoke_pp, max_pp)
                 });
 
-            let pp_2022 = rosu_pp_2022::Beatmap::from_path(&map_path_old)
+            let pp_2022 = rosu_pp_2022::Beatmap::from_bytes(&osu_bytes_old)
                 .ok()
                 .map(|map_2022| {
                     let pp = rosu_pp_2022::AnyPP::new(&map_2022)
@@ -1462,7 +1679,7 @@ async fn create_title(
                     PpTriple::basic(pp, nochoke_pp, max_pp)
                 });
 
-            let pp_2021 = rosu_pp_2021::Beatmap::from_path(&map_path_old)
+            let pp_2021 = rosu_pp_2021::Beatmap::from_bytes(&osu_bytes_old)
                 .ok()
                 .map(|map_2021| {
                     let diff_2021 = rosu_pp_2021::Difficulty::new()
@@ -1513,17 +1730,23 @@ async fn create_title(
 
     Ok(TitleResult {
         title: format!("[{stars}⭐] {player} | {map_title}{mods} ({acc}%)"),
+        stars,
         pp_v4,
         pp_latest,
         pp_2025,
         pp_2024,
         pp_2022,
         pp_2021,
-        max_possible_combo: max_possible_combo.try_into().unwrap_or(0),
+        max_possible_combo,
     })
 }
 
-async fn find_beatmap_osu_file(mapset_id: u32, map_id: u32, version: &str) -> Result<String> {
+async fn find_beatmap_osu_file(
+    mapset_id: u32,
+    map_id: u32,
+    version: &str,
+    expected_md5: Option<&str>,
+) -> Result<(String, bool)> {
     let mut items_dir = BotConfig::get().paths.songs();
     items_dir.push(mapset_id.to_string());
 
@@ -1531,9 +1754,9 @@ async fn find_beatmap_osu_file(mapset_id: u32, map_id: u32, version: &str) -> Re
         .await
         .with_context(|| format!("failed to read songs dir at {items_dir:?}"))?;
 
+    let mut candidate_by_id = None;
     let mut candidate_by_version_content = None;
     let mut candidate_by_filename = None;
-    let mut any_osu = None;
 
     let target_diff_suffix = format!("[{}].osu", version.to_lowercase());
 
@@ -1548,53 +1771,61 @@ async fn find_beatmap_osu_file(mapset_id: u32, map_id: u32, version: &str) -> Re
             Err(_) => continue,
         };
 
-        if any_osu.is_none() {
-            any_osu = Some(file_name.clone());
+        let Ok(bytes) = tokio::fs::read(&path).await else {
+            continue;
+        };
+
+        if expected_md5.is_some_and(|h| md5_hex(&bytes).eq_ignore_ascii_case(h)) {
+            return Ok((file_name, true));
         }
 
-        if file_name.to_lowercase().ends_with(&target_diff_suffix) {
+        if candidate_by_filename.is_none()
+            && file_name.to_lowercase().ends_with(&target_diff_suffix)
+        {
             candidate_by_filename = Some(file_name.clone());
         }
 
-        if let Ok(content) = tokio::fs::read_to_string(&path).await {
-            let mut file_beatmap_id = None;
-            let mut file_version = None;
+        let content = String::from_utf8_lossy(&bytes);
+        let mut file_beatmap_id = None;
+        let mut file_version = None;
 
-            for line in content.lines() {
-                if line.starts_with("[TimingPoints]") || line.starts_with("[HitObjects]") {
-                    break;
-                }
-                if let Some(rest) = line.strip_prefix("BeatmapID:") {
-                    if let Ok(id) = rest.trim().parse::<u32>() {
-                        file_beatmap_id = Some(id);
-                    }
-                } else if let Some(rest) = line.strip_prefix("Version:") {
-                    file_version = Some(rest.trim().to_string());
-                }
+        for line in content.lines() {
+            let trimmed = line.trim_end_matches('\r');
+            if trimmed.starts_with("[TimingPoints]") || trimmed.starts_with("[HitObjects]") {
+                break;
             }
+            if let Some(rest) = trimmed.strip_prefix("BeatmapID:") {
+                if let Ok(id) = rest.trim().parse::<u32>() {
+                    file_beatmap_id = Some(id);
+                }
+            } else if let Some(rest) = trimmed.strip_prefix("Version:") {
+                file_version = Some(rest.trim().to_string());
+            }
+        }
 
-            if let Some(id) = file_beatmap_id {
-                if id == map_id {
-                    return Ok(file_name);
-                }
+        if file_beatmap_id == Some(map_id) {
+            if expected_md5.is_none() {
+                return Ok((file_name, true));
             }
+            if candidate_by_id.is_none() {
+                candidate_by_id = Some(file_name.clone());
+            }
+        }
 
-            if let Some(ref v) = file_version {
-                if v.eq_ignore_ascii_case(version) {
-                    candidate_by_version_content = Some(file_name.clone());
-                }
-            }
+        if candidate_by_version_content.is_none()
+            && file_version
+                .as_deref()
+                .is_some_and(|v| v.eq_ignore_ascii_case(version))
+        {
+            candidate_by_version_content = Some(file_name);
         }
     }
 
-    if let Some(f) = candidate_by_version_content {
-        return Ok(f);
-    }
-    if let Some(f) = candidate_by_filename {
-        return Ok(f);
-    }
-    if let Some(f) = any_osu {
-        return Ok(f);
+    if let Some(f) = candidate_by_id
+        .or(candidate_by_version_content)
+        .or(candidate_by_filename)
+    {
+        return Ok((f, expected_md5.is_none()));
     }
 
     eyre::bail!("no matching .osu file found in {items_dir:?} for map_id {map_id} ({version})")
@@ -1613,4 +1844,225 @@ fn calculate_warmup_delay_secs(file_size_bytes: u64, upload_mbps: f64) -> u64 {
     let wait_secs = (full_transfer_secs * FRACTION) + EXTRA_BUFFER_SECS;
 
     wait_secs.clamp(MIN_WAIT_SECS, MAX_WAIT_SECS).ceil() as u64
+}
+
+async fn handle_cancelled_cleanup(
+    ctx: &Context,
+    queue_message: Option<(Id<MessageMarker>, Id<ChannelMarker>)>,
+    osr_path: &Path,
+    mp4_path: Option<&Path>,
+    input_channel: Id<ChannelMarker>,
+    user: Id<UserMarker>,
+) -> Result<()> {
+    if let Some((msg_id, channel_id)) = queue_message {
+        let _ = ctx.http.delete_message(channel_id, msg_id).await;
+    }
+    let _ = tokio::fs::remove_file(osr_path).await;
+    if let Some(mp4) = mp4_path {
+        let _ = tokio::fs::remove_file(mp4).await;
+    }
+    let msg = MessageBuilder::new()
+        .content(format!("🛑 <@{user}> Render cancelled."))
+        .allowed_user_mention(user);
+    let _ = input_channel.create_message(ctx, &msg).await;
+    Ok(())
+}
+
+pub(crate) async fn terminate_danser_group(child: &mut tokio::process::Child) {
+    #[cfg(unix)]
+    if let Some(pid) = child.id() {
+        if pid > 1 {
+            let pgid_arg = format!("-{pid}");
+            let _ = tokio::task::spawn_blocking(move || {
+                let _ = std::process::Command::new("kill")
+                    .args(["-s", "KILL", "--", &pgid_arg])
+                    .status();
+            })
+            .await;
+        }
+    }
+    let _ = child.kill().await;
+    let _ = child.wait().await;
+}
+
+async fn drain_or_abort_stdio<T>(
+    mut out_h: JoinHandle<T>,
+    mut err_h: JoinHandle<T>,
+) -> (Option<T>, Option<T>) {
+    let out = match tokio::time::timeout(Duration::from_secs(2), &mut out_h).await {
+        Ok(Ok(val)) => Some(val),
+        Ok(Err(_)) => None,
+        Err(_) => {
+            out_h.abort();
+            None
+        }
+    };
+    let err = match tokio::time::timeout(Duration::from_secs(2), &mut err_h).await {
+        Ok(Ok(val)) => Some(val),
+        Ok(Err(_)) => None,
+        Err(_) => {
+            err_h.abort();
+            None
+        }
+    };
+    (out, err)
+}
+
+async fn cleanup_danser_outputs(replays_dir: impl AsRef<Path>, filename: &str, osr_path: &Path) {
+    let replays_dir = replays_dir.as_ref();
+    let mp4_path = replays_dir.join(format!("{filename}.mp4"));
+    let _ = tokio::fs::remove_file(&mp4_path).await;
+    let temp_dir = replays_dir.join(format!("{filename}_temp"));
+    let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+    let _ = tokio::fs::remove_file(osr_path).await;
+}
+
+pub(crate) fn clamp_utf8_bytes(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s.trim_end_matches(['_', '-']);
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s[..end].trim_end_matches(['_', '-'])
+}
+
+pub(crate) fn derive_mp4_probe_url(watch_url: &str, video_url: Option<&str>) -> String {
+    if let Some(url) = video_url {
+        let trimmed = url.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_owned();
+        }
+    }
+    if let Some(pos) = watch_url.rfind("/watch/") {
+        let origin = &watch_url[..pos];
+        let rest = &watch_url[pos + "/watch/".len()..];
+        let stem = rest.split(['?', '#']).next().unwrap_or(rest).trim_matches('/');
+        if !stem.is_empty() {
+            if stem.ends_with(".mp4") {
+                return format!("{origin}/{stem}");
+            }
+            return format!("{origin}/{stem}.mp4");
+        }
+    }
+    watch_url.to_owned()
+}
+
+pub(crate) fn md5_hex(data: &[u8]) -> String {
+    const S: [u32; 64] = [
+        7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22,
+        5,  9, 14, 20, 5,  9, 14, 20, 5,  9, 14, 20, 5,  9, 14, 20,
+        4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23,
+        6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
+    ];
+    const K: [u32; 64] = [
+        0xd76aa478, 0xe8c7b756, 0x242070db, 0xc1bdceee, 0xf57c0faf, 0x4787c62a, 0xa8304613, 0xfd469501,
+        0x698098d8, 0x8b44f7af, 0xffff5bb1, 0x895cd7be, 0x6b901122, 0xfd987193, 0xa679438e, 0x49b40821,
+        0xf61e2562, 0xc040b340, 0x265e5a51, 0xe9b6c7aa, 0xd62f105d, 0x02441453, 0xd8a1e681, 0xe7d3fbc8,
+        0x21e1cde6, 0xc33707d6, 0xf4d50d87, 0x455a14ed, 0xa9e3e905, 0xfcefa3f8, 0x676f02d9, 0x8d2a4c8a,
+        0xfffa3942, 0x8771f681, 0x6d9d6122, 0xfde5380c, 0xa4beea44, 0x4bdecfa9, 0xf6bb4b60, 0xbebfbc70,
+        0x289b7ec6, 0xeaa127fa, 0xd4ef3085, 0x04881d05, 0xd9d4d039, 0xe6db99e5, 0x1fa27cf8, 0xc4ac5665,
+        0xf4292244, 0x432aff97, 0xab9423a7, 0xfc93a039, 0x655b59c3, 0x8f0ccc92, 0xffeff47d, 0x85845dd1,
+        0x6fa87e4f, 0xfe2ce6e0, 0xa3014314, 0x4e0811a1, 0xf7537e82, 0xbd3af235, 0x2ad7d2bb, 0xeb86d391,
+    ];
+
+    let mut msg = data.to_vec();
+    let bit_len = (data.len() as u64).wrapping_mul(8);
+    msg.push(0x80);
+    while msg.len() % 64 != 56 {
+        msg.push(0);
+    }
+    msg.extend_from_slice(&bit_len.to_le_bytes());
+
+    let mut a0: u32 = 0x6745_2301;
+    let mut b0: u32 = 0xefcd_ab89;
+    let mut c0: u32 = 0x98ba_dcfe;
+    let mut d0: u32 = 0x1032_5476;
+
+    for chunk in msg.chunks_exact(64) {
+        let mut m = [0_u32; 16];
+        for (i, word) in chunk.chunks_exact(4).enumerate() {
+            m[i] = u32::from_le_bytes([word[0], word[1], word[2], word[3]]);
+        }
+
+        let mut a = a0;
+        let mut b = b0;
+        let mut c = c0;
+        let mut d = d0;
+
+        for i in 0..64 {
+            let (f, g) = match i {
+                0..=15 => ((b & c) | ((!b) & d), i),
+                16..=31 => ((d & b) | ((!d) & c), (5 * i + 1) % 16),
+                32..=47 => (b ^ c ^ d, (3 * i + 5) % 16),
+                _ => (c ^ (b | (!d)), (7 * i) % 16),
+            };
+            let temp = d;
+            d = c;
+            c = b;
+            let sum = a
+                .wrapping_add(f)
+                .wrapping_add(K[i])
+                .wrapping_add(m[g]);
+            b = b.wrapping_add(sum.rotate_left(S[i]));
+            a = temp;
+        }
+
+        a0 = a0.wrapping_add(a);
+        b0 = b0.wrapping_add(b);
+        c0 = c0.wrapping_add(c);
+        d0 = d0.wrapping_add(d);
+    }
+
+    let mut out = String::with_capacity(32);
+    for word in [a0, b0, c0, d0] {
+        for byte in word.to_le_bytes() {
+            use std::fmt::Write as _;
+            let _ = write!(out, "{byte:02x}");
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_md5_hex_vectors() {
+        assert_eq!(md5_hex(b""), "d41d8cd98f00b204e9800998ecf8427e");
+        assert_eq!(md5_hex(b"abc"), "900150983cd24fb0d6963f7d28e17f72");
+        assert_eq!(
+            md5_hex(b"The quick brown fox jumps over the lazy dog"),
+            "9e107d9d372bb6826bd81d3542a419d6"
+        );
+    }
+
+    #[test]
+    fn test_derive_mp4_probe_url() {
+        assert_eq!(
+            derive_mp4_probe_url("https://cdn.example.com/watch/clip123", None),
+            "https://cdn.example.com/clip123.mp4"
+        );
+        assert_eq!(
+            derive_mp4_probe_url(
+                "https://cdn.example.com/watch/clip123",
+                Some("https://cdn.example.com/custom.mp4")
+            ),
+            "https://cdn.example.com/custom.mp4"
+        );
+        assert_eq!(
+            derive_mp4_probe_url("https://cdn.example.com/v/clip123", None),
+            "https://cdn.example.com/v/clip123"
+        );
+    }
+
+    #[test]
+    fn test_clamp_utf8_bytes() {
+        assert_eq!(clamp_utf8_bytes("hello_world", 64), "hello_world");
+        assert_eq!(clamp_utf8_bytes("abc_def_", 4), "abc");
+        // Multi-byte UTF-8 boundary ('é' is 2 bytes)
+        assert_eq!(clamp_utf8_bytes("abécd", 3), "ab");
+    }
 }

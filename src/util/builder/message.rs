@@ -1,8 +1,13 @@
 use std::borrow::Cow;
 
 use twilight_model::{
-    channel::message::component::Component, channel::message::embed::Embed,
-    http::attachment::Attachment, id::{marker::MessageMarker, Id},
+    channel::message::component::Component,
+    channel::message::embed::Embed,
+    http::attachment::Attachment,
+    id::{
+        marker::{MessageMarker, UserMarker},
+        Id,
+    },
 };
 
 use super::EmbedBuilder;
@@ -14,6 +19,7 @@ pub struct MessageBuilder<'c> {
     pub attachments: Vec<Attachment>,
     pub components: Option<Vec<Component>>,
     pub reply: Option<Id<MessageMarker>>,
+    pub allowed_user: Option<Id<UserMarker>>,
 }
 
 impl<'c> MessageBuilder<'c> {
@@ -61,6 +67,12 @@ impl<'c> MessageBuilder<'c> {
 
     pub fn reply(mut self, message_id: Id<MessageMarker>) -> Self {
         self.reply = Some(message_id);
+
+        self
+    }
+
+    pub fn allowed_user_mention(mut self, user_id: Id<UserMarker>) -> Self {
+        self.allowed_user = Some(user_id);
 
         self
     }

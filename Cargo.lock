@@ -1527,7 +1527,6 @@ dependencies = [
  "twilight-interactions",
  "twilight-model",
  "twilight-standby",
- "twilight-validate",
  "zip",
 ]
 

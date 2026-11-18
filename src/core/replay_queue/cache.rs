@@ -1,11 +1,22 @@
-use std::{collections::HashMap, path::Path, sync::Arc};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::Arc,
+};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, RwLock};
 
-const RENDER_CACHE_PATH: &str = "data/render_cache.json";
+use crate::core::BotConfig;
+
 const MAX_CACHE_ENTRIES: usize = 500;
 const CACHE_TTL_SECS: i64 = 6 * 86_400 + 12 * 3_600; // slightly under 7-day caddy retention
+
+fn render_cache_path() -> PathBuf {
+    BotConfig::try_get()
+        .map(|cfg| cfg.paths.folders().join("render_cache.json"))
+        .unwrap_or_else(|| PathBuf::from("data/render_cache.json"))
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CachedRender {
@@ -83,21 +94,21 @@ impl RenderCache {
     }
 
     async fn read_from_disk() -> HashMap<String, CachedRender> {
-        let Ok(bytes) = tokio::fs::read(RENDER_CACHE_PATH).await else {
+        let Ok(bytes) = tokio::fs::read(render_cache_path()).await else {
             return HashMap::new();
         };
         serde_json::from_slice::<HashMap<String, CachedRender>>(&bytes).unwrap_or_default()
     }
 
     async fn write_to_disk(entries: &HashMap<String, CachedRender>) -> eyre::Result<()> {
-        let path = Path::new(RENDER_CACHE_PATH);
+        let path = render_cache_path();
         if let Some(parent) = path.parent() {
             let _ = tokio::fs::create_dir_all(parent).await;
         }
         let json = serde_json::to_vec(entries)?;
         let tmp = path.with_extension("json.tmp");
         tokio::fs::write(&tmp, json).await?;
-        tokio::fs::rename(&tmp, path).await?;
+        tokio::fs::rename(&tmp, &path).await?;
         Ok(())
     }
 }
@@ -118,7 +129,8 @@ pub fn fnv1a_64(bytes: &[u8]) -> u64 {
 
 #[allow(clippy::too_many_arguments)]
 pub fn build_render_cache_key(
-    replay_hash: &str,
+    osr_bytes: &[u8],
+    beatmap_hash: &str,
     settings_bytes: &[u8],
     start: u32,
     end: u32,
@@ -127,15 +139,25 @@ pub fn build_render_cache_key(
     skip_intro: bool,
     offset_ms: Option<i32>,
 ) -> Option<String> {
-    if replay_hash.trim().is_empty() {
+    if osr_bytes.is_empty() || beatmap_hash.trim().is_empty() {
         return None;
     }
+    let replay_fp = format!(
+        "{}:{}:{}",
+        osr_bytes.len(),
+        super::process::md5_hex(osr_bytes),
+        beatmap_hash.trim().to_ascii_lowercase()
+    );
     let settings_fp = format!("{}:{:016x}", settings_bytes.len(), fnv1a_64(settings_bytes));
-    let pitch_bits = pitch.map(f64::to_bits).unwrap_or(0);
+    let pitch_str = pitch
+        .map(|v| format!("{:016x}", v.to_bits()))
+        .unwrap_or_else(|| "_".to_owned());
     let skin_norm = skin.unwrap_or("");
-    let off = offset_ms.unwrap_or(0);
+    let off_str = offset_ms
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "_".to_owned());
     Some(format!(
-        "{replay_hash}|{settings_fp}|{start}|{end}|{pitch_bits}|{skin_norm}|{skip_intro}|{off}"
+        "{replay_fp}|{settings_fp}|{start}|{end}|{pitch_str}|{skin_norm}|{skip_intro}|{off_str}"
     ))
 }
 
@@ -153,15 +175,98 @@ mod tests {
 
     #[test]
     fn test_build_render_cache_key_determinism_and_uniqueness() {
-        assert!(build_render_cache_key("", b"{}", 0, 0, None, None, false, None).is_none());
+        assert!(build_render_cache_key(b"", "abc", b"{}", 0, 0, None, None, false, None).is_none());
+        assert!(build_render_cache_key(b"osr", "", b"{}", 0, 0, None, None, false, None).is_none());
 
-        let k1 = build_render_cache_key("abc", b"{\"a\":1}", 10, 20, Some(1.5), Some("MySkin"), true, Some(-5)).unwrap();
-        let k2 = build_render_cache_key("abc", b"{\"a\":1}", 10, 20, Some(1.5), Some("MySkin"), true, Some(-5)).unwrap();
-        let k3 = build_render_cache_key("abc", b"{\"a\":2}", 10, 20, Some(1.5), Some("MySkin"), true, Some(-5)).unwrap();
-        let k4 = build_render_cache_key("abc", b"{\"a\":1}", 10, 20, Some(1.5), Some("Other"), true, Some(-5)).unwrap();
+        let k1 = build_render_cache_key(
+            b"replay-bytes-1",
+            "abc",
+            b"{\"a\":1}",
+            10,
+            20,
+            Some(1.5),
+            Some("MySkin"),
+            true,
+            Some(-5),
+        )
+        .unwrap();
+        let k2 = build_render_cache_key(
+            b"replay-bytes-1",
+            "abc",
+            b"{\"a\":1}",
+            10,
+            20,
+            Some(1.5),
+            Some("MySkin"),
+            true,
+            Some(-5),
+        )
+        .unwrap();
+        let k3 = build_render_cache_key(
+            b"replay-bytes-1",
+            "abc",
+            b"{\"a\":2}",
+            10,
+            20,
+            Some(1.5),
+            Some("MySkin"),
+            true,
+            Some(-5),
+        )
+        .unwrap();
+        let k4 = build_render_cache_key(
+            b"replay-bytes-1",
+            "abc",
+            b"{\"a\":1}",
+            10,
+            20,
+            Some(1.5),
+            Some("Other"),
+            true,
+            Some(-5),
+        )
+        .unwrap();
+        let k_none_off = build_render_cache_key(
+            b"replay-bytes-1",
+            "abc",
+            b"{\"a\":1}",
+            10,
+            20,
+            None,
+            None,
+            false,
+            None,
+        )
+        .unwrap();
+        let k_zero_off = build_render_cache_key(
+            b"replay-bytes-1",
+            "abc",
+            b"{\"a\":1}",
+            10,
+            20,
+            None,
+            None,
+            false,
+            Some(0),
+        )
+        .unwrap();
+        let k_other_bytes = build_render_cache_key(
+            b"replay-bytes-2",
+            "abc",
+            b"{\"a\":1}",
+            10,
+            20,
+            None,
+            None,
+            false,
+            None,
+        )
+        .unwrap();
 
         assert_eq!(k1, k2);
         assert_ne!(k1, k3);
         assert_ne!(k1, k4);
+        assert_ne!(k_none_off, k_zero_off);
+        assert_ne!(k_none_off, k_other_bytes);
     }
 }
