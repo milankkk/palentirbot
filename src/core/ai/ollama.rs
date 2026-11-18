@@ -165,6 +165,8 @@ pub struct OllamaClient {
     unsupported_thinking_models: std::sync::RwLock<HashSet<String>>,
     unsupported_tools_models: std::sync::RwLock<HashSet<String>>,
     last_stats: tokio::sync::RwLock<HashMap<Id<ChannelMarker>, LastGenerationStats>>,
+    in_flight: std::sync::atomic::AtomicUsize,
+    idle_notify: tokio::sync::Notify,
 }
 
 fn is_zero_f32(val: &f32) -> bool {
@@ -714,6 +716,8 @@ impl OllamaClient {
             unsupported_thinking_models: std::sync::RwLock::new(HashSet::new()),
             unsupported_tools_models: std::sync::RwLock::new(HashSet::new()),
             last_stats: tokio::sync::RwLock::new(HashMap::new()),
+            in_flight: std::sync::atomic::AtomicUsize::new(0),
+            idle_notify: tokio::sync::Notify::new(),
         }
     }
 
@@ -866,6 +870,14 @@ impl OllamaClient {
         Ok(names)
     }
 
+    pub fn in_flight(&self) -> usize {
+        self.in_flight.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub fn idle_notify(&self) -> &tokio::sync::Notify {
+        &self.idle_notify
+    }
+
     /// Unload every currently resident Ollama model to free GPU VRAM (`keep_alive: 0`).
     pub async fn unload_all_loaded_models(&self) -> usize {
         let Ok(models) = self.loaded_models().await else {
@@ -882,6 +894,9 @@ impl OllamaClient {
                     tracing::debug!(?err, %model, "Failed to unload Ollama model from GPU VRAM");
                 }
             }
+        }
+        if unloaded > 0 {
+            tokio::time::sleep(Duration::from_millis(500)).await;
         }
         unloaded
     }
@@ -1413,6 +1428,23 @@ impl OllamaClient {
         osu: Option<OsuToolContext<'_>>,
         stream_tx: Option<UnboundedSender<AiStreamEvent>>,
     ) -> Result<AiReply> {
+        struct InFlightGuard<'a>(&'a OllamaClient);
+        impl Drop for InFlightGuard<'_> {
+            fn drop(&mut self) {
+                if self
+                    .0
+                    .in_flight
+                    .fetch_sub(1, std::sync::atomic::Ordering::AcqRel)
+                    == 1
+                {
+                    self.0.idle_notify.notify_waiters();
+                }
+            }
+        }
+        self.in_flight
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        let _in_flight_guard = InFlightGuard(self);
+
         let mut working_messages = messages.to_vec();
         let mut state = ToolExecState::default();
         for msg in &working_messages {
@@ -2431,6 +2463,8 @@ mod tests {
             unsupported_thinking_models: std::sync::RwLock::new(HashSet::new()),
             unsupported_tools_models: std::sync::RwLock::new(HashSet::new()),
             last_stats: tokio::sync::RwLock::new(HashMap::new()),
+            in_flight: std::sync::atomic::AtomicUsize::new(0),
+            idle_notify: tokio::sync::Notify::new(),
         }
     }
 

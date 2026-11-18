@@ -1514,7 +1514,7 @@ pub async fn execute_ai_question_with_options(
                 "🧠 Waiting for active replay render to finish GPU encoding...".to_owned(),
             ));
         }
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(180);
         while ctx.replay_queue.is_rendering().await {
             let notified = ctx.replay_queue.notify.notified();
             tokio::pin!(notified);

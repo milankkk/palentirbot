@@ -319,7 +319,7 @@ async fn process_single_replay(
     let (link, video_url, rendered_mp4_path) = if let Some((watch_url, vid_url)) = cached_hit {
         (watch_url, vid_url, None)
     } else {
-        const CPU_X264_SPATCH: &str = r#"{"Recording":{"Encoder":"libx264","libx264":{"RateControl":"crf","CRF":21,"Preset":"veryfast","Profile":"high","AdditionalOptions":"-movflags +faststart"}}}"#;
+        const NVENC_LOW_VRAM_SPATCH: &str = r#"{"Recording":{"Encoder":"h264_nvenc","h264_nvenc":{"Preset":"p4","AdditionalOptions":"-movflags +faststart"}}}"#;
 
         tracing::debug!(mods = replay.mods, "replay mods being sent to danser");
 
@@ -328,8 +328,12 @@ async fn process_single_replay(
             .context("failed to canonicalize replay path")?;
 
         let ld_library_path = build_danser_ld_library_path(config.paths.danser());
-        let gpu_ready = ctx
-            .ai()
+
+        ctx.replay_queue
+            .set_status(ReplayStatus::Rendering(0))
+            .await;
+
+        ctx.ai()
             .release_gpu_for_render(&cancel_notify, &cancelled)
             .await;
 
@@ -337,13 +341,9 @@ async fn process_single_replay(
             return handle_cancelled_cleanup(&ctx, queue_message, &path, None, input_channel, user).await;
         }
 
-        ctx.replay_queue
-            .set_status(ReplayStatus::Rendering(0))
-            .await;
-
         for attempt in 1..=2u8 {
-            let use_cpu_fallback = attempt == 2 || !gpu_ready;
-            let spatch_opt = use_cpu_fallback.then_some(CPU_X264_SPATCH);
+            let low_vram_nvenc = attempt == 2;
+            let spatch_opt = low_vram_nvenc.then_some(NVENC_LOW_VRAM_SPATCH);
 
             let attempt_outcome = run_danser_attempt(
                 &ctx,
@@ -382,7 +382,7 @@ async fn process_single_replay(
                     let danser_log_tail = read_danser_log_tail(config.paths.danser(), 25).await;
                     warn!(
                         attempt,
-                        use_cpu_fallback,
+                        low_vram_nvenc,
                         ?out_tail,
                         ?err_tail,
                         ?danser_log_tail,
@@ -402,7 +402,7 @@ async fn process_single_replay(
                     let danser_log_tail = read_danser_log_tail(config.paths.danser(), 25).await;
                     warn!(
                         attempt,
-                        use_cpu_fallback,
+                        low_vram_nvenc,
                         fatal_line = %line,
                         ?out_tail,
                         ?err_tail,
@@ -424,7 +424,7 @@ async fn process_single_replay(
                     let danser_log_tail = read_danser_log_tail(config.paths.danser(), 25).await;
                     warn!(
                         attempt,
-                        use_cpu_fallback,
+                        low_vram_nvenc,
                         status = %status,
                         ?out_tail,
                         ?err_tail,
@@ -446,7 +446,7 @@ async fn process_single_replay(
                     let danser_log_tail = read_danser_log_tail(config.paths.danser(), 25).await;
                     warn!(
                         attempt,
-                        use_cpu_fallback,
+                        low_vram_nvenc,
                         idle_secs,
                         saw_progress,
                         ?out_tail,
@@ -466,7 +466,7 @@ async fn process_single_replay(
                     let danser_log_tail = read_danser_log_tail(config.paths.danser(), 25).await;
                     warn!(
                         attempt,
-                        use_cpu_fallback,
+                        low_vram_nvenc,
                         ?err,
                         ?danser_log_tail,
                         "failed to run danser"
@@ -478,10 +478,11 @@ async fn process_single_replay(
                 }
             };
 
-            if can_retry && attempt == 1 && !use_cpu_fallback {
-                warn!("Attempt 1 failed under GPU/NVENC settings; retrying with CPU libx264 fallback");
+            if can_retry && attempt == 1 {
+                warn!("Attempt 1 failed under full NVENC settings; unloading VRAM and retrying with low-VRAM GPU h264_nvenc settings");
                 cleanup_danser_intermediate(config.paths.replays(), filename).await;
                 ctx.ai().unload_idle_models().await;
+                sleep(Duration::from_secs(1)).await;
                 ctx.replay_queue
                     .set_status(ReplayStatus::Rendering(0))
                     .await;
@@ -1248,7 +1249,7 @@ async fn run_danser_attempt(
         danser_dir = ?config.paths.danser(),
         ?danser_path,
         attempt,
-        cpu_fallback = spatch.is_some(),
+        low_vram_nvenc = spatch.is_some(),
         "launching danser"
     );
     #[cfg(unix)]
@@ -1292,7 +1293,7 @@ async fn run_danser_attempt(
         command.args(["-sPatch", patch]);
     }
 
-    info!(attempt, cpu_fallback = spatch.is_some(), "Started replay processing");
+    info!(attempt, low_vram_nvenc = spatch.is_some(), "Started replay processing");
 
     let cancel_fut = cancel_notify.notified();
     tokio::pin!(cancel_fut);

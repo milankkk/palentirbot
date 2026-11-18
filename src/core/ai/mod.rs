@@ -250,48 +250,48 @@ impl AiClient {
         self.queue.len().await
     }
 
-    /// Wait briefly for any active AI generation to finish, then unload resident Ollama models from VRAM
-    /// so `danser` + NVENC have full GPU memory. Returns `false` if AI remained busy or render was cancelled.
+    /// Wait for any in-flight Ollama generation to finish (up to 120s), then unload resident
+    /// Ollama models from GPU VRAM so `danser` + `h264_nvenc` have full GPU memory.
     pub async fn release_gpu_for_render(
         &self,
         cancel_notify: &tokio::sync::Notify,
         cancelled: &std::sync::atomic::AtomicBool,
-    ) -> bool {
+    ) {
         use std::sync::atomic::Ordering;
-        use std::time::{Duration, Instant};
+        use std::time::Duration;
 
-        const MAX_WAIT: Duration = Duration::from_secs(20);
-        let started = Instant::now();
-
-        while self.queue.len().await > 0 {
-            if cancelled.load(Ordering::Acquire) || started.elapsed() >= MAX_WAIT {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+        while self.ollama.in_flight() > 0 {
+            if cancelled.load(Ordering::Acquire) {
+                return;
+            }
+            let idle_fut = self.ollama.idle_notify().notified();
+            tokio::pin!(idle_fut);
+            idle_fut.as_mut().enable();
+            if self.ollama.in_flight() == 0 {
                 break;
             }
             tokio::select! {
                 biased;
-                _ = cancel_notify.notified() => return false,
-                _ = tokio::time::sleep(Duration::from_millis(400)) => {}
+                _ = cancel_notify.notified() => return,
+                _ = &mut idle_fut => {}
+                _ = tokio::time::sleep_until(deadline) => {
+                    tracing::warn!(
+                        "Timed out after 120s waiting for in-flight Ollama request before render; forcing VRAM unload"
+                    );
+                    break;
+                }
             }
         }
 
-        if cancelled.load(Ordering::Acquire) {
-            return false;
-        }
-
-        if self.queue.len().await == 0 {
+        if !cancelled.load(Ordering::Acquire) {
             let _ = self.ollama.unload_all_loaded_models().await;
-            true
-        } else {
-            tracing::info!(
-                "AI generation still active after 20s wait; replay render will use CPU libx264 encoder"
-            );
-            false
         }
     }
 
-    /// Unload resident Ollama models when no AI request is queued or running.
+    /// Unload resident Ollama models when no Ollama request is actively in flight.
     pub async fn unload_idle_models(&self) {
-        if self.queue.len().await == 0 {
+        if self.ollama.in_flight() == 0 {
             let _ = self.ollama.unload_all_loaded_models().await;
         }
     }
