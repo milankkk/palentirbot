@@ -188,7 +188,6 @@ pub async fn slash_screenshot(ctx: Arc<Context>, mut command: InteractionCommand
             att,
             command.id,
             command.channel_id,
-            command.channel_id,
             user,
             command.username().ok().map(str::to_owned),
             opts,
@@ -202,16 +201,7 @@ pub async fn slash_screenshot(ctx: Arc<Context>, mut command: InteractionCommand
             }
         }
     } else if let Some(score_ref) = parsed_score_id {
-        match prepare_score_by_id(
-            &ctx,
-            score_ref,
-            command.channel_id,
-            command.channel_id,
-            user,
-            opts,
-        )
-        .await
-        {
+        match prepare_score_by_id(&ctx, score_ref, command.channel_id, user, opts).await {
             Ok(ScorePrepareOutcome::Ready(data)) => *data,
             Ok(ScorePrepareOutcome::Unavailable(reason)) => {
                 command.error(&ctx, reason).await?;
@@ -366,7 +356,6 @@ pub async fn handle_prefix_screenshot(ctx: Arc<Context>, msg: &Message, args_str
             att,
             msg.id,
             msg.channel_id,
-            msg.channel_id,
             msg.author.id,
             Some(msg.author.name.clone()),
             opts,
@@ -380,7 +369,7 @@ pub async fn handle_prefix_screenshot(ctx: Arc<Context>, msg: &Message, args_str
             }
         }
     } else if let Some(sid) = score_id {
-        match prepare_score_by_id(&ctx, sid, msg.channel_id, msg.channel_id, msg.author.id, opts).await
+        match prepare_score_by_id(&ctx, sid, msg.channel_id, msg.author.id, opts).await
         {
             Ok(ScorePrepareOutcome::Ready(data)) => *data,
             Ok(ScorePrepareOutcome::Unavailable(reason)) => {
@@ -399,7 +388,6 @@ pub async fn handle_prefix_screenshot(ctx: Arc<Context>, msg: &Message, args_str
         match render_score_from_message(
             Arc::clone(&ctx),
             replied,
-            msg.channel_id,
             msg.channel_id,
             msg.author.id,
             opts,

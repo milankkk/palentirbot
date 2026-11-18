@@ -36,7 +36,7 @@ pub async fn slash_help(ctx: Arc<Context>, command: InteractionCommand) -> Resul
     let view_replays = EmbedField {
         inline: false,
         name: "Do you want to view your replays?".to_owned(),
-        value: "Rendered replays are uploaded and linked directly in your configured output channel.".to_owned(),
+        value: "Rendered replays are uploaded and linked directly in the channel where you requested them.".to_owned(),
     };
 
     let join_server = EmbedField {

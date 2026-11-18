@@ -10,11 +10,10 @@ use crate::{
     Context,
 };
 
-use self::{aichannel::*, input::*, output::*, view::*};
+use self::{aichannel::*, input::*, view::*};
 
 mod aichannel;
 mod input;
-mod output;
 mod setprefix;
 mod view;
 
@@ -27,8 +26,6 @@ pub enum Setup {
     View(SetupView),
     #[command(name = "input")]
     Input(SetupInput),
-    #[command(name = "output")]
-    Output(SetupOutput),
     #[command(name = "setprefix")]
     SetPrefix(SetupSetPrefix),
     #[command(name = "aichannel")]
@@ -60,15 +57,6 @@ pub enum InputAction {
 }
 
 #[derive(CommandModel, CreateCommand)]
-#[command(name = "output")]
-/// Configure the channel in which the replay will be sent (omit to reset)
-pub struct SetupOutput {
-    #[command(channel_types = "guild_text guild_announcement")]
-    /// The channel you want as the output channel (leave empty to reset to requesting channel)
-    pub channel: Option<Id<ChannelMarker>>,
-}
-
-#[derive(CommandModel, CreateCommand)]
 #[command(name = "setprefix")]
 /// Set a custom prefix for text commands in this server
 pub struct SetupSetPrefix {
@@ -88,7 +76,6 @@ pub struct SetupAiChannel {
 async fn slash_setup(ctx: Arc<Context>, mut command: InteractionCommand) -> Result<()> {
     match Setup::from_interaction(command.input_data())? {
         Setup::Input(args) => input(ctx, command, args).await,
-        Setup::Output(args) => output(ctx, command, args).await,
         Setup::View(_) => view(ctx, command).await,
         Setup::SetPrefix(args) => setprefix::set_prefix(ctx, command, args).await,
         Setup::AiChannel(args) => aichannel(ctx, command, args).await,

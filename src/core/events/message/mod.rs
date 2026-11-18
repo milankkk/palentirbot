@@ -121,7 +121,7 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
                 ScorePrepareOutcome,
             };
 
-            let output_channel = match check_render_access(
+            if let Err(err_msg) = check_render_access(
                 &ctx,
                 msg.author.id,
                 msg.guild_id,
@@ -129,12 +129,9 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
             )
             .await
             {
-                Ok(ch) => ch,
-                Err(err_msg) => {
-                    let _ = msg.error(&ctx, err_msg).await;
-                    return;
-                }
-            };
+                let _ = msg.error(&ctx, err_msg).await;
+                return;
+            }
 
             if let Err(err_msg) = check_user_queue_limit(&ctx, msg.author.id).await {
                 let _ = msg.error(&ctx, err_msg).await;
@@ -157,7 +154,6 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
                     attachment,
                     msg.id,
                     msg.channel_id,
-                    output_channel,
                     msg.author.id,
                     Some(msg.author.name.clone()),
                     opts,
@@ -175,7 +171,6 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
                     &ctx,
                     score_id,
                     msg.channel_id,
-                    output_channel,
                     msg.author.id,
                     opts,
                 )
@@ -199,7 +194,6 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
                     Arc::clone(&ctx),
                     replied,
                     msg.channel_id,
-                    output_channel,
                     msg.author.id,
                     opts,
                 )

@@ -115,13 +115,13 @@ pub fn parse_osu_score_url(input: &str) -> Option<u64> {
     }
 }
 
-/// Verify user blacklist, server blacklist, and allowed input channel; returns resolved output channel.
+/// Verify user blacklist, server blacklist, and allowed input channel.
 pub async fn check_render_access(
     ctx: &Context,
     user_id: Id<UserMarker>,
     guild_id: Option<Id<GuildMarker>>,
     channel_id: Id<ChannelMarker>,
-) -> std::result::Result<Id<ChannelMarker>, String> {
+) -> std::result::Result<(), String> {
     match ctx.psql().is_user_blacklisted(user_id).await {
         Ok((true, reason_opt)) => {
             let mut msg = String::from("You are blacklisted from using render commands.");
@@ -162,14 +162,9 @@ pub async fn check_render_access(
         if !is_allowed {
             return Err("This channel is not an allowed input channel for rendering.".to_owned());
         }
-
-        Ok(ctx
-            .guild_settings(guild, |s| s.output_channel)
-            .flatten()
-            .unwrap_or(channel_id))
-    } else {
-        Ok(channel_id)
     }
+
+    Ok(())
 }
 
 /// Enforce the per-user active/queued render cap (owners exempt).
@@ -394,7 +389,6 @@ pub async fn finalize_enqueue(
     mut replay_data: ReplayData,
     queue_msg: Option<Message>,
 ) {
-    let output_channel = replay_data.output_channel;
     let input_channel = replay_data.input_channel;
     let user = replay_data.user;
     let osr_path = replay_data.path.clone();
@@ -408,7 +402,7 @@ pub async fn finalize_enqueue(
             if was_empty {
                 let ctx_clone = Arc::clone(&ctx);
                 tokio::spawn(async move {
-                    let _ = send_queue_status(ctx_clone, output_channel).await;
+                    let _ = send_queue_status(ctx_clone, input_channel).await;
                 });
             }
         }
@@ -561,7 +555,6 @@ async fn prepare_score_replay_data(
     ctx: &Context,
     score_to_render: Score,
     input_channel: Id<ChannelMarker>,
-    output_channel: Id<ChannelMarker>,
     user: Id<UserMarker>,
     opts: RenderOptions,
 ) -> Result<ScorePrepareOutcome> {
@@ -689,7 +682,6 @@ async fn prepare_score_replay_data(
 
     let mut data = ReplayData::from_options(
         input_channel,
-        output_channel,
         path,
         replay,
         user,
@@ -704,13 +696,11 @@ async fn prepare_score_replay_data(
 }
 
 /// Download a Discord `.osr` attachment, validate osu!standard mode, save to disk, and build `ReplayData`.
-#[allow(clippy::too_many_arguments)]
 pub async fn prepare_attachment_replay_data(
     ctx: &Context,
     att: &Attachment,
     tx_id: impl std::fmt::Display,
     input_channel: Id<ChannelMarker>,
-    output_channel: Id<ChannelMarker>,
     user: Id<UserMarker>,
     player_hint: Option<String>,
     opts: RenderOptions,
@@ -764,7 +754,6 @@ pub async fn prepare_attachment_replay_data(
     let is_lazer = crate::core::replay_queue::is_lazer_replay(replay.version);
     let mut data = ReplayData::from_options(
         input_channel,
-        output_channel,
         replay_file,
         ReplaySlim::from(replay),
         user,
@@ -785,13 +774,10 @@ async fn render_from_msg(ctx: Arc<Context>, mut command: InteractionCommand) -> 
         return Ok(());
     }
 
-    let output_channel = match check_render_access(&ctx, user, command.guild_id, command.channel_id).await {
-        Ok(ch) => ch,
-        Err(msg) => {
-            command.error(&ctx, msg).await?;
-            return Ok(());
-        }
-    };
+    if let Err(msg) = check_render_access(&ctx, user, command.guild_id, command.channel_id).await {
+        command.error(&ctx, msg).await?;
+        return Ok(());
+    }
 
     if let Err(msg) = check_user_queue_limit(&ctx, user).await {
         command.error(&ctx, msg).await?;
@@ -834,7 +820,6 @@ async fn render_from_msg(ctx: Arc<Context>, mut command: InteractionCommand) -> 
         &ctx,
         score_to_render,
         command.channel_id,
-        output_channel,
         user,
         RenderOptions::default(),
     )
@@ -875,7 +860,6 @@ pub async fn render_score_from_message(
     ctx: Arc<Context>,
     message: &Message,
     input_channel: Id<ChannelMarker>,
-    output_channel: Id<ChannelMarker>,
     user: Id<UserMarker>,
     opts: RenderOptions,
 ) -> Result<EmbedRenderOutcome> {
@@ -883,14 +867,13 @@ pub async fn render_score_from_message(
         return Ok(EmbedRenderOutcome::NotScoreEmbed);
     };
 
-    render_score_from_embed(ctx, embed, input_channel, output_channel, user, opts).await
+    render_score_from_embed(ctx, embed, input_channel, user, opts).await
 }
 
 pub async fn render_score_from_embed(
     ctx: Arc<Context>,
     embed: &Embed,
     input_channel: Id<ChannelMarker>,
-    output_channel: Id<ChannelMarker>,
     user: Id<UserMarker>,
     opts: RenderOptions,
 ) -> Result<EmbedRenderOutcome> {
@@ -920,7 +903,6 @@ pub async fn render_score_from_embed(
         &ctx,
         score_to_render,
         input_channel,
-        output_channel,
         user,
         opts,
     )
@@ -943,7 +925,6 @@ pub async fn prepare_score_by_id(
     ctx: &Context,
     score_ref: ParsedScoreUrl,
     input_channel: Id<ChannelMarker>,
-    output_channel: Id<ChannelMarker>,
     user: Id<UserMarker>,
     opts: RenderOptions,
 ) -> Result<ScorePrepareOutcome> {
@@ -985,7 +966,7 @@ pub async fn prepare_score_by_id(
     }
 
     let score = res.with_context(|| format!("failed to fetch osu! score {score_id}"))?;
-    prepare_score_replay_data(ctx, score, input_channel, output_channel, user, opts).await
+    prepare_score_replay_data(ctx, score, input_channel, user, opts).await
 }
 
 struct ParsedEmbed {

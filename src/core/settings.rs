@@ -21,7 +21,6 @@ pub struct RootSettings {
 #[derive(Clone, Debug, Default)]
 pub struct Server {
     pub input_channels: HashSet<Id<ChannelMarker>, IntBuildHasher>,
-    pub output_channel: Option<Id<ChannelMarker>>,
     pub prefix: Option<String>,
     pub ai_channel: Option<Id<ChannelMarker>>,
 }
@@ -57,7 +56,6 @@ mod servers {
     struct RawServer {
         server_id: Id<GuildMarker>,
         input_channels: HashSet<Id<ChannelMarker>, IntBuildHasher>,
-        output_channel: Option<Id<ChannelMarker>>,
         #[serde(default)]
         prefix: Option<String>,
         #[serde(default)]
@@ -84,14 +82,12 @@ mod servers {
                     let RawServer {
                         server_id,
                         input_channels,
-                        output_channel,
                         prefix,
                         ai_channel,
                     } = raw;
 
                     let server = Server {
                         input_channels,
-                        output_channel,
                         prefix,
                         ai_channel,
                     };
@@ -115,11 +111,10 @@ mod servers {
 
     impl Serialize for BorrowedRawServer<'_> {
         fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-            let mut raw = s.serialize_struct("RawServer", 5)?;
+            let mut raw = s.serialize_struct("RawServer", 4)?;
 
             raw.serialize_field("server_id", &self.server_id)?;
             raw.serialize_field("input_channels", &self.server.input_channels)?;
-            raw.serialize_field("output_channel", &self.server.output_channel)?;
             raw.serialize_field("prefix", &self.server.prefix)?;
             raw.serialize_field("ai_channel", &self.server.ai_channel)?;
             raw.end()
@@ -1171,5 +1166,30 @@ mod tests {
         assert_eq!(out["Gameplay"]["LazerClassicScore"], true);
         assert_eq!(out["Recording"]["libsvtav1"]["Preset"], 8);
         assert_eq!(out["Debug"]["PerfGraph"]["Show"], false);
+    }
+
+    #[test]
+    fn root_settings_ignores_legacy_output_channel_on_load() {
+        let sample = serde_json::json!({
+            "Servers": [{
+                "server_id": "1117926311135027260",
+                "input_channels": ["1491565888271421540", "1117933412959911946"],
+                "output_channel": "1491565888271421540",
+                "prefix": "<",
+                "ai_channel": null
+            }]
+        });
+
+        let parsed: RootSettings = serde_json::from_value(sample).unwrap();
+        let guild_id = Id::new(1117926311135027260);
+        let guard = parsed.servers.pin();
+        let server = guard.get(&guild_id).expect("guild should be loaded");
+        assert_eq!(server.input_channels.len(), 2);
+        assert_eq!(server.effective_prefix(), "<");
+        drop(guard);
+
+        let serialized = serde_json::to_value(&parsed).unwrap();
+        let server_obj = serialized["Servers"][0].as_object().unwrap();
+        assert!(!server_obj.contains_key("output_channel"));
     }
 }

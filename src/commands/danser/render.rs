@@ -212,13 +212,10 @@ pub async fn slash_render(ctx: Arc<Context>, mut command: InteractionCommand) ->
     command.defer(&ctx, false).await?;
 
     let user = command.user_id()?;
-    let output_channel = match check_render_access(&ctx, user, command.guild_id, command.channel_id).await {
-        Ok(ch) => ch,
-        Err(msg) => {
-            command.error(&ctx, msg).await?;
-            return Ok(());
-        }
-    };
+    if let Err(msg) = check_render_access(&ctx, user, command.guild_id, command.channel_id).await {
+        command.error(&ctx, msg).await?;
+        return Ok(());
+    }
 
     if let Err(msg) = check_user_queue_limit(&ctx, user).await {
         command.error(&ctx, msg).await?;
@@ -241,7 +238,6 @@ pub async fn slash_render(ctx: Arc<Context>, mut command: InteractionCommand) ->
             att,
             command.id,
             command.channel_id,
-            output_channel,
             user,
             Some(command.username()?.to_string()),
             opts,
@@ -255,16 +251,7 @@ pub async fn slash_render(ctx: Arc<Context>, mut command: InteractionCommand) ->
             }
         }
     } else if let Some(score_ref) = parsed_score_id {
-        match prepare_score_by_id(
-            &ctx,
-            score_ref,
-            command.channel_id,
-            output_channel,
-            user,
-            opts,
-        )
-        .await
-        {
+        match prepare_score_by_id(&ctx, score_ref, command.channel_id, user, opts).await {
             Ok(ScorePrepareOutcome::Ready(data)) => *data,
             Ok(ScorePrepareOutcome::Unavailable(reason)) => {
                 command.error(&ctx, reason).await?;

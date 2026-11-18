@@ -30,7 +30,6 @@ pub struct RenderOptions {
 pub struct ReplayData {
     pub job_id: u64,
     pub input_channel: Id<ChannelMarker>,
-    pub output_channel: Id<ChannelMarker>,
     pub pitch: Option<f64>,
     pub skin: Option<String>,
     pub skip_intro: bool,
@@ -56,7 +55,6 @@ pub struct ReplayData {
 impl ReplayData {
     pub fn from_options(
         input_channel: Id<ChannelMarker>,
-        output_channel: Id<ChannelMarker>,
         path: PathBuf,
         replay: ReplaySlim,
         user: Id<UserMarker>,
@@ -66,7 +64,6 @@ impl ReplayData {
         Self {
             job_id: 0,
             input_channel,
-            output_channel,
             pitch: opts.pitch,
             skin: opts.skin,
             skip_intro: opts.skip_intro,
@@ -385,7 +382,6 @@ mod tests {
     #[test]
     fn test_replay_name_handles_multiple_underscores_and_unicode() {
         let mut data = ReplayData::from_options(
-            Id::new(1),
             Id::new(1),
             PathBuf::from("/tmp/123_player_alpha_beta_map_Osu.osr"),
             ReplaySlim {

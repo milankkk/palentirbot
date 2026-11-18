@@ -36,18 +36,13 @@ pub async fn view(ctx: Arc<Context>, command: InteractionCommand) -> Result<()> 
         .flatten()
         .unwrap_or_else(|| "None".to_owned());
 
-    let output_channel = ctx
-        .guild_settings(guild_id, |s| s.output_channel)
-        .flatten()
-        .map_or_else(|| "None".to_owned(), |channel| format!("<#{channel}>"));
-
     let ai_channel = ctx
         .guild_settings(guild_id, |s| s.ai_channel)
         .flatten()
         .map_or_else(|| "None".to_owned(), |channel| format!("<#{channel}>"));
 
     let content = format!(
-        "Prefix: `{prefix}`\nInput channels: {input_channels}\nOutput channel: {output_channel}\nAI chat channel: {ai_channel}"
+        "Prefix: `{prefix}`\nInput channels: {input_channels}\nOutput: Requesting channel\nAI chat channel: {ai_channel}"
     );
     let builder = MessageBuilder::new().embed(content);
     command.callback(&ctx, builder, false).await?;

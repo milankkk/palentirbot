@@ -74,7 +74,6 @@ async fn process_single_replay(
     let ReplayData {
         job_id: _,
         input_channel,
-        output_channel,
         pitch,
         skin,
         skip_intro,
@@ -656,7 +655,7 @@ async fn process_single_replay(
             .await;
         }
 
-        if let Ok(warmup_msg) = output_channel
+        if let Ok(warmup_msg) = input_channel
             .create_message(&ctx, &MessageBuilder::new().content(uploaded_link.clone()))
             .await
         {
@@ -988,7 +987,7 @@ async fn process_single_replay(
     }
 
     let embed_builder = MessageBuilder::new().embed(embed).components(components);
-    if let Err(err) = output_channel.create_message(&ctx, &embed_builder).await {
+    if let Err(err) = input_channel.create_message(&ctx, &embed_builder).await {
         warn!(
             "{:?}",
             err.wrap_err("failed to send replay details embed")
@@ -1004,17 +1003,9 @@ async fn process_single_replay(
         let _ = ctx.http.delete_message(channel_id, msg_id).await;
     }
 
-    if let Err(err) = output_channel.create_message(&ctx, &builder).await {
-        let err = err.wrap_err("failed to send video link to output channel");
+    if let Err(err) = input_channel.create_message(&ctx, &builder).await {
+        let err = err.wrap_err("failed to send video link to channel");
         warn!("{err:?}");
-        if output_channel != input_channel {
-            let fallback = MessageBuilder::new()
-                .content(format!(
-                    "<@{user}> Rendered replay (failed to post in <#{output_channel}>): {watch_url}"
-                ))
-                .allowed_user_mention(user);
-            let _ = input_channel.create_message(&ctx, &fallback).await;
-        }
     }
 
     // 1. Delete generated .mp4 from Replays folder
