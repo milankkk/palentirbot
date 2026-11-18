@@ -1,4 +1,4 @@
-use eyre::Result;
+use eyre::{ContextCompat, Result};
 use twilight_model::{
     channel::Message,
     http::interaction::{InteractionResponse, InteractionResponseData, InteractionResponseType},
@@ -18,6 +18,12 @@ pub trait ModalExt {
         builder: MessageBuilder<'a>,
     ) -> impl std::future::Future<Output = Result<()>> + 'a;
 
+    fn update_callback<'a>(
+        &'a self,
+        ctx: &'a Context,
+        builder: MessageBuilder<'a>,
+    ) -> impl std::future::Future<Output = Result<()>> + 'a;
+
     fn defer<'a>(&'a self, ctx: &'a Context) -> impl std::future::Future<Output = Result<()>> + 'a;
 
     fn defer_ephemeral<'a>(&'a self, ctx: &'a Context) -> impl std::future::Future<Output = Result<()>> + 'a;
@@ -28,6 +34,7 @@ pub trait ModalExt {
         builder: &'a MessageBuilder<'a>,
     ) -> impl std::future::Future<Output = Result<()>> + 'a;
 
+    #[allow(dead_code)]
     fn update<'a>(
         &'a self,
         ctx: &'a Context,
@@ -47,6 +54,30 @@ impl ModalExt for InteractionModal {
 
         let response = InteractionResponse {
             kind: InteractionResponseType::ChannelMessageWithSource,
+            data: Some(data),
+        };
+
+        ctx.interaction()
+            .create_response(self.id, &self.token, &response)
+            .await?;
+
+        Ok(())
+    }
+
+    async fn update_callback<'a>(
+        &'a self,
+        ctx: &'a Context,
+        builder: MessageBuilder<'a>,
+    ) -> Result<()> {
+        let data = InteractionResponseData {
+            components: builder.components,
+            embeds: builder.embed.map(|e| vec![e]),
+            content: builder.content.map(|c| c.into_owned()),
+            ..Default::default()
+        };
+
+        let response = InteractionResponse {
+            kind: InteractionResponseType::UpdateMessage,
             data: Some(data),
         };
 
@@ -114,7 +145,7 @@ impl ModalExt for InteractionModal {
     ) -> Result<Message> {
         self.message
             .as_ref()
-            .expect("no message in modal")
+            .context("no message in modal")?
             .update(ctx, builder)
             .await
     }

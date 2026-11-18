@@ -1,4 +1,4 @@
-use std::{env, path::PathBuf};
+use std::{env, fmt, num::NonZeroU64, path::PathBuf};
 
 use eyre::{Context, ContextCompat, Result};
 use once_cell::sync::OnceCell;
@@ -72,7 +72,6 @@ impl Paths {
     }
 }
 
-#[derive(Debug)]
 pub struct Tokens {
     pub discord: String,
     pub osu_client_id: u64,
@@ -80,6 +79,18 @@ pub struct Tokens {
     #[allow(dead_code)]
     pub osu_api_key: String,
     pub upload_secret: String,
+}
+
+impl fmt::Debug for Tokens {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Tokens")
+            .field("discord", &"[REDACTED]")
+            .field("osu_client_id", &self.osu_client_id)
+            .field("osu_client_secret", &"[REDACTED]")
+            .field("osu_api_key", &"[REDACTED]")
+            .field("upload_secret", &"[REDACTED]")
+            .finish()
+    }
 }
 
 #[derive(Debug)]
@@ -113,13 +124,19 @@ impl BotConfig {
     }
 
     pub fn init() -> Result<()> {
+        let dev_guild = if cfg!(debug_assertions) {
+            env_var("DEV_GUILD_ID")?
+        } else {
+            env_var("DEV_GUILD_ID").unwrap_or_else(|_| Id::new(1))
+        };
+
         let config = BotConfig {
             database_url: env_var("DATABASE_URL")?,
             tokens: Tokens {
                 discord: env_var("DISCORD_TOKEN")?,
                 osu_client_id: env_var("OSU_CLIENT_ID")?,
                 osu_client_secret: env_var("OSU_CLIENT_SECRET")?,
-                osu_api_key: env_var("OSU_API_KEY")?,
+                osu_api_key: env::var("OSU_API_KEY").unwrap_or_default(),
                 upload_secret: env_var("UPLOAD_SECRET")?,
             },
             paths: Paths {
@@ -127,9 +144,9 @@ impl BotConfig {
                 folders: env_var("FOLDERS_PATH")?,
             },
             emojis: Emojis {
-                man_running: env_var("MAN_RUNNING")?,
-                white_check_mark: env_var("WHITE_CHECK_MARK")?,
-                hourglass: env_var("HOURGLASS")?,
+                man_running: env::var("MAN_RUNNING").unwrap_or_default(),
+                white_check_mark: env::var("WHITE_CHECK_MARK").unwrap_or_default(),
+                hourglass: env::var("HOURGLASS").unwrap_or_default(),
                 hit_300: env_var("EMOJI_HIT_300")?,
                 hit_100: env_var("EMOJI_HIT_100")?,
                 hit_50: env_var("EMOJI_HIT_50")?,
@@ -145,7 +162,7 @@ impl BotConfig {
                 grade_fail: env_var("GRADE_FAIL")?,
             },
             owners: env_var("OWNERS_USER_ID")?,
-            dev_guild: env_var("DEV_GUILD_ID")?,
+            dev_guild,
             upload_url: env_var("UPLOAD_URL")?,
         };
 
@@ -178,28 +195,41 @@ macro_rules! env_kind {
 }
 
 env_kind! {
-    u16: s => { s.parse().ok() },
-    u64: s => { s.parse().ok() },
+    u16: s => { s.trim().parse().ok() },
+    u64: s => { s.trim().parse().ok() },
     PathBuf: s => { s.parse().ok() },
     String: s => { Some(s.to_owned()) },
-    Id<UserMarker>: s => { s.parse().ok().map(Id::new) },
-    Id<GuildMarker>: s => { s.parse().ok().map(Id::new) },
-    Id<ChannelMarker>: s => { s.parse().ok().map(Id::new) },
+    Id<UserMarker>: s => { s.trim().parse::<NonZeroU64>().ok().map(Id::from) },
+    Id<GuildMarker>: s => { s.trim().parse::<NonZeroU64>().ok().map(Id::from) },
+    Id<ChannelMarker>: s => { s.trim().parse::<NonZeroU64>().ok().map(Id::from) },
     Vec<Id<UserMarker>>: s => {
         s.split(',')
             .map(str::trim)
-            .map(str::parse)
+            .filter(|part| !part.is_empty())
+            .map(|part| part.parse::<NonZeroU64>().map(Id::from))
             .collect::<Result<Vec<_>, _>>()
             .ok()
     },
+}
+
+fn is_sensitive_env(name: &str) -> bool {
+    name.contains("TOKEN")
+        || name.contains("SECRET")
+        || name.contains("KEY")
+        || name == "DATABASE_URL"
 }
 
 fn env_var<T: EnvKind>(name: &'static str) -> Result<T> {
     let value = env::var(name).with_context(|| format!("missing env variable `{name}`"))?;
 
     T::from_str(&value).with_context(|| {
+        let rendered_val = if is_sensitive_env(name) {
+            "[REDACTED]"
+        } else {
+            &value
+        };
         format!(
-            "failed to parse env variable `{name}={value}`; expected {expected}",
+            "failed to parse env variable `{name}={rendered_val}`; expected {expected}",
             expected = T::EXPECTED
         )
     })

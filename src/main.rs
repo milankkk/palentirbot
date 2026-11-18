@@ -57,11 +57,6 @@ async fn async_main() -> Result<()> {
 
     if cfg!(debug_assertions) {
         ctx.interaction()
-            .set_global_commands(&[])
-            .await
-            .context("failed to set empty global commands")?;
-
-        ctx.interaction()
             .set_guild_commands(BotConfig::get().dev_guild, &slash_commands)
             .await
             .context("failed to set guild commands")?;
@@ -79,8 +74,11 @@ async fn async_main() -> Result<()> {
         ctx_bandwidth.client().measure_bandwidth().await;
     });
 
+    let shard_handles = event_loop(Arc::clone(&ctx), shards);
+    let mut all_shards = futures::future::join_all(shard_handles);
+
     tokio::select! {
-        _ = event_loop(Arc::clone(&ctx), shards) => error!("Event loop ended"),
+        _ = &mut all_shards => error!("Event loop ended"),
         res = wait_for_shutdown_signal() => match res {
             Ok(sig_name) => info!("Received {sig_name}"),
             Err(err) => error!("error while awaiting shutdown signal: {err:?}"),
@@ -91,6 +89,7 @@ async fn async_main() -> Result<()> {
     for sender in &ctx.shard_senders {
         let _ = sender.close(CloseFrame::NORMAL);
     }
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), all_shards).await;
 
     Ok(())
 }

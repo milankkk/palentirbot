@@ -41,6 +41,7 @@ pub enum BlacklistServer {
 pub struct BlacklistServerAdd {
     /// ID of the server you want to blacklist
     guild_id: String,
+    #[command(max_length = 256)]
     /// Reason for the blacklist
     reason: Option<String>,
 }
@@ -69,6 +70,7 @@ pub enum BlacklistUser {
 pub struct BlacklistUserAdd {
     /// Discord user ID or mention
     user: String,
+    #[command(max_length = 256)]
     /// Reason for the blacklist
     reason: Option<String>,
 }
@@ -82,10 +84,19 @@ pub struct BlacklistUserRemove {
 }
 
 async fn slash_blacklist(ctx: Arc<Context>, mut command: InteractionCommand) -> Result<()> {
-    match Blacklist::from_interaction(command.input_data())? {
-        Blacklist::Server(BlacklistServer::Add(args)) => add(ctx, command, args).await,
-        Blacklist::Server(BlacklistServer::Remove(args)) => remove(ctx, command, args).await,
-        Blacklist::User(BlacklistUser::Add(args)) => user::add(ctx, command, args).await,
-        Blacklist::User(BlacklistUser::Remove(args)) => user::remove(ctx, command, args).await,
+    let parsed = Blacklist::from_interaction(command.input_data())?;
+    command.defer(&ctx, true).await?;
+    let res = match parsed {
+        Blacklist::Server(BlacklistServer::Add(args)) => add(&ctx, &command, args).await,
+        Blacklist::Server(BlacklistServer::Remove(args)) => remove(&ctx, &command, args).await,
+        Blacklist::User(BlacklistUser::Add(args)) => user::add(&ctx, &command, args).await,
+        Blacklist::User(BlacklistUser::Remove(args)) => user::remove(&ctx, &command, args).await,
+    };
+    if let Err(err) = res {
+        let _ = command
+            .error(&ctx, "Failed to update blacklist entry in database.")
+            .await;
+        return Err(err);
     }
+    Ok(())
 }

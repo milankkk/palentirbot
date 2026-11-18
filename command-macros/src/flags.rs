@@ -60,6 +60,10 @@ impl Parse for Flags {
             }
 
             input.parse::<Token![,]>()?;
+
+            if input.is_empty() {
+                break;
+            }
         }
 
         Ok(Self { tokens })

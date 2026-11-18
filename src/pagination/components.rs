@@ -26,6 +26,21 @@ pub(super) async fn remove_components(
     Ok(())
 }
 
+async fn respond_not_author(ctx: &Context, component: &InteractionComponent) -> Result<()> {
+    let response = twilight_model::http::interaction::InteractionResponse {
+        kind: twilight_model::http::interaction::InteractionResponseType::ChannelMessageWithSource,
+        data: Some(twilight_model::http::interaction::InteractionResponseData {
+            content: Some("Only the command author can use these pagination buttons.".to_owned()),
+            flags: Some(twilight_model::channel::message::MessageFlags::EPHEMERAL),
+            ..Default::default()
+        }),
+    };
+    ctx.interaction()
+        .create_response(component.id, &component.token, &response)
+        .await?;
+    Ok(())
+}
+
 pub async fn handle_pagination_component(
     ctx: Arc<Context>,
     component: InteractionComponent,
@@ -36,7 +51,8 @@ pub async fn handle_pagination_component(
 
         if let Some(pagination) = guard.get_mut() {
             if !pagination.is_author(component.user_id()?) {
-                return Ok(());
+                drop(guard);
+                return respond_not_author(&ctx, &component).await;
             }
 
             let defer_components = pagination.defer_components;
@@ -50,6 +66,7 @@ pub async fn handle_pagination_component(
 
             (pagination.build(&ctx).await, defer_components)
         } else {
+            drop(guard);
             return remove_components(&ctx, &component).await;
         }
     };
@@ -108,13 +125,15 @@ pub async fn handle_pagination_custom(
 
         if let Some(pagination) = guard.get() {
             if !pagination.is_author(component.user_id()?) {
-                return Ok(());
+                drop(guard);
+                return respond_not_author(&ctx, &component).await;
             }
 
             pagination.reset_timeout();
 
             pagination.pages.last_page()
         } else {
+            drop(guard);
             return remove_components(&ctx, &component).await;
         }
     };
@@ -219,34 +238,10 @@ pub async fn handle_pagination_modal(ctx: Arc<Context>, modal: InteractionModal)
     };
 
     if defer_components {
-        modal.update(&ctx, &builder?).await?;
+        modal.update_response(&ctx, &builder?).await?;
     } else {
-        modal.callback(&ctx, builder?).await?;
+        modal.update_callback(&ctx, builder?).await?;
     }
 
     Ok(())
-}
-
-pub async fn handle_profile_compact(
-    ctx: Arc<Context>,
-    component: InteractionComponent,
-) -> Result<()> {
-    let f = |pages: &mut Pages| pages.index = 0;
-
-    handle_pagination_component(ctx, component, f).await
-}
-
-pub async fn handle_profile_medium(
-    ctx: Arc<Context>,
-    component: InteractionComponent,
-) -> Result<()> {
-    let f = |pages: &mut Pages| pages.index = 1;
-
-    handle_pagination_component(ctx, component, f).await
-}
-
-pub async fn handle_profile_full(ctx: Arc<Context>, component: InteractionComponent) -> Result<()> {
-    let f = |pages: &mut Pages| pages.index = 2;
-
-    handle_pagination_component(ctx, component, f).await
 }

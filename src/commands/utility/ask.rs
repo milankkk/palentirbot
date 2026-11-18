@@ -1401,6 +1401,7 @@ pub async fn execute_ai_question_with_options(
     }
     messages.push(AiMessage::user_with_images(current_user_msg, opts.images));
 
+    let osu_client = ctx.osu();
     let reply = ctx
         .ai()
         .ask_with_stream(
@@ -1408,7 +1409,7 @@ pub async fn execute_ai_question_with_options(
             &messages,
             opts.search_mode,
             Some(OsuToolContext {
-                osu: ctx.osu(),
+                osu: &osu_client,
                 blocked_discord_handles: &blocked_discord_handles,
             }),
             opts.stream_tx,

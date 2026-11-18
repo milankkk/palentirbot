@@ -1,16 +1,19 @@
 use std::{
+    collections::HashSet,
     fmt::{Display, Formatter, Result as FmtResult},
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    },
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
 };
 
 use eyre::{Context as _, Result};
+use once_cell::sync::Lazy;
 use twilight_gateway::{EventTypeFlags, Shard, StreamExt as _};
-use twilight_model::gateway::{
-    payload::outgoing::UpdatePresence,
-    presence::{ActivityType, MinimalActivity, Status},
+use twilight_model::{
+    gateway::{
+        payload::outgoing::UpdatePresence,
+        presence::{ActivityType, MinimalActivity, Status},
+    },
+    id::{marker::GuildMarker, Id},
 };
 
 use crate::util::Authored;
@@ -65,15 +68,15 @@ impl Display for EventLocation<'_> {
     }
 }
 
-pub async fn event_loop(ctx: Arc<Context>, shards: Vec<Shard>) {
-    let mut handles = Vec::new();
+pub fn event_loop(ctx: Arc<Context>, shards: Vec<Shard>) -> Vec<tokio::task::JoinHandle<()>> {
+    let mut handles = Vec::with_capacity(shards.len());
 
     for shard in shards {
         let ctx = Arc::clone(&ctx);
         handles.push(tokio::spawn(process_shard(ctx, shard)));
     }
 
-    futures::future::join_all(handles).await;
+    handles
 }
 
 async fn process_shard(ctx: Arc<Context>, mut shard: Shard) {
@@ -104,16 +107,36 @@ async fn process_shard(ctx: Arc<Context>, mut shard: Shard) {
     }
 }
 
-static LAST_PRESENCE_GUILD_COUNT: AtomicUsize = AtomicUsize::new(usize::MAX);
+#[derive(Default)]
+struct PresenceTracker {
+    guilds: HashSet<Id<GuildMarker>>,
+    last_sent_count: Option<usize>,
+    last_sent_at: Option<Instant>,
+}
 
-async fn update_guild_presence(ctx: &Context, shard_id: u32) -> Result<()> {
-    let stats = ctx.cache.stats();
-    let count = stats.guilds() + stats.unavailable_guilds();
+static PRESENCE_TRACKER: Lazy<Mutex<PresenceTracker>> =
+    Lazy::new(|| Mutex::new(PresenceTracker::default()));
 
-    let prev = LAST_PRESENCE_GUILD_COUNT.swap(count, Ordering::Relaxed);
-    if prev == count {
-        return Ok(());
-    }
+fn send_presence_update(ctx: &Context, force: bool) -> Result<()> {
+    let count = {
+        let mut tracker = PRESENCE_TRACKER
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let count = tracker.guilds.len();
+        if !force && tracker.last_sent_count == Some(count) {
+            return Ok(());
+        }
+        if !force
+            && tracker
+                .last_sent_at
+                .is_some_and(|t| t.elapsed() < Duration::from_secs(15))
+        {
+            return Ok(());
+        }
+        tracker.last_sent_count = Some(count);
+        tracker.last_sent_at = Some(Instant::now());
+        count
+    };
 
     let activity = MinimalActivity {
         kind: ActivityType::Watching,
@@ -123,8 +146,8 @@ async fn update_guild_presence(ctx: &Context, shard_id: u32) -> Result<()> {
 
     let req = UpdatePresence::new(vec![activity.into()], false, None, Status::Online)?;
 
-    if let Some(sender) = ctx.shard_senders.get(shard_id as usize) {
-        sender.command(&req).context("failed to update activity")?;
+    for sender in &ctx.shard_senders {
+        let _ = sender.command(&req);
     }
 
     Ok(())
@@ -147,15 +170,39 @@ async fn handle_event(
         Event::GatewayReconnect => {
             info!("Gateway requested shard {shard_id} to reconnect")
         }
-        Event::GuildCreate(_) | Event::GuildDelete(_) => {
-            update_guild_presence(&ctx, shard_id).await?;
+        Event::GuildCreate(gc) => {
+            {
+                let mut tracker = PRESENCE_TRACKER
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner());
+                tracker.guilds.insert(gc.id());
+            }
+            send_presence_update(&ctx, false)?;
+        }
+        Event::GuildDelete(gd) => {
+            if gd.unavailable != Some(true) {
+                {
+                    let mut tracker = PRESENCE_TRACKER
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner());
+                    tracker.guilds.remove(&gd.id);
+                }
+                send_presence_update(&ctx, false)?;
+            }
         }
         Event::InteractionCreate(e) => handle_interaction(ctx, e.0).await,
         Event::MessageCreate(msg) => handle_message(ctx, msg.0).await,
-        Event::Ready(_) => {
+        Event::Ready(ready) => {
             info!("Shard {shard_id} is ready");
-            LAST_PRESENCE_GUILD_COUNT.store(usize::MAX, Ordering::Relaxed);
-            update_guild_presence(&ctx, shard_id).await?;
+            {
+                let mut tracker = PRESENCE_TRACKER
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner());
+                for g in &ready.guilds {
+                    tracker.guilds.insert(g.id);
+                }
+            }
+            send_presence_update(&ctx, true)?;
         }
         Event::Resumed => info!("Shard {shard_id} is resumed"),
         _ => {}

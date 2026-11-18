@@ -5,7 +5,7 @@ use eyre::{Context as _, Result};
 use crate::{
     core::{
         commands::{
-            checks::check_authority,
+            checks::check_authority_with_perms,
             slash::{Command, Commands, SlashCommand},
         },
         events::{EventLocation, ProcessResult},
@@ -87,7 +87,16 @@ async fn pre_process_command(
 
     // Only for authorities?
     if slash.flags.authority() {
-        match check_authority(ctx, user_id, command.channel_id, command.guild_id).await {
+        let member_perms = command.member.as_ref().and_then(|m| m.permissions);
+        match check_authority_with_perms(
+            ctx,
+            user_id,
+            command.channel_id,
+            command.guild_id,
+            member_perms,
+        )
+        .await
+        {
             None => {}
             Some(content) => {
                 command.error_callback(ctx, content, false).await?;

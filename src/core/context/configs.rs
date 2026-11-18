@@ -1,14 +1,19 @@
 use std::{
     fs::OpenOptions,
-    io::Write,
+    io::{BufWriter, Write},
     sync::Mutex,
 };
 
 use eyre::{Context as _, Result};
+use flurry::HashMap as FlurryMap;
 use twilight_model::id::{marker::GuildMarker, Id};
 
 use crate::{
-    core::{settings::Server, BotConfig},
+    core::{
+        settings::{RootSettings, Server},
+        BotConfig,
+    },
+    util::hasher::IntBuildHasher,
     Context,
 };
 
@@ -30,8 +35,12 @@ impl Context {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-        let output = {
+        let snapshot_servers = FlurryMap::with_hasher(IntBuildHasher);
+        let (server, output) = {
             let guard = self.root_settings.servers.guard();
+            for (&k, v) in self.root_settings.servers.iter(&guard) {
+                snapshot_servers.insert(k, v.clone(), &guard);
+            }
 
             let mut server = self
                 .root_settings
@@ -41,33 +50,48 @@ impl Context {
                 .unwrap_or_default();
 
             let output = f(&mut server);
+            snapshot_servers.insert(guild_id, server.clone(), &guard);
 
-            self.root_settings.servers.insert(guild_id, server, &guard);
-
-            output
+            (server, output)
         };
 
-        self.store_guild_settings()
-            .context("failed to upsert server settings")?;
+        let snapshot = RootSettings {
+            servers: snapshot_servers,
+        };
+        let write_fn = || Self::write_root_settings_file(&snapshot);
+        if matches!(
+            tokio::runtime::Handle::try_current(),
+            Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread
+        ) {
+            tokio::task::block_in_place(write_fn)?;
+        } else {
+            write_fn()?;
+        }
+
+        self.root_settings.servers.pin().insert(guild_id, server);
 
         Ok(output)
     }
 
-    fn store_guild_settings(&self) -> Result<()> {
+    fn write_root_settings_file(root: &RootSettings) -> Result<()> {
         let path = BotConfig::get().paths.server_settings();
         let tmp_path = path.with_extension("json.tmp");
 
-        let mut file = OpenOptions::new()
+        let file = OpenOptions::new()
             .create(true)
             .write(true)
             .truncate(true)
             .open(&tmp_path)
             .context("failed to open temp server settings file")?;
+        let mut writer = BufWriter::new(file);
 
-        serde_json::to_writer(&mut file, &self.root_settings)
-            .context("failed to serialize root settings")?;
-        file.flush()
+        serde_json::to_writer(&mut writer, root).context("failed to serialize root settings")?;
+        writer
+            .flush()
             .context("failed to flush temp server settings file")?;
+        let file = writer
+            .into_inner()
+            .map_err(|e| eyre::eyre!("failed to finish buffered write: {e}"))?;
         file.sync_all()
             .context("failed to sync temp server settings file")?;
         drop(file);

@@ -5,7 +5,7 @@ use syn::{
     punctuated::Punctuated,
     spanned::Spanned,
     token::Comma,
-    Error, Lit, LitInt, MetaNameValue, Token,
+    Error, Lit, LitInt, MetaNameValue,
 };
 
 pub struct AttributeList {
@@ -14,15 +14,9 @@ pub struct AttributeList {
 
 impl Parse for AttributeList {
     fn parse(input: ParseStream) -> syn::Result<Self> {
-        let mut inner = Punctuated::new();
-        inner.push_value(input.parse()?);
-
-        while !input.is_empty() {
-            input.parse::<Token![,]>()?;
-            inner.push(input.parse()?);
-        }
-
-        Ok(Self { inner })
+        Ok(Self {
+            inner: Punctuated::parse_terminated(input)?,
+        })
     }
 }
 
@@ -57,7 +51,16 @@ impl TryFrom<AttributeList> for Attributes {
         for name_value in list.inner {
             match name_value.path.get_ident() {
                 Some(ident) if ident == "per_page" => match name_value.lit {
-                    Lit::Int(lit) => per_page = Some(lit),
+                    Lit::Int(lit) => {
+                        let val = lit.base10_parse::<usize>()?;
+                        if val == 0 {
+                            return Err(Error::new(
+                                lit.span(),
+                                "`per_page` must be greater than 0",
+                            ));
+                        }
+                        per_page = Some(lit);
+                    }
                     _ => {
                         let message = "Expected an integer";
 

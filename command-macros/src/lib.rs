@@ -11,7 +11,7 @@ mod util;
 ///
 /// Make sure there is a function in scope with the signature
 /// `async fn slash_{lowercased_name}(Arc<Context>, Box<ApplicationCommand>) -> BotResult<()>`
-#[proc_macro_derive(SlashCommand, attributes(bucket, flags))]
+#[proc_macro_derive(SlashCommand, attributes(flags))]
 pub fn slash_command(input: TokenStream) -> TokenStream {
     let derive_input = parse_macro_input!(input as DeriveInput);
 

@@ -7,6 +7,10 @@ use twilight_model::id::{
 
 use crate::database::Database;
 
+fn clamp_reason(reason: Option<String>) -> Option<String> {
+    reason.map(|r| r.chars().take(256).collect())
+}
+
 impl Database {
     pub async fn blacklist_server(&self, guild_id: u64, reason: Option<String>) -> Result<()> {
         let query = sqlx::query(
@@ -22,7 +26,7 @@ SET
 
         query
             .bind(guild_id as i64)
-            .bind(reason)
+            .bind(clamp_reason(reason))
             .execute(&self.pool)
             .await
             .wrap_err("failed to store blacklisted server")?;
@@ -45,7 +49,7 @@ SET
         Ok(result.rows_affected() > 0)
     }
 
-    pub async fn _is_server_blacklisted(
+    pub async fn is_server_blacklisted(
         &self,
         guild_id: Id<GuildMarker>,
     ) -> Result<(bool, Option<String>)> {
@@ -82,7 +86,7 @@ SET
 
         query
             .bind(user_id as i64)
-            .bind(reason)
+            .bind(clamp_reason(reason))
             .execute(&self.pool)
             .await
             .wrap_err("failed to store blacklisted user")?;

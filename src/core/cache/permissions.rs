@@ -24,7 +24,7 @@ impl Cache {
         match self.is_guild_owner(guild, user) {
             Ok(false) => {}
             Ok(true) => return (Permissions::all(), RolesLookup::NotChecked),
-            Err(_) => return (Permissions::empty(), RolesLookup::NotChecked),
+            Err(_) => return (Permissions::empty(), RolesLookup::NotFound),
         }
 
         let member_roles = match self.member(guild, user, |m| m.roles().to_owned()) {
@@ -80,7 +80,8 @@ impl Cache {
                 .channel(parent_id, |c| c.permission_overwrites.clone())
                 .ok()
                 .flatten(),
-            _ => None,
+            Ok((None, None)) => None,
+            Err(_) => return Permissions::empty(),
         };
 
         if let Some(permission_overwrites) = permission_overwrites {
@@ -99,6 +100,18 @@ impl Cache {
                     roles,
                 )
             }
+        }
+
+        if !permissions.contains(Permissions::VIEW_CHANNEL) {
+            return Permissions::empty();
+        }
+        if !permissions.contains(Permissions::SEND_MESSAGES) {
+            permissions.remove(
+                Permissions::EMBED_LINKS
+                    | Permissions::ATTACH_FILES
+                    | Permissions::MENTION_EVERYONE
+                    | Permissions::SEND_TTS_MESSAGES,
+            );
         }
 
         permissions

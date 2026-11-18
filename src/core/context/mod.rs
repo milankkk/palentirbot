@@ -1,15 +1,18 @@
 use crate::core::ai::AiClient;
 use eyre::{Result, WrapErr};
 use flexmap::tokio::TokioMutexMap;
-use rosu_v2::Osu;
-use std::sync::{Arc, Mutex, MutexGuard};
+use rosu_v2::{error::OsuError, Osu};
+use std::{
+    sync::{Arc, Mutex, MutexGuard, RwLock},
+    time::{Duration, Instant},
+};
 use tokio::{fs, io::AsyncWriteExt};
 use twilight_gateway::{MessageSender, Shard};
 use twilight_http::{client::InteractionClient, Client};
 use twilight_model::{
     channel::message::AllowedMentions,
     id::{
-        marker::{ApplicationMarker, MessageMarker},
+        marker::{ApplicationMarker, MessageMarker, UserMarker},
         Id,
     },
 };
@@ -39,6 +42,7 @@ pub struct Context {
     skin_list: Arc<Mutex<SkinList>>,
     application_id: Id<ApplicationMarker>,
     clients: Clients,
+    osu_refresh_lock: tokio::sync::Mutex<Option<Instant>>,
     ai: AiClient,
 }
 
@@ -47,8 +51,57 @@ impl Context {
         self.http.interaction(self.application_id)
     }
 
-    pub fn osu(&self) -> &Osu {
-        &self.clients.osu
+    #[allow(dead_code)]
+    pub fn bot_user_id(&self) -> Id<UserMarker> {
+        self.application_id.cast()
+    }
+
+    pub fn osu(&self) -> Arc<Osu> {
+        Arc::clone(
+            &self
+                .clients
+                .osu
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        )
+    }
+
+    #[allow(dead_code)]
+    pub fn is_osu_auth_error(err: &OsuError) -> bool {
+        matches!(err, OsuError::NoToken)
+            || matches!(err, OsuError::Response { status, .. } if status.as_u16() == 401)
+    }
+
+    #[allow(dead_code)]
+    pub async fn refresh_osu_client(&self) -> Result<Arc<Osu>> {
+        let mut guard = self.osu_refresh_lock.lock().await;
+        if let Some(last) = *guard {
+            if last.elapsed() < Duration::from_secs(10) {
+                return Ok(self.osu());
+            }
+        }
+
+        let config = BotConfig::get();
+        let fresh = Arc::new(
+            Osu::new(
+                config.tokens.osu_client_id,
+                &config.tokens.osu_client_secret,
+            )
+            .await
+            .wrap_err("failed to re-authenticate osu! API client")?,
+        );
+        {
+            let mut slot = self
+                .clients
+                .osu
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            *slot = Arc::clone(&fresh);
+        }
+        *guard = Some(Instant::now());
+        info!("Re-authenticated osu! API client");
+
+        Ok(fresh)
     }
 
     pub fn psql(&self) -> &Database {
@@ -106,6 +159,7 @@ impl Context {
 
         let psql =
             Database::new(&config.database_url).wrap_err("failed to create database client")?;
+        psql.run_migrations().await;
 
         let osu_client_id = config.tokens.osu_client_id;
         let osu_client_secret = &config.tokens.osu_client_secret;
@@ -113,7 +167,7 @@ impl Context {
 
         let custom = CustomClient::new();
 
-        let (cache, _resume_data) = Cache::new().await;
+        let cache = Cache::new();
         let stats = Arc::new(BotStats::new());
 
         let clients = Clients::new(osu, custom, psql);
@@ -125,6 +179,7 @@ impl Context {
             cache,
             http,
             clients,
+            osu_refresh_lock: tokio::sync::Mutex::new(None),
             shard_senders,
             application_id,
             root_settings,
@@ -142,13 +197,17 @@ impl Context {
 
 struct Clients {
     custom: CustomClient,
-    osu: Osu,
+    osu: RwLock<Arc<Osu>>,
     psql: Database,
 }
 
 impl Clients {
     fn new(osu: Osu, custom: CustomClient, psql: Database) -> Self {
-        Self { osu, custom, psql }
+        Self {
+            osu: RwLock::new(Arc::new(osu)),
+            custom,
+            psql,
+        }
     }
 }
 
@@ -181,16 +240,35 @@ async fn create_missing_folders_and_files(config: &BotConfig) -> Result<()> {
         "danser not found! please download from https://github.com/Wieku/danser-go/releases/"
     );
 
+    let danser_bin = config.paths.danser().join("danser");
+    if tokio::fs::metadata(&danser_bin)
+        .await
+        .is_ok_and(|m| m.is_dir())
+    {
+        warn!(
+            path = ?danser_bin,
+            "`DANSER_PATH/danser` is a directory instead of the danser executable binary; replay rendering will fail until danser files are placed directly inside DANSER_PATH"
+        );
+    }
+
     let server_settings = config.paths.server_settings();
 
-    if !server_settings.exists() {
-        let mut file = fs::File::create(server_settings)
+    if !tokio::fs::try_exists(&server_settings).await.unwrap_or(false) {
+        let tmp_settings = server_settings.with_extension("json.tmp");
+        let mut file = fs::File::create(&tmp_settings)
             .await
-            .context("failed to create server settings file")?;
+            .context("failed to create temp server settings file")?;
 
         file.write_all(b"{\"Servers\":[]}")
             .await
-            .context("failed writing to server settings file")?;
+            .context("failed writing to temp server settings file")?;
+        file.sync_all()
+            .await
+            .context("failed syncing temp server settings file")?;
+        drop(file);
+        fs::rename(&tmp_settings, &server_settings)
+            .await
+            .context("failed moving initial server settings file into place")?;
     }
 
     Ok(())

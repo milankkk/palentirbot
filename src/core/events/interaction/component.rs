@@ -31,9 +31,6 @@ pub async fn handle_component(ctx: Arc<Context>, component: InteractionComponent
         "pagination_custom" => handle_pagination_custom(ctx, component).await,
         "pagination_step" => handle_pagination_step(ctx, component).await,
         "pagination_end" => handle_pagination_end(ctx, component).await,
-        "profile_compact" => handle_profile_compact(ctx, component).await,
-        "profile_medium" => handle_profile_medium(ctx, component).await,
-        "profile_full" => handle_profile_full(ctx, component).await,
         "owner_settings_section" => crate::commands::owner::settings::handle_owner_settings_section(ctx, component).await,
         _ if name.starts_with("owner_settings_section_") => crate::commands::owner::settings::handle_owner_settings_section(ctx, component).await,
         _ if name.starts_with("owner_settings_prop_") => crate::commands::owner::settings::handle_owner_settings_prop(ctx, component).await,
@@ -167,11 +164,13 @@ async fn handle_render_cancel(
 
     let user_id = component.user_id()?;
     let channel_id = component.message.channel_id;
-    let is_admin = crate::core::commands::checks::check_authority(
+    let member_perms = component.member.as_ref().and_then(|m| m.permissions);
+    let is_admin = crate::core::commands::checks::check_authority_with_perms(
         &ctx,
         user_id,
         channel_id,
         component.guild_id,
+        member_perms,
     )
     .await
     .is_none();

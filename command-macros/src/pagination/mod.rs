@@ -1,6 +1,9 @@
 use proc_macro2::{Ident, TokenStream};
 use quote::{quote, ToTokens, TokenStreamExt};
-use syn::{punctuated::Punctuated, token::Comma, Data, DeriveInput, Error, Field, Fields, Result};
+use syn::{
+    punctuated::Punctuated, token::Comma, Data, DeriveInput, Error, Field, Fields, Result,
+    Visibility,
+};
 
 pub use self::attributes::AttributeList;
 
@@ -10,11 +13,11 @@ mod attributes;
 
 pub fn impl_(input: DeriveInput, list: AttributeList) -> Result<TokenStream> {
     let DeriveInput {
+        attrs,
         vis,
         ident,
         generics,
         data,
-        ..
     } = input;
 
     let data = match data {
@@ -42,9 +45,9 @@ pub fn impl_(input: DeriveInput, list: AttributeList) -> Result<TokenStream> {
 
     let mut name = ident.to_string();
 
-    if !name.ends_with("Pagination") {
+    if !name.ends_with("Pagination") || name.len() == "Pagination".len() {
         let message = "`IsPagination` can only be derived for \
-            structs whose name is suffixed with `Pagination`, e.g. `PingPagination`";
+            structs with a non-empty prefix suffixed with `Pagination`, e.g. `PingPagination`";
 
         return Err(Error::new(ident.span(), message));
     }
@@ -54,16 +57,27 @@ pub fn impl_(input: DeriveInput, list: AttributeList) -> Result<TokenStream> {
 
     let Attributes { per_page, entries } = Attributes::try_from(list)?;
 
+    let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
+    let param_fields: Punctuated<Field, Comma> = named_fields
+        .iter()
+        .cloned()
+        .map(|mut field| {
+            field.vis = Visibility::Inherited;
+            field.attrs.clear();
+            field
+        })
+        .collect();
     let token_fields = FieldNames::new(&named_fields);
 
     let tokens = quote! {
+        #(#attrs)*
         #vis struct #ident #generics {
             #named_fields
         }
 
-        impl #ident {
+        impl #impl_generics #ident #ty_generics #where_clause {
             #[allow(clippy::too_many_arguments)]
-            pub fn builder( #named_fields ) -> crate::pagination::PaginationBuilder {
+            pub fn builder( #param_fields ) -> crate::pagination::PaginationBuilder {
                 let pages = crate::pagination::Pages::new(#per_page, #entries);
                 let kind = crate::pagination::PaginationKind:: #variant (Box::new(Self { #token_fields }));
 

@@ -7,10 +7,10 @@ pub fn round(n: f32) -> f32 {
 }
 
 pub fn with_comma_int<T: Int>(n: T) -> FormatInt {
-    FormatInt(n.into_i64())
+    FormatInt(n.into_i128())
 }
 
-pub struct FormatInt(i64);
+pub struct FormatInt(i128);
 
 impl fmt::Display for FormatInt {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -23,10 +23,10 @@ impl fmt::Display for FormatInt {
 
             self.0.unsigned_abs()
         } else {
-            self.0 as u64
+            self.0 as u128
         };
 
-        let mut chunks = [0_u16; 7];
+        let mut chunks = [0_u16; 14];
         let mut count = 0_usize;
 
         while n > 0 {
@@ -46,14 +46,14 @@ impl fmt::Display for FormatInt {
 }
 
 pub trait Int {
-    fn into_i64(self) -> i64;
+    fn into_i128(self) -> i128;
 }
 
 macro_rules! into_int {
     ($ty:ty) => {
         impl Int for $ty {
-            fn into_i64(self) -> i64 {
-                self as i64
+            fn into_i128(self) -> i128 {
+                self as i128
             }
         }
     };
@@ -72,6 +72,10 @@ into_int!(i64);
 into_int!(isize);
 
 pub fn last_multiple(per_page: usize, total: usize) -> usize {
+    if per_page == 0 || total == 0 {
+        return 0;
+    }
+
     if per_page <= total && total.is_multiple_of(per_page) {
         total - per_page
     } else {
@@ -88,7 +92,7 @@ mod tests {
         let v1 = 3.1615;
         let v2 = 3.16;
 
-        if round(v1) - v2 > f32::EPSILON {
+        if (round(v1) - v2).abs() > f32::EPSILON {
             panic!("[test_round] round({v1})={} != {v2}", round(v1));
         }
     }
@@ -106,8 +110,15 @@ mod tests {
             "9,000,000,000,000,000,999".to_owned()
         );
         assert_eq!(
+            with_comma_int(u64::MAX).to_string(),
+            "18,446,744,073,709,551,615".to_owned()
+        );
+        assert_eq!(
             with_comma_int(31_415_926_u32).to_string(),
             "31,415,926".to_owned()
         );
+        assert_eq!(last_multiple(0, 10), 0);
+        assert_eq!(last_multiple(10, 0), 0);
+        assert_eq!(last_multiple(10, 20), 10);
     }
 }

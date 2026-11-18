@@ -104,7 +104,7 @@ pub async fn check_render_access(
     }
 
     if let Some(guild) = guild_id {
-        match ctx.psql()._is_server_blacklisted(guild).await {
+        match ctx.psql().is_server_blacklisted(guild).await {
             Ok((true, reason_opt)) => {
                 let mut content = String::from("Seems like this server has been blacklisted.");
                 if let Some(reason) = reason_opt {

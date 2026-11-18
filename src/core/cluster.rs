@@ -3,10 +3,6 @@ use std::sync::Arc;
 use eyre::{Context as _, Result};
 use twilight_gateway::{create_recommended, Config, Intents, MessageSender, Shard};
 use twilight_http::Client;
-use twilight_model::gateway::{
-    payload::outgoing::update_presence::UpdatePresencePayload,
-    presence::{ActivityType, MinimalActivity, Status},
-};
 
 pub async fn build_shards(
     token: &str,
@@ -17,15 +13,6 @@ pub async fn build_shards(
         | Intents::GUILD_MESSAGES
         | Intents::DIRECT_MESSAGES
         | Intents::MESSAGE_CONTENT;
-
-    let activity = MinimalActivity {
-        kind: ActivityType::Playing,
-        name: String::new(),
-        url: None,
-    };
-
-    let _presence =
-        UpdatePresencePayload::new([activity.into()], false, None, Status::Online).unwrap();
 
     let config = Config::new(token.to_owned(), intents);
 
