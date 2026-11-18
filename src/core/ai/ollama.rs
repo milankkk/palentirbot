@@ -819,6 +819,73 @@ impl OllamaClient {
         Ok(())
     }
 
+    /// Query `/api/ps` for models currently loaded in Ollama memory/VRAM.
+    pub async fn loaded_models(&self) -> Result<Vec<String>> {
+        #[derive(Deserialize)]
+        struct PsResponse {
+            #[serde(default)]
+            models: Vec<PsModel>,
+        }
+        #[derive(Deserialize)]
+        struct PsModel {
+            #[serde(default)]
+            name: String,
+            #[serde(default)]
+            model: String,
+        }
+
+        let resp = self
+            .client
+            .get(format!("{}/api/ps", self.url))
+            .timeout(Duration::from_secs(3))
+            .send()
+            .await
+            .with_context(|| format!("failed to query Ollama /api/ps at {}", self.url))?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            eyre::bail!("Ollama /api/ps returned HTTP {status}");
+        }
+        let parsed: PsResponse = resp
+            .json()
+            .await
+            .context("failed to parse Ollama /api/ps response")?;
+
+        let mut seen = HashSet::new();
+        let mut names = Vec::new();
+        for m in parsed.models {
+            let candidate = if !m.name.trim().is_empty() {
+                m.name.trim().to_owned()
+            } else {
+                m.model.trim().to_owned()
+            };
+            if !candidate.is_empty() && seen.insert(candidate.clone()) {
+                names.push(candidate);
+            }
+        }
+        Ok(names)
+    }
+
+    /// Unload every currently resident Ollama model to free GPU VRAM (`keep_alive: 0`).
+    pub async fn unload_all_loaded_models(&self) -> usize {
+        let Ok(models) = self.loaded_models().await else {
+            return 0;
+        };
+        let mut unloaded = 0;
+        for model in models {
+            match self.unload_model(&model).await {
+                Ok(()) => {
+                    tracing::info!(%model, "Unloaded idle Ollama model from GPU VRAM for replay rendering");
+                    unloaded += 1;
+                }
+                Err(err) => {
+                    tracing::debug!(?err, %model, "Failed to unload Ollama model from GPU VRAM");
+                }
+            }
+        }
+        unloaded
+    }
+
     /// List locally installed Ollama models from `/api/tags`.
     pub async fn list_models(&self) -> Result<Vec<String>> {
         #[derive(Deserialize)]

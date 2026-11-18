@@ -1508,6 +1508,27 @@ pub async fn execute_ai_question_with_options(
     }
     messages.push(AiMessage::user_with_images(current_user_msg, opts.images));
 
+    if ctx.replay_queue.is_rendering().await {
+        if let Some(ref tx) = opts.stream_tx {
+            let _ = tx.send(AiStreamEvent::Status(
+                "🧠 Waiting for active replay render to finish GPU encoding...".to_owned(),
+            ));
+        }
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
+        while ctx.replay_queue.is_rendering().await {
+            let notified = ctx.replay_queue.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if !ctx.replay_queue.is_rendering().await {
+                break;
+            }
+            tokio::select! {
+                _ = &mut notified => {}
+                _ = tokio::time::sleep_until(deadline) => break,
+            }
+        }
+    }
+
     let osu_client = ctx.osu();
     let reply = ctx
         .ai()

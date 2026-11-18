@@ -24,7 +24,10 @@ use super::{
 use crate::{
     core::{
         replay_queue::{
-            process::{download_mapset, terminate_danser_group},
+            process::{
+                build_danser_ld_library_path, download_mapset, read_danser_log_tail,
+                terminate_danser_group,
+            },
             RenderOptions, ReplayData, TimePoints,
         },
         BotConfig, Context,
@@ -549,6 +552,7 @@ async fn run_screenshot_inner(
     }
 
     let _guard = SCREENSHOT_LOCK.lock().await;
+    ctx.ai().unload_idle_models().await;
 
     let mut danser_bin = config.paths.danser().to_owned();
     danser_bin.push("danser");
@@ -570,10 +574,12 @@ async fn run_screenshot_inner(
     let mut out_png = config.paths.danser().to_owned();
     out_png.push(format!("screenshots/{out_name}.png"));
 
+    let ld_library_path = build_danser_ld_library_path(config.paths.danser());
     let mut cmd = Command::new(&danser_bin);
     #[cfg(unix)]
     cmd.process_group(0);
     cmd.current_dir(config.paths.danser())
+        .env("LD_LIBRARY_PATH", ld_library_path)
         .kill_on_drop(true)
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -605,7 +611,7 @@ async fn run_screenshot_inner(
         })
     });
 
-    let wait_res = tokio::time::timeout(Duration::from_secs(30), child.wait()).await;
+    let wait_res = tokio::time::timeout(Duration::from_secs(60), child.wait()).await;
     let status = match wait_res {
         Ok(Ok(status)) => status,
         Ok(Err(err)) => {
@@ -614,7 +620,8 @@ async fn run_screenshot_inner(
                 h.abort();
             }
             let _ = tokio::fs::remove_file(&out_png).await;
-            tracing::warn!(?err, "failed awaiting danser screenshot process");
+            let danser_log_tail = read_danser_log_tail(config.paths.danser(), 15).await;
+            tracing::warn!(?err, ?danser_log_tail, "failed awaiting danser screenshot process");
             return Err("Failed to run danser for screenshot.".to_owned());
         }
         Err(_) => {
@@ -623,7 +630,9 @@ async fn run_screenshot_inner(
                 h.abort();
             }
             let _ = tokio::fs::remove_file(&out_png).await;
-            return Err("danser screenshot timed out after 30s.".to_owned());
+            let danser_log_tail = read_danser_log_tail(config.paths.danser(), 15).await;
+            tracing::warn!(?danser_log_tail, "danser screenshot timed out after 60s");
+            return Err("danser screenshot timed out after 60s.".to_owned());
         }
     };
 
@@ -641,7 +650,8 @@ async fn run_screenshot_inner(
 
     if !status.success() {
         let stderr = String::from_utf8_lossy(&stderr_bytes);
-        tracing::warn!(status = %status, stderr = %stderr, "danser -ss failed");
+        let danser_log_tail = read_danser_log_tail(config.paths.danser(), 15).await;
+        tracing::warn!(status = %status, stderr = %stderr, ?danser_log_tail, "danser -ss failed");
         let _ = tokio::fs::remove_file(&out_png).await;
         return Err("danser failed to capture screenshot (timestamp may be past map end).".to_owned());
     }

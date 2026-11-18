@@ -250,6 +250,52 @@ impl AiClient {
         self.queue.len().await
     }
 
+    /// Wait briefly for any active AI generation to finish, then unload resident Ollama models from VRAM
+    /// so `danser` + NVENC have full GPU memory. Returns `false` if AI remained busy or render was cancelled.
+    pub async fn release_gpu_for_render(
+        &self,
+        cancel_notify: &tokio::sync::Notify,
+        cancelled: &std::sync::atomic::AtomicBool,
+    ) -> bool {
+        use std::sync::atomic::Ordering;
+        use std::time::{Duration, Instant};
+
+        const MAX_WAIT: Duration = Duration::from_secs(20);
+        let started = Instant::now();
+
+        while self.queue.len().await > 0 {
+            if cancelled.load(Ordering::Acquire) || started.elapsed() >= MAX_WAIT {
+                break;
+            }
+            tokio::select! {
+                biased;
+                _ = cancel_notify.notified() => return false,
+                _ = tokio::time::sleep(Duration::from_millis(400)) => {}
+            }
+        }
+
+        if cancelled.load(Ordering::Acquire) {
+            return false;
+        }
+
+        if self.queue.len().await == 0 {
+            let _ = self.ollama.unload_all_loaded_models().await;
+            true
+        } else {
+            tracing::info!(
+                "AI generation still active after 20s wait; replay render will use CPU libx264 encoder"
+            );
+            false
+        }
+    }
+
+    /// Unload resident Ollama models when no AI request is queued or running.
+    pub async fn unload_idle_models(&self) {
+        if self.queue.len().await == 0 {
+            let _ = self.ollama.unload_all_loaded_models().await;
+        }
+    }
+
     pub async fn ask_with_stream(
         &self,
         channel_id: Id<ChannelMarker>,

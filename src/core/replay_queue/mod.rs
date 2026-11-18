@@ -129,6 +129,10 @@ impl ReplayQueue {
         !is_empty || !matches!(status, ReplayStatus::Waiting)
     }
 
+    pub async fn is_rendering(&self) -> bool {
+        matches!(*self.status.lock().await, ReplayStatus::Rendering(_))
+    }
+
     pub async fn pop(&self) -> Option<ReplayData> {
         self.queue.lock().await.pop_front()
     }
