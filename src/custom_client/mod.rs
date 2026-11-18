@@ -345,4 +345,6 @@ pub struct UploadResponse {
     pub text: String,
     #[serde(default)]
     pub video_url: Option<String>,
+    #[serde(default)]
+    pub size_bytes: Option<u64>,
 }

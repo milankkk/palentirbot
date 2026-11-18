@@ -5,7 +5,7 @@ use twilight_model::{
 
 pub struct ModalBuilder {
     custom_id: Option<String>,
-    input: TextInput,
+    inputs: Vec<TextInput>,
     title: Option<String>,
 }
 
@@ -13,7 +13,7 @@ impl ModalBuilder {
     pub fn new(component_id: impl Into<String>, label: impl Into<String>) -> Self {
         Self {
             custom_id: None,
-            input: TextInput {
+            inputs: vec![TextInput {
                 custom_id: component_id.into(),
                 label: label.into(),
                 max_length: None,
@@ -22,19 +22,38 @@ impl ModalBuilder {
                 required: Some(true),
                 style: TextInputStyle::Short,
                 value: None,
-            },
+            }],
             title: None,
         }
     }
 
+    pub fn add_input(mut self, component_id: impl Into<String>, label: impl Into<String>) -> Self {
+        self.inputs.push(TextInput {
+            custom_id: component_id.into(),
+            label: label.into(),
+            max_length: None,
+            min_length: None,
+            placeholder: None,
+            required: Some(true),
+            style: TextInputStyle::Short,
+            value: None,
+        });
+
+        self
+    }
+
     pub fn max_len(mut self, len: u16) -> Self {
-        self.input.max_length = Some(len);
+        if let Some(last) = self.inputs.last_mut() {
+            last.max_length = Some(len);
+        }
 
         self
     }
 
     pub fn min_len(mut self, len: u16) -> Self {
-        self.input.min_length = Some(len);
+        if let Some(last) = self.inputs.last_mut() {
+            last.min_length = Some(len);
+        }
 
         self
     }
@@ -46,7 +65,9 @@ impl ModalBuilder {
     }
 
     pub fn placeholder(mut self, placeholder: impl Into<String>) -> Self {
-        self.input.placeholder = Some(placeholder.into());
+        if let Some(last) = self.inputs.last_mut() {
+            last.placeholder = Some(placeholder.into());
+        }
 
         self
     }
@@ -54,7 +75,9 @@ impl ModalBuilder {
     /// Defaults to `TextInputStyle::Short`
     #[allow(unused)]
     pub fn style(mut self, style: TextInputStyle) -> Self {
-        self.input.style = style;
+        if let Some(last) = self.inputs.last_mut() {
+            last.style = style;
+        }
 
         self
     }
@@ -68,7 +91,9 @@ impl ModalBuilder {
     #[allow(unused)]
     /// Use this as default input. Renders the placeholder useless.
     pub fn value(mut self, value: impl Into<String>) -> Self {
-        self.input.value = Some(value.into());
+        if let Some(last) = self.inputs.last_mut() {
+            last.value = Some(value.into());
+        }
 
         self
     }
@@ -77,12 +102,18 @@ impl ModalBuilder {
         let custom_id = self.custom_id.expect("must use `ModalBuilder::modal_id`");
         let title = self.title.expect("must use `ModalBuilder::title`");
 
-        let row = ActionRow {
-            components: vec![Component::TextInput(self.input)],
-        };
+        let rows = self
+            .inputs
+            .into_iter()
+            .map(|input| {
+                Component::ActionRow(ActionRow {
+                    components: vec![Component::TextInput(input)],
+                })
+            })
+            .collect();
 
         InteractionResponseData {
-            components: Some(vec![Component::ActionRow(row)]),
+            components: Some(rows),
             custom_id: Some(custom_id),
             title: Some(title),
             ..Default::default()

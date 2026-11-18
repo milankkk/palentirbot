@@ -1,9 +1,4 @@
-use std::{
-    convert::TryFrom,
-    fmt::{Display, Formatter, Result as FmtResult},
-    path::PathBuf,
-    sync::Arc,
-};
+use std::{convert::TryFrom, path::PathBuf, sync::Arc};
 
 use command_macros::SlashCommand;
 use eyre::Result;
@@ -22,11 +17,12 @@ use crate::{
     util::{builder::EmbedBuilder, interaction::InteractionCommand, InteractionCommandExt},
 };
 
-pub use self::{copy::*, default::*, edit::*, preset::*, view::*};
+pub use self::{copy::*, default::*, edit::*, menu::*, preset::*, view::*};
 
 mod copy;
 mod default;
 mod edit;
+pub mod menu;
 mod preset;
 mod view;
 
@@ -42,6 +38,8 @@ pub enum Settings {
     Default(SettingsDefault),
     #[command(name = "edit")]
     Edit(SettingsEdit),
+    #[command(name = "menu")]
+    Menu(SettingsMenu),
     #[command(name = "preset")]
     Preset(SettingsPreset),
     #[command(name = "view")]
@@ -56,11 +54,18 @@ pub enum SettingsParsable {
     Default(SettingsDefault),
     #[command(name = "edit")]
     Edit(SettingsEditAutocomplete),
+    #[command(name = "menu")]
+    Menu(SettingsMenu),
     #[command(name = "preset")]
     Preset(SettingsPreset),
     #[command(name = "view")]
     View(SettingsView),
 }
+
+#[derive(CreateCommand, CommandModel)]
+#[command(name = "menu")]
+/// Open an interactive menu to easily adjust your render settings
+pub struct SettingsMenu;
 
 #[derive(CreateCommand, CommandModel)]
 #[command(name = "copy")]
@@ -289,10 +294,10 @@ pub enum State {
 
 #[derive(CreateCommand, CommandModel)]
 #[command(name = "view")]
-/// View the settings of a user
+/// View your own or another user's render settings
 pub struct SettingsView {
-    /// The user to view the settings of
-    user: ResolvedUser,
+    /// User to view (defaults to yourself)
+    pub(crate) user: Option<ResolvedUser>,
 }
 
 pub async fn slash_settings(ctx: Arc<Context>, mut command: InteractionCommand) -> Result<()> {
@@ -300,151 +305,109 @@ pub async fn slash_settings(ctx: Arc<Context>, mut command: InteractionCommand) 
         SettingsParsable::Copy(args) => copy(ctx, command, args).await,
         SettingsParsable::Default(args) => default(ctx, command, args).await,
         SettingsParsable::Edit(args) => edit(ctx, command, args).await,
+        SettingsParsable::Menu(_) => menu(ctx, command).await,
         SettingsParsable::Preset(args) => preset(ctx, command, args).await,
         SettingsParsable::View(args) => view(ctx, command, args).await,
     }
 }
 
-fn create_settings_embed(user: &User, settings: &DanserSettings) -> Embed {
+pub(crate) fn create_settings_embed(user: &User, settings: &DanserSettings) -> Embed {
     let skin_path = PathBuf::from(&settings.skin.current_skin);
     let skin = skin_path
         .file_name()
-        .map(|name| name.to_string_lossy())
-        .unwrap_or_else(|| std::borrow::Cow::Borrowed("default"));
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "default".to_owned())
+        .replace('_', " ");
 
-    let on_off = |b| if b { "on" } else { "off" };
-    let percent = |value| Percent { value };
+    let flag = |b: bool| if b { "✅" } else { "❌" };
+    let pct = |value: f64| format!("{}%", (value * 100.0).round());
+
+    let pp_text = if settings.gameplay.pp_counter.show {
+        format!("✅ ({} dec)", settings.gameplay.pp_counter.decimals)
+    } else {
+        "❌".to_owned()
+    };
+    let hit_err_text = if settings.gameplay.hit_error_meter.show {
+        format!(
+            "✅ ({} dec)",
+            settings.gameplay.hit_error_meter.unstable_rate_decimals
+        )
+    } else {
+        "❌".to_owned()
+    };
+    let aim_err_text = if settings.gameplay.aim_error_meter.show {
+        format!(
+            "✅ ({} dec)",
+            settings.gameplay.aim_error_meter.unstable_rate_decimals
+        )
+    } else {
+        "❌".to_owned()
+    };
 
     let fields = vec![
         EmbedField {
-            inline: false,
-            name: "Skin".to_owned(),
-            value: format!("`skin`: {skin}"),
-        },
-        EmbedField {
             inline: true,
-            name: "Beatmap".to_owned(),
+            name: "🎨 Skin & Visuals".to_owned(),
             value: format!(
-                "`storyboard`: {}\n\
-                `video`: {}\n\
-                `dim`: {}",
-                on_off(settings.playfield.background.load_storyboards),
-                on_off(settings.playfield.background.load_videos),
-                percent(settings.playfield.background.dim.normal),
-            ),
-        },
-        EmbedField {
-            inline: true,
-            name: "Gameplay".to_owned(),
-            value: format!(
-                "`leaderboard`: {}\n\
-                `key overlay`: {}\n\
-                `results screen`: {}\n\
-                `skip intro`: {}",
-                on_off(settings.gameplay.score_board.show),
-                on_off(settings.gameplay.key_overlay.show),
-                on_off(settings.gameplay.show_results_screen),
-                on_off(settings.gameplay.always_skip_intro),
-            ),
-        },
-        EmbedField {
-            inline: false,
-            name: "Recording".to_owned(),
-            value: format!(
-                "`resolution`: {}x{} @ {}fps\n\
-                `motion blur`: {}",
+                "**Skin:** `{skin}`\n\
+                **Resolution:** `{}x{} @ {}fps`\n\
+                **Cursor Scale:** `{:.2}x`\n\
+                **Cursor Ripples:** {}\n\
+                **Motion Blur:** {}",
                 settings.recording.frame_width,
                 settings.recording.frame_height,
                 settings.recording.fps,
-                on_off(settings.recording.motion_blur.enabled),
-            ),
-        },
-        EmbedField {
-            inline: false,
-            name: "Audio".to_owned(),
-            value: format!(
-                "`music volume`: {}\n\
-                `hitsound volume`: {}\n\
-                `beatmap hitsounds`: {}",
-                percent(settings.audio.music_volume),
-                percent(settings.audio.sample_volume),
-                on_off(!settings.audio.ignore_beatmap_samples),
-            ),
-        },
-        EmbedField {
-            inline: true,
-            name: "Cursor".to_owned(),
-            value: format!(
-                "`cursor scale`: {}\n\
-                `cursor ripples`: {}",
                 settings.skin.cursor.scale,
-                on_off(settings.cursor.cursor_ripples),
+                flag(settings.cursor.cursor_ripples),
+                flag(settings.recording.motion_blur.enabled),
             ),
         },
         EmbedField {
             inline: true,
-            name: "PP Counter".to_owned(),
+            name: "🔊 Background & Audio".to_owned(),
             value: format!(
-                "`show pp counter`: {}\n\
-                `pp decimals`: {}",
-                on_off(settings.gameplay.pp_counter.show),
-                settings.gameplay.pp_counter.decimals,
+                "**BG Dim:** `{}`\n\
+                **Storyboard:** {} | **BG Video:** {}\n\
+                **Music:** `{}` | **Hitsounds:** `{}`\n\
+                **Map Hitsounds:** {}",
+                pct(settings.playfield.background.dim.normal),
+                flag(settings.playfield.background.load_storyboards),
+                flag(settings.playfield.background.load_videos),
+                pct(settings.audio.music_volume),
+                pct(settings.audio.sample_volume),
+                flag(!settings.audio.ignore_beatmap_samples),
             ),
         },
         EmbedField {
             inline: false,
-            name: "Hit Counter".to_owned(),
+            name: "📊 HUD & Overlays".to_owned(),
             value: format!(
-                "`show hit counter`: {}\n\
-                `show sliderbreaks`: {}",
-                on_off(settings.gameplay.hit_counter.show),
-                on_off(settings.gameplay.hit_counter.show_sliderbreaks),
-            ),
-        },
-        EmbedField {
-            inline: true,
-            name: "Strain Graph".to_owned(),
-            value: format!(
-                "`show strain graph`: {}\n\
-                `show strain graph outline`: {}",
-                on_off(settings.gameplay.strain_graph.show),
-                on_off(settings.gameplay.strain_graph.outline.show),
-            ),
-        },
-        EmbedField {
-            inline: true,
-            name: "Hit Error Meter".to_owned(),
-            value: format!(
-                "`show hit error meter`: {}\n\
-                `hit error decimals`: {}",
-                on_off(settings.gameplay.hit_error_meter.show),
-                settings.gameplay.hit_error_meter.unstable_rate_decimals,
+                "**PP:** {pp_text} • **Leaderboard:** {} • **Keys:** {}\n\
+                **Hit Counter:** {} *(SB: {})* • **Strain Graph:** {} *(Outline: {})*\n\
+                **Hit Error:** {hit_err_text} • **Aim Error:** {aim_err_text}",
+                flag(settings.gameplay.score_board.show),
+                flag(settings.gameplay.key_overlay.show),
+                flag(settings.gameplay.hit_counter.show),
+                flag(settings.gameplay.hit_counter.show_sliderbreaks),
+                flag(settings.gameplay.strain_graph.show),
+                flag(settings.gameplay.strain_graph.outline.show),
             ),
         },
         EmbedField {
             inline: false,
-            name: "Aim Error Meter".to_owned(),
+            name: "▶️ Playback".to_owned(),
             value: format!(
-                "`show aim error meter`: {}\n\
-                `aim error UR decimals`: {}",
-                on_off(settings.gameplay.aim_error_meter.show),
-                settings.gameplay.aim_error_meter.unstable_rate_decimals,
+                "**Skip Intro:** {} • **Results Screen:** {}",
+                flag(settings.gameplay.always_skip_intro),
+                flag(settings.gameplay.show_results_screen),
             ),
         },
     ];
 
     EmbedBuilder::new()
-        .title(format!("Settings for {}", user.name))
+        .color(0x96DFE3)
+        .title(format!("Render Settings — {}", user.name))
         .fields(fields)
+        .footer("Tip: Run /settings menu for one-click controls")
         .build()
-}
-
-struct Percent {
-    value: f64,
-}
-
-impl Display for Percent {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        write!(f, "{}%", (self.value * 100.0).round())
-    }
 }

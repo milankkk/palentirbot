@@ -11,6 +11,7 @@ use self::{
     autocomplete::handle_autocomplete, command::handle_command, component::handle_component,
     modal::handle_modal,
 };
+pub(crate) use self::component::{clear_pp_select, last_pp_select_activity};
 
 mod autocomplete;
 mod command;

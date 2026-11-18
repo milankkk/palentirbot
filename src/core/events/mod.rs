@@ -22,7 +22,7 @@ use self::{interaction::handle_interaction, message::handle_message};
 
 use super::Context;
 
-mod interaction;
+pub mod interaction;
 mod message;
 
 #[derive(Debug)]

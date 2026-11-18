@@ -25,7 +25,7 @@ use once_cell::sync::Lazy;
 use tokio::process::Command;
 use tokio::sync::{Mutex as AsyncMutex, Notify};
 use tokio::task::JoinHandle;
-use tokio::time::{sleep, Duration};
+use tokio::time::{sleep, sleep_until, Duration, Instant};
 use twilight_model::{
     channel::message::MessageFlags,
     id::{
@@ -199,10 +199,22 @@ async fn process_single_replay(
         ("default".to_owned(), default_settings_path)
     };
     let settings_bytes = tokio::fs::read(&active_settings_path).await.unwrap_or_default();
+    let parsed_user_settings =
+        serde_json::from_slice::<crate::core::settings::DanserSettings>(&settings_bytes).ok();
     let effective_skip_intro = skip_intro
-        || serde_json::from_slice::<crate::core::settings::DanserSettings>(&settings_bytes)
-            .map(|s| s.gameplay.always_skip_intro)
-            .unwrap_or(false);
+        || parsed_user_settings
+            .as_ref()
+            .is_some_and(|s| s.gameplay.always_skip_intro);
+    let (base_width, base_height, base_fps) = parsed_user_settings
+        .as_ref()
+        .map(|s| {
+            (
+                s.recording.frame_width,
+                s.recording.frame_height,
+                s.recording.fps,
+            )
+        })
+        .unwrap_or((1920, 1080, 60));
 
     let filename_opt = path.file_stem().and_then(OsStr::to_str);
 
@@ -271,6 +283,8 @@ async fn process_single_replay(
         pp_2022,
         pp_2021,
         max_possible_combo,
+        map_first_obj_ms,
+        map_last_obj_ms,
     } = match create_title(&replay, map_path.clone(), &title_for_display, is_lazer).await {
         Ok(result) => result,
         Err(err) => {
@@ -337,10 +351,37 @@ async fn process_single_replay(
         None
     };
 
-    let (link, video_url, rendered_mp4_path) = if let Some((watch_url, vid_url)) = cached_hit {
-        (watch_url, vid_url, None)
+    let (link, video_url, rendered_mp4_path, adaptive_plan, uploaded_size_bytes) = if let Some((watch_url, vid_url)) = cached_hit {
+        (watch_url, vid_url, None, None, None)
     } else {
-        const NVENC_LOW_VRAM_SPATCH: &str = r#"{"Recording":{"Encoder":"h264_nvenc","h264_nvenc":{"Preset":"p4","AdditionalOptions":"-movflags +faststart"}}}"#;
+        let adaptive_target_mb = adaptive_discord_max_mb();
+        let estimated_secs = estimate_rendered_duration_secs(
+            map_first_obj_ms,
+            map_last_obj_ms,
+            replay.mods,
+            time_points.start,
+            time_points.end,
+            effective_skip_intro,
+        );
+        let adaptive_plan = compute_adaptive_render_plan(
+            estimated_secs,
+            adaptive_target_mb,
+            base_width,
+            base_height,
+            base_fps,
+        );
+        if let Some(ref plan) = adaptive_plan {
+            info!(
+                estimated_secs,
+                target_mb = adaptive_target_mb,
+                video_kbps = plan.video_kbps,
+                audio_kbps = plan.audio_kbps,
+                width = plan.width,
+                height = plan.height,
+                fps = plan.fps,
+                "Applying adaptive marathon NVENC bitrate cap"
+            );
+        }
 
         tracing::debug!(mods = replay.mods, "replay mods being sent to danser");
 
@@ -403,7 +444,8 @@ async fn process_single_replay(
 
         for attempt in 1..=2u8 {
             let low_vram_nvenc = attempt == 2;
-            let spatch_opt = low_vram_nvenc.then_some(NVENC_LOW_VRAM_SPATCH);
+            let spatch_owned = build_danser_spatch(adaptive_plan.as_ref(), low_vram_nvenc);
+            let spatch_opt = spatch_owned.as_deref();
 
             let attempt_outcome = run_danser_attempt(
                 &ctx,
@@ -418,6 +460,7 @@ async fn process_single_replay(
                 effective_skip_intro,
                 offset_ms,
                 spatch_opt,
+                low_vram_nvenc,
                 attempt,
                 &cancelled,
                 &cancel_notify,
@@ -565,6 +608,54 @@ async fn process_single_replay(
             let _ = input_channel.error(&ctx, user_msg).await;
             eyre::bail!("{bail_msg}");
         }
+
+        let mut old_filepath = config.paths.replays().clone();
+        old_filepath.push(format!("{filename}.mp4"));
+
+        let out_meta = match tokio::fs::metadata(&old_filepath).await {
+            Ok(meta) if meta.len() > 0 => meta,
+            Ok(_) => {
+                drop(_gpu_guard);
+                cleanup_danser_outputs(config.paths.replays(), filename, &path).await;
+                let _ = input_channel
+                    .error(&ctx, "Danser exited without writing any video output.")
+                    .await;
+                eyre::bail!("danser produced an empty output file at {old_filepath:?}");
+            }
+            Err(err) => {
+                drop(_gpu_guard);
+                cleanup_danser_outputs(config.paths.replays(), filename, &path).await;
+                let _ = input_channel
+                    .error(&ctx, "Danser exited without creating the output video file.")
+                    .await;
+                return Err(err).context("danser output mp4 missing after exit 0");
+            }
+        };
+
+        if adaptive_target_mb > 0 && out_meta.len() > 485 * 1024 * 1024 {
+            let cancelled_clamp = clamp_oversized_mp4(
+                config.paths.danser(),
+                &ld_library_path,
+                &old_filepath,
+                estimated_secs,
+                out_meta.len(),
+                &cancelled,
+                &cancel_notify,
+            )
+            .await;
+            if cancelled_clamp || cancelled.load(Ordering::Acquire) {
+                drop(_gpu_guard);
+                return handle_cancelled_cleanup(
+                    &ctx,
+                    queue_message,
+                    &path,
+                    Some(&old_filepath),
+                    input_channel,
+                    user,
+                )
+                .await;
+            }
+        }
         drop(_gpu_guard);
 
         tracing::debug!(
@@ -620,27 +711,6 @@ async fn process_single_replay(
         );
         let safe_filename = clamp_utf8_bytes(&raw_safe_filename, 160);
 
-        let mut old_filepath = config.paths.replays().clone();
-        old_filepath.push(format!("{filename}.mp4"));
-
-        match tokio::fs::metadata(&old_filepath).await {
-            Ok(meta) if meta.len() > 0 => {}
-            Ok(_) => {
-                cleanup_danser_outputs(config.paths.replays(), filename, &path).await;
-                let _ = input_channel
-                    .error(&ctx, "Danser exited without writing any video output.")
-                    .await;
-                eyre::bail!("danser produced an empty output file at {old_filepath:?}");
-            }
-            Err(err) => {
-                cleanup_danser_outputs(config.paths.replays(), filename, &path).await;
-                let _ = input_channel
-                    .error(&ctx, "Danser exited without creating the output video file.")
-                    .await;
-                return Err(err).context("danser output mp4 missing after exit 0");
-            }
-        }
-
         let mut new_filepath = config.paths.replays().clone();
         new_filepath.push(format!("{safe_filename}.mp4"));
 
@@ -648,6 +718,7 @@ async fn process_single_replay(
             tracing::debug!("Failed to rename MP4 file: {err:?}");
             new_filepath = old_filepath;
         }
+        let local_size_bytes = tokio::fs::metadata(&new_filepath).await.ok().map(|m| m.len());
 
         info!("Started upload to server");
         ctx.replay_queue
@@ -701,7 +772,7 @@ async fn process_single_replay(
             .await;
         };
 
-        let (uploaded_link, uploaded_video_url) = match upload_res {
+        let (uploaded_link, uploaded_video_url, uploaded_size_bytes) = match upload_res {
             Ok(res) if res.error != 0 => {
                 let err = format!("failed to upload: `{}`", res.text);
                 warn!("{err}");
@@ -709,7 +780,7 @@ async fn process_single_replay(
                 let _ = tokio::fs::remove_file(&new_filepath).await;
                 eyre::bail!("upload server returned error {}", res.error);
             }
-            Ok(res) => (res.text, res.video_url),
+            Ok(res) => (res.text, res.video_url, res.size_bytes.or(local_size_bytes)),
             Err(err) => {
                 let err = err.wrap_err("failed to upload file");
                 warn!("{err:?}");
@@ -752,7 +823,13 @@ async fn process_single_replay(
 
         ctx.replay_queue.notify.notify_waiters();
 
-        (uploaded_link, uploaded_video_url, Some(new_filepath))
+        (
+            uploaded_link,
+            uploaded_video_url,
+            Some(new_filepath),
+            adaptive_plan,
+            uploaded_size_bytes,
+        )
     };
 
     let _legacy_mods = GameModsLegacy::from_bits(replay.mods);
@@ -791,78 +868,48 @@ async fn process_single_replay(
     let display_max_pp = active_pp.max_pp;
     let display_nochoke_pp = active_pp.nochoke_pp;
 
-    let played_field_value = match replay_datetime {
-        Some(dt) => format!("Played on <t:{}:F>", dt.unix_timestamp()),
-        None => "Unknown play date".to_string(),
-    };
-
     let (aim_pp, speed_pp, acc_pp) = (active_pp.aim_pp, active_pp.speed_pp, active_pp.acc_pp);
 
-    let mut embed_fields = vec![
-        EmbedField {
-            inline: true,
-            name: "Rank".to_owned(),
-            value: rank_value,
-        },
-        EmbedField {
-            inline: true,
-            name: "Score".to_owned(),
-            value: score_value,
-        },
-        EmbedField {
-            inline: true,
-            name: "Accuracy".to_owned(),
-            value: format!("{acc}%"),
-        },
-        EmbedField {
-            inline: true,
-            name: "Max Combo".to_owned(),
-            value: format!("{}/{}x", replay.max_combo, max_possible_combo),
-        },
-        EmbedField {
-            inline: true,
-            name: "pp".to_owned(),
-            value: if is_perfect_fc {
-                format!("{:.2}pp / {:.2}pp", display_pp, display_max_pp)
-            } else {
-                format!(
-                    "{:.2}pp *(No Choke: {:.2}pp)* / {:.2}pp",
-                    display_pp, display_nochoke_pp, display_max_pp
-                )
-            },
-        },
-    ];
+    let embed_description = format!(
+        "{rank_value}  **{score_value}**  •  **{acc}%**  •  **{}/{}x**\n{} {}  {} {}  {} {}  {} {}",
+        replay.max_combo,
+        max_possible_combo,
+        emojis.hit_300,
+        replay.count_300,
+        emojis.hit_100,
+        replay.count_100,
+        emojis.hit_50,
+        replay.count_50,
+        emojis.hit_miss,
+        replay.count_miss,
+    );
 
-    if let (Some(aim), Some(speed), Some(acc_val)) = (aim_pp, speed_pp, acc_pp) {
-        embed_fields.push(EmbedField {
-            inline: true,
-            name: "PP Breakdown".to_owned(),
-            value: format!("Aim: `{aim:.1}` | Speed: `{speed:.1}` | Acc: `{acc_val:.1}`"),
-        });
-    }
-
-    embed_fields.extend([
-        EmbedField {
-            inline: false,
-            name: "Hits".to_owned(),
-            value: format!(
-                "{} {} | {} {} | {} {} | {} {}",
-                emojis.hit_300,
-                replay.count_300,
-                emojis.hit_100,
-                replay.count_100,
-                emojis.hit_50,
-                replay.count_50,
-                emojis.hit_miss,
-                replay.count_miss,
-            ),
-        },
-        EmbedField {
-            inline: false,
-            name: "\u{200B}".to_owned(),
-            value: played_field_value,
-        },
-    ]);
+    let pp_str = format!("{display_pp:.2}");
+    let max_pp_str = format!("{display_max_pp:.2}");
+    let nochoke_pp_str = format!("{display_nochoke_pp:.2}");
+    let breakdown_strs = match (aim_pp, speed_pp, acc_pp) {
+        (Some(aim), Some(speed), Some(acc_val)) => Some((
+            format!("{aim:.1}"),
+            format!("{speed:.1}"),
+            format!("{acc_val:.1}"),
+        )),
+        _ => None,
+    };
+    let pp_field_value = format_pp_field(
+        &pp_str,
+        &max_pp_str,
+        &nochoke_pp_str,
+        is_perfect_fc,
+        breakdown_strs
+            .as_ref()
+            .map(|(a, s, c)| (a.as_str(), s.as_str(), c.as_str())),
+        None,
+    );
+    let embed_fields = vec![EmbedField {
+        inline: false,
+        name: "PP".to_owned(),
+        value: pp_field_value,
+    }];
 
     let embed_title = if video_title.chars().count() > 256 {
         let mut s: String = video_title.chars().take(253).collect();
@@ -872,11 +919,26 @@ async fn process_single_replay(
         video_title.clone()
     };
 
-    let embed_builder = EmbedBuilder::new()
+    let footer_text = match adaptive_plan.as_ref() {
+        Some(plan) => format!(
+            "Played • Adaptive {}p{} ({:.1} Mbps)",
+            plan.height,
+            plan.fps,
+            f64::from(plan.video_kbps) / 1000.0
+        ),
+        None => "Played".to_owned(),
+    };
+
+    let mut embed_builder = EmbedBuilder::new()
         .color(0x96DFE3)
         .title(embed_title)
         .url(format!("https://osu.ppy.sh/beatmaps/{map_id}"))
-        .fields(embed_fields);
+        .description(embed_description)
+        .fields(embed_fields)
+        .footer(footer_text);
+    if let Some(dt) = replay_datetime {
+        embed_builder = embed_builder.timestamp(dt);
+    }
 
     let embed = embed_builder.build();
     let mut components: Vec<twilight_model::channel::message::Component> = vec![];
@@ -956,7 +1018,8 @@ async fn process_single_replay(
         );
     }
 
-    if options.len() > 1 {
+    let has_pp_select = options.len() > 1;
+    if has_pp_select {
         components.push(
             twilight_model::channel::message::component::Component::ActionRow(
                 twilight_model::channel::message::component::ActionRow {
@@ -1008,13 +1071,13 @@ async fn process_single_replay(
             ));
         }
     }
-    components.push(
-        twilight_model::channel::message::component::Component::ActionRow(
-            twilight_model::channel::message::component::ActionRow {
-                components: link_buttons,
-            },
-        ),
+    let link_buttons_row = twilight_model::channel::message::component::Component::ActionRow(
+        twilight_model::channel::message::component::ActionRow {
+            components: link_buttons,
+        },
     );
+    let remaining_components = vec![link_buttons_row.clone()];
+    components.push(link_buttons_row);
 
     if cancelled.load(Ordering::Acquire) {
         return handle_cancelled_cleanup(
@@ -1029,11 +1092,46 @@ async fn process_single_replay(
     }
 
     let embed_builder = MessageBuilder::new().embed(embed).components(components);
-    if let Err(err) = input_channel.create_message(&ctx, &embed_builder).await {
-        warn!(
-            "{:?}",
-            err.wrap_err("failed to send replay details embed")
-        );
+    let embed_msg_id = match input_channel.create_message(&ctx, &embed_builder).await {
+        Ok(msg) => Some(msg.id),
+        Err(err) => {
+            warn!(
+                "{:?}",
+                err.wrap_err("failed to send replay details embed")
+            );
+            None
+        }
+    };
+
+    let pp_timeout_secs = pp_select_timeout_secs();
+    if let (true, Some(embed_msg_id)) = (has_pp_select && pp_timeout_secs > 0, embed_msg_id) {
+        let ctx_pp = Arc::clone(&ctx);
+        tokio::spawn(async move {
+            let mut prev_check = Instant::now();
+            let hard_cap = prev_check + Duration::from_secs(pp_timeout_secs.saturating_mul(2).max(300));
+            let mut deadline = prev_check + Duration::from_secs(pp_timeout_secs);
+            loop {
+                sleep_until(deadline).await;
+                if let Some(last_act) =
+                    crate::core::events::interaction::last_pp_select_activity(embed_msg_id)
+                {
+                    if last_act > prev_check && last_act < hard_cap {
+                        prev_check = last_act;
+                        let extended = (last_act + Duration::from_secs(60)).min(hard_cap);
+                        if extended > deadline {
+                            deadline = extended;
+                            continue;
+                        }
+                    }
+                }
+                break;
+            }
+            crate::core::events::interaction::clear_pp_select(embed_msg_id);
+            let builder = MessageBuilder::new().components(remaining_components);
+            if let Err(err) = (embed_msg_id, input_channel).update(&ctx_pp, &builder).await {
+                tracing::debug!(?err, msg_id = %embed_msg_id, "failed to remove expired PP dropdown");
+            }
+        });
     }
 
     let content = format!("<@{user}> [Replay]({watch_url})");
@@ -1047,32 +1145,44 @@ async fn process_single_replay(
 
     match input_channel.create_message(&ctx, &builder).await {
         Ok(sent_msg) => {
-            let ctx_verify = Arc::clone(&ctx);
-            let watch_url_retry = watch_url.clone();
-            let msg_id = sent_msg.id;
-            tokio::spawn(async move {
-                sleep(Duration::from_secs(6)).await;
-                let should_retry = match ctx_verify.http.message(input_channel, msg_id).await {
-                    Ok(resp) => match resp.model().await {
-                        Ok(m) => {
-                            let suppressed = m.flags.is_some_and(|f| {
-                                f.contains(MessageFlags::SUPPRESS_EMBEDS)
-                            });
-                            !suppressed && !m.embeds.iter().any(|e| e.video.is_some())
-                        }
+            let skip_video_retry = uploaded_size_bytes.is_some_and(|s| s > 510_000_000);
+            if !skip_video_retry {
+                let ctx_verify = Arc::clone(&ctx);
+                let watch_url_retry = watch_url.clone();
+                let msg_id = sent_msg.id;
+                tokio::spawn(async move {
+                    sleep(Duration::from_secs(6)).await;
+                    let should_retry = match ctx_verify.http.message(input_channel, msg_id).await {
+                        Ok(resp) => match resp.model().await {
+                            Ok(m) => {
+                                let suppressed = m.flags.is_some_and(|f| {
+                                    f.contains(MessageFlags::SUPPRESS_EMBEDS)
+                                });
+                                !suppressed && !m.embeds.iter().any(|e| e.video.is_some())
+                            }
+                            Err(_) => false,
+                        },
                         Err(_) => false,
-                    },
-                    Err(_) => false,
-                };
-                if should_retry {
-                    let busted = append_cache_buster(&watch_url_retry);
-                    let retry_builder =
-                        MessageBuilder::new().content(format!("<@{user}> [Replay]({busted})"));
-                    let _ = (msg_id, input_channel)
-                        .update(&ctx_verify, &retry_builder)
-                        .await;
-                }
-            });
+                    };
+                    if should_retry {
+                        let busted = append_cache_buster(&watch_url_retry);
+                        warn!(
+                            msg_id = %msg_id,
+                            url = %busted,
+                            "Discord embed missing video after 6s; triggering ?v=2 refresh"
+                        );
+                        let retry_builder =
+                            MessageBuilder::new().content(format!("<@{user}> [Replay]({busted})"));
+                        match (msg_id, input_channel)
+                            .update(&ctx_verify, &retry_builder)
+                            .await
+                        {
+                            Ok(_) => info!(msg_id = %msg_id, "Dispatched ?v=2 embed refresh edit"),
+                            Err(err) => warn!(?err, msg_id = %msg_id, "Failed to edit message for ?v=2 embed refresh"),
+                        }
+                    }
+                });
+            }
         }
         Err(err) => {
             let err = err.wrap_err("failed to send video link to channel");
@@ -1302,6 +1412,7 @@ async fn run_danser_attempt(
     effective_skip_intro: bool,
     offset_ms: Option<i32>,
     spatch: Option<&str>,
+    low_vram_nvenc: bool,
     attempt: u8,
     cancelled: &AtomicBool,
     cancel_notify: &Notify,
@@ -1312,7 +1423,8 @@ async fn run_danser_attempt(
         danser_dir = ?config.paths.danser(),
         ?danser_path,
         attempt,
-        low_vram_nvenc = spatch.is_some(),
+        low_vram_nvenc,
+        has_spatch = spatch.is_some(),
         "launching danser"
     );
     #[cfg(unix)]
@@ -1356,7 +1468,7 @@ async fn run_danser_attempt(
         command.args(["-sPatch", patch]);
     }
 
-    info!(attempt, low_vram_nvenc = spatch.is_some(), "Started replay processing");
+    info!(attempt, low_vram_nvenc, "Started replay processing");
 
     let cancel_fut = cancel_notify.notified();
     tokio::pin!(cancel_fut);
@@ -1863,6 +1975,8 @@ struct TitleResult {
     pp_2022: Option<PpTriple>,
     pp_2021: Option<PpTriple>,
     max_possible_combo: u32,
+    map_first_obj_ms: f64,
+    map_last_obj_ms: f64,
 }
 
 #[derive(Copy, Clone)]
@@ -2110,14 +2224,29 @@ async fn create_title(
     let small_tick_hits = replay.small_tick_hits;
     let slider_end_hits = replay.slider_end_hits;
 
-    let (pp_v4, stars, max_possible_combo) = tokio::task::spawn_blocking(move || -> Result<_> {
-        let map = Beatmap::from_bytes(&osu_bytes_v4)
-            .with_context(|| format!("failed to parse map at {map_path_v4:?}"))?;
+    let (pp_v4, stars, max_possible_combo, map_first_obj_ms, map_last_obj_ms) =
+        tokio::task::spawn_blocking(move || -> Result<_> {
+            let map = Beatmap::from_bytes(&osu_bytes_v4)
+                .with_context(|| format!("failed to parse map at {map_path_v4:?}"))?;
 
-        let diff_attrs = rosu_pp::Difficulty::new()
-            .mods(mods_val)
-            .lazer(is_lazer)
-            .calculate(&map);
+            let map_first_obj_ms = map.hit_objects.first().map(|o| o.start_time).unwrap_or(0.0);
+            let map_last_obj_ms = map
+                .hit_objects
+                .iter()
+                .map(|o| {
+                    use rosu_pp::model::hit_object::{HitObjectKind, HoldNote, Spinner};
+                    match &o.kind {
+                        HitObjectKind::Spinner(Spinner { duration })
+                        | HitObjectKind::Hold(HoldNote { duration }) => o.start_time + *duration,
+                        _ => o.start_time,
+                    }
+                })
+                .fold(0.0_f64, f64::max);
+
+            let diff_attrs = rosu_pp::Difficulty::new()
+                .mods(mods_val)
+                .lazer(is_lazer)
+                .calculate(&map);
 
         let stars = diff_attrs.stars();
         let max_possible_combo = diff_attrs.max_combo();
@@ -2181,6 +2310,8 @@ async fn create_title(
             },
             (stars * 100.0).round() / 100.0,
             max_possible_combo,
+            map_first_obj_ms,
+            map_last_obj_ms,
         ))
     })
     .await
@@ -2340,6 +2471,8 @@ async fn create_title(
         pp_2022,
         pp_2021,
         max_possible_combo,
+        map_first_obj_ms,
+        map_last_obj_ms,
     })
 }
 
@@ -2638,6 +2771,410 @@ pub(crate) fn md5_hex(data: &[u8]) -> String {
     out
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AdaptiveRenderPlan {
+    pub video_kbps: u32,
+    pub maxrate_kbps: u32,
+    pub bufsize_kbps: u32,
+    pub audio_kbps: u32,
+    pub width: i32,
+    pub height: i32,
+    pub fps: i32,
+}
+
+pub(crate) fn adaptive_discord_max_mb() -> u64 {
+    std::env::var("ADAPTIVE_DISCORD_MAX_MB")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(460)
+}
+
+pub(crate) fn pp_select_timeout_secs() -> u64 {
+    std::env::var("PP_SELECT_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(120)
+}
+
+pub(crate) fn estimate_rendered_duration_secs(
+    first_obj_ms: f64,
+    last_obj_ms: f64,
+    mods: u32,
+    start_sec: u32,
+    end_sec: u32,
+    skip_intro: bool,
+) -> f64 {
+    let start_ms = if start_sec > 0 {
+        f64::from(start_sec) * 1000.0
+    } else if skip_intro {
+        (first_obj_ms - 2000.0).max(0.0)
+    } else {
+        0.0
+    };
+    let end_ms = if end_sec > 0 {
+        let end_target = f64::from(end_sec) * 1000.0;
+        if last_obj_ms > 0.0 {
+            end_target.min(last_obj_ms)
+        } else {
+            end_target
+        }
+    } else {
+        last_obj_ms
+    };
+    let raw_secs = ((end_ms - start_ms) / 1000.0).max(0.0);
+    if raw_secs <= 0.0 {
+        return 0.0;
+    }
+    let clock_rate = if (mods & (64 | 512)) != 0 {
+        1.5
+    } else if (mods & 256) != 0 {
+        0.75
+    } else {
+        1.0
+    };
+    (raw_secs / clock_rate) + 12.0
+}
+
+fn scale_down_even(bw: i32, bh: i32, max_w: i32, max_h: i32) -> (i32, i32) {
+    if bw <= max_w && bh <= max_h {
+        return ((bw & !1).max(2), (bh & !1).max(2));
+    }
+    let rw = f64::from(max_w) / f64::from(bw);
+    let rh = f64::from(max_h) / f64::from(bh);
+    let scale = rw.min(rh);
+    let w = (((f64::from(bw) * scale).round() as i32) & !1).max(2);
+    let h = (((f64::from(bh) * scale).round() as i32) & !1).max(2);
+    (w, h)
+}
+
+pub(crate) fn compute_adaptive_render_plan(
+    rendered_secs: f64,
+    target_mb: u64,
+    base_width: i32,
+    base_height: i32,
+    base_fps: i32,
+) -> Option<AdaptiveRenderPlan> {
+    if target_mb == 0 || !rendered_secs.is_finite() || rendered_secs <= 0.0 {
+        return None;
+    }
+    let total_kbps = ((target_mb as f64) * 8_000.0 / rendered_secs) * 0.96;
+    let audio_kbps = if total_kbps >= 2000.0 {
+        192
+    } else if total_kbps >= 1100.0 {
+        160
+    } else {
+        128
+    };
+    let raw_video_kbps = total_kbps - f64::from(audio_kbps);
+    if raw_video_kbps >= 3500.0 {
+        return None;
+    }
+
+    let video_kbps = (raw_video_kbps.floor() as i64).clamp(300, 3500) as u32;
+    let maxrate_kbps = ((f64::from(video_kbps) * 1.15).round() as u32).max(video_kbps);
+    let bufsize_kbps = video_kbps.saturating_mul(2);
+
+    let bw = base_width.max(640);
+    let bh = base_height.max(360);
+    let bfps = base_fps.max(24);
+
+    let (width, height, fps) = if video_kbps >= 1800 {
+        ((bw & !1).max(2), (bh & !1).max(2), bfps)
+    } else if video_kbps >= 850 {
+        let (w, h) = scale_down_even(bw, bh, 1280, 720);
+        (w, h, bfps.min(60))
+    } else {
+        let (w, h) = scale_down_even(bw, bh, 1280, 720);
+        (w, h, bfps.min(30))
+    };
+
+    Some(AdaptiveRenderPlan {
+        video_kbps,
+        maxrate_kbps,
+        bufsize_kbps,
+        audio_kbps,
+        width,
+        height,
+        fps,
+    })
+}
+
+pub(crate) fn build_danser_spatch(
+    plan: Option<&AdaptiveRenderPlan>,
+    low_vram_nvenc: bool,
+) -> Option<String> {
+    const NVENC_LOW_VRAM_SPATCH: &str = r#"{"Recording":{"Encoder":"h264_nvenc","h264_nvenc":{"Preset":"p4","AdditionalOptions":"-movflags +faststart"}}}"#;
+    let Some(p) = plan else {
+        return low_vram_nvenc.then(|| NVENC_LOW_VRAM_SPATCH.to_owned());
+    };
+    let add_opts = if low_vram_nvenc {
+        format!(
+            "-movflags +faststart -maxrate {}k -bufsize {}k",
+            p.maxrate_kbps, p.bufsize_kbps
+        )
+    } else {
+        format!(
+            "-movflags +faststart -maxrate {}k -bufsize {}k -bf 3 -b_ref_mode middle -spatial_aq 1 -temporal_aq 1 -aq-strength 6 -rc-lookahead 20",
+            p.maxrate_kbps, p.bufsize_kbps
+        )
+    };
+    let val = serde_json::json!({
+        "Recording": {
+            "FrameWidth": p.width,
+            "FrameHeight": p.height,
+            "FPS": p.fps,
+            "Encoder": "h264_nvenc",
+            "AudioCodec": "aac",
+            "h264_nvenc": {
+                "RateControl": "vbr",
+                "Bitrate": format!("{}k", p.video_kbps),
+                "Preset": if low_vram_nvenc { "p4" } else { "p5" },
+                "AdditionalOptions": add_opts,
+            },
+            "aac": {
+                "Bitrate": format!("{}k", p.audio_kbps),
+            },
+        }
+    });
+    Some(val.to_string())
+}
+
+async fn probe_mp4_duration_secs(
+    danser_dir: &Path,
+    ld_library_path: &str,
+    mp4_path: &Path,
+) -> Option<f64> {
+    let bundled = danser_dir.join("ffmpeg/bin/ffprobe");
+    let ffprobe_bin: PathBuf = if tokio::fs::try_exists(&bundled).await.unwrap_or(false) {
+        bundled
+    } else if tokio::fs::try_exists("/usr/lib/jellyfin-ffmpeg/ffprobe")
+        .await
+        .unwrap_or(false)
+    {
+        PathBuf::from("/usr/lib/jellyfin-ffmpeg/ffprobe")
+    } else {
+        PathBuf::from("ffprobe")
+    };
+
+    let output = tokio::time::timeout(
+        Duration::from_secs(15),
+        Command::new(ffprobe_bin)
+            .env("LD_LIBRARY_PATH", ld_library_path)
+            .kill_on_drop(true)
+            .args(["-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1"])
+            .arg(mp4_path)
+            .output(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let dur = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<f64>()
+        .ok()?;
+    (dur.is_finite() && dur > 0.0).then_some(dur)
+}
+
+async fn clamp_oversized_mp4(
+    danser_dir: &Path,
+    ld_library_path: &str,
+    mp4_path: &Path,
+    fallback_secs: f64,
+    orig_bytes: u64,
+    cancelled: &AtomicBool,
+    cancel_notify: &Notify,
+) -> bool {
+    let dur_secs = probe_mp4_duration_secs(danser_dir, ld_library_path, mp4_path)
+        .await
+        .unwrap_or(fallback_secs);
+    if dur_secs <= 0.0 {
+        warn!(
+            orig_bytes,
+            "Output MP4 exceeded 485 MiB but duration is unknown; keeping original"
+        );
+        return false;
+    }
+
+    let audio_kbps = 128_u32;
+    let total_kbps = (450.0 * 8_000.0 / dur_secs) * 0.96;
+    let video_kbps = ((total_kbps - f64::from(audio_kbps)).floor() as i64).clamp(300, 3500) as u32;
+    let maxrate_kbps = ((f64::from(video_kbps) * 1.15).round() as u32).max(video_kbps);
+    let bufsize_kbps = video_kbps.saturating_mul(2);
+
+    let bundled_ffmpeg = danser_dir.join("ffmpeg/bin/ffmpeg");
+    let ffmpeg_bin: PathBuf = if tokio::fs::try_exists(&bundled_ffmpeg).await.unwrap_or(false) {
+        bundled_ffmpeg
+    } else {
+        PathBuf::from("ffmpeg")
+    };
+
+    let clamp_path = mp4_path.with_extension("clamp.mp4");
+    let _ = tokio::fs::remove_file(&clamp_path).await;
+
+    warn!(
+        orig_bytes,
+        dur_secs,
+        video_kbps,
+        "Rendered MP4 exceeded 485 MiB safety threshold; running 1-pass NVENC clamp to ~450 MB"
+    );
+
+    let mut cmd = Command::new(ffmpeg_bin);
+    cmd.env("LD_LIBRARY_PATH", ld_library_path)
+        .kill_on_drop(true)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .args(["-y", "-nostats", "-loglevel", "error", "-i"])
+        .arg(mp4_path)
+        .args([
+            "-c:v",
+            "h264_nvenc",
+            "-rc",
+            "vbr",
+            "-b:v",
+            &format!("{video_kbps}k"),
+            "-maxrate",
+            &format!("{maxrate_kbps}k"),
+            "-bufsize",
+            &format!("{bufsize_kbps}k"),
+            "-profile:v",
+            "high",
+            "-preset",
+            "p5",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "128k",
+            "-movflags",
+            "+faststart",
+        ])
+        .arg(&clamp_path);
+
+    let Ok(mut child) = cmd.spawn() else {
+        warn!("Failed to spawn ffmpeg for post-render size clamp; keeping original");
+        return false;
+    };
+
+    let stderr_handle = child.stderr.take().map(|mut err| {
+        tokio::spawn(async move {
+            use tokio::io::AsyncReadExt as _;
+            let mut buf = Vec::new();
+            let _ = (&mut err).take(8192).read_to_end(&mut buf).await;
+            String::from_utf8_lossy(&buf).into_owned()
+        })
+    });
+
+    let cancel_fut = cancel_notify.notified();
+    tokio::pin!(cancel_fut);
+    cancel_fut.as_mut().enable();
+    if cancelled.load(Ordering::Acquire) {
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+        if let Some(h) = stderr_handle {
+            h.abort();
+        }
+        let _ = tokio::fs::remove_file(&clamp_path).await;
+        return true;
+    }
+
+    let wait_res = tokio::select! {
+        biased;
+        _ = &mut cancel_fut => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            if let Some(h) = stderr_handle {
+                h.abort();
+            }
+            let _ = tokio::fs::remove_file(&clamp_path).await;
+            return true;
+        }
+        res = tokio::time::timeout(Duration::from_secs(600), child.wait()) => res,
+    };
+
+    let stderr_text = match stderr_handle {
+        Some(h) => h.await.unwrap_or_default(),
+        None => String::new(),
+    };
+
+    match wait_res {
+        Ok(Ok(status)) if status.success() => {
+            if let Ok(meta) = tokio::fs::metadata(&clamp_path).await {
+                if meta.len() > 0 && meta.len() < orig_bytes {
+                    if let Err(err) = tokio::fs::rename(&clamp_path, mp4_path).await {
+                        warn!(?err, "Failed to replace MP4 with clamped file");
+                        let _ = tokio::fs::remove_file(&clamp_path).await;
+                    } else {
+                        info!(
+                            orig_bytes,
+                            clamped_bytes = meta.len(),
+                            "Successfully clamped oversized MP4 for Discord embedding"
+                        );
+                    }
+                    return false;
+                }
+            }
+            let _ = tokio::fs::remove_file(&clamp_path).await;
+        }
+        Ok(Ok(status)) => {
+            warn!(%status, stderr = %stderr_text.trim(), "Post-render clamp ffmpeg failed; keeping original");
+            let _ = tokio::fs::remove_file(&clamp_path).await;
+        }
+        Ok(Err(err)) => {
+            warn!(?err, "Post-render clamp ffmpeg wait failed; keeping original");
+            let _ = tokio::fs::remove_file(&clamp_path).await;
+        }
+        Err(_) => {
+            warn!("Post-render clamp ffmpeg timed out after 600s; keeping original");
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            let _ = tokio::fs::remove_file(&clamp_path).await;
+        }
+    }
+
+    false
+}
+
+pub(crate) fn pp_version_label(id: &str) -> Option<&'static str> {
+    match id {
+        "pp_v4" => Some("rosu-pp v4"),
+        "pp_v25" => Some("March 2025"),
+        "pp_v24" => Some("Oct 2024"),
+        "pp_v22" => Some("Sept 2022"),
+        "pp_v21" => Some("Nov 2021"),
+        _ => None,
+    }
+}
+
+pub(crate) fn format_pp_field(
+    pp: &str,
+    max_pp: &str,
+    nochoke_pp: &str,
+    is_perfect_fc: bool,
+    breakdown: Option<(&str, &str, &str)>,
+    version_tag: Option<&str>,
+) -> String {
+    let base = if is_perfect_fc {
+        format!("**{pp}pp** / {max_pp}pp")
+    } else {
+        format!("**{pp}pp** (FC: **{nochoke_pp}pp**) / {max_pp}pp")
+    };
+    let mut out = match breakdown {
+        Some((aim, speed, acc)) => {
+            format!("{base}\nAim `{aim}` • Speed `{speed}` • Acc `{acc}`")
+        }
+        None => base,
+    };
+    if let Some(tag) = version_tag {
+        out.push_str(&format!("  •  *{tag}*"));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2727,6 +3264,106 @@ mod tests {
         assert_eq!(
             append_cache_buster("https://replays.example.com/watch/abc?foo=1#t=10"),
             "https://replays.example.com/watch/abc?foo=1&v=2#t=10"
+        );
+    }
+
+    #[test]
+    fn test_estimate_rendered_duration_secs() {
+        // 3 minute NM map
+        let nm = estimate_rendered_duration_secs(2000.0, 180_000.0, 0, 0, 0, false);
+        assert!((nm - 192.0).abs() < 0.01);
+
+        // Same map with DT (64) -> 180 / 1.5 + 12 = 132
+        let dt = estimate_rendered_duration_secs(2000.0, 180_000.0, 64, 0, 0, false);
+        assert!((dt - 132.0).abs() < 0.01);
+
+        // Same map with HT (256) -> 180 / 0.75 + 12 = 252
+        let ht = estimate_rendered_duration_secs(2000.0, 180_000.0, 256, 0, 0, false);
+        assert!((ht - 252.0).abs() < 0.01);
+
+        // With -start / -end trim (60s..120s)
+        let trim = estimate_rendered_duration_secs(2000.0, 300_000.0, 0, 60, 120, false);
+        assert!((trim - 72.0).abs() < 0.01);
+
+        // With skip_intro (first obj at 20s -> skip to 18s -> 162s + 12 = 174s)
+        let skip = estimate_rendered_duration_secs(20_000.0, 180_000.0, 0, 0, 0, true);
+        assert!((skip - 174.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_compute_adaptive_render_plan_tiers() {
+        // Disabled target_mb = 0
+        assert!(compute_adaptive_render_plan(2000.0, 0, 1920, 1080, 60).is_none());
+
+        // Short map (~15 min) stays completely untouched (CQ 34)
+        assert!(compute_adaptive_render_plan(900.0, 460, 1920, 1080, 60).is_none());
+
+        // 28:40 Maduk marathon (~1720s) -> 1080p60 with capped VBR (~1.8-2.0 Mbps)
+        let p28 = compute_adaptive_render_plan(1720.0, 460, 1920, 1080, 60).expect("28m plan");
+        assert_eq!((p28.width, p28.height, p28.fps), (1920, 1080, 60));
+        assert_eq!(p28.audio_kbps, 192);
+        assert!((1800..=2000).contains(&p28.video_kbps));
+
+        // 45 min marathon -> steps down to 720p60 for higher bits/pixel
+        let p45 = compute_adaptive_render_plan(2700.0, 460, 1920, 1080, 60).expect("45m plan");
+        assert_eq!((p45.width, p45.height, p45.fps), (1280, 720, 60));
+        assert_eq!(p45.audio_kbps, 160);
+        assert!((850..1800).contains(&p45.video_kbps));
+
+        // 75 min marathon -> steps to 720p30
+        let p75 = compute_adaptive_render_plan(4500.0, 460, 1920, 1080, 60).expect("75m plan");
+        assert_eq!((p75.width, p75.height, p75.fps), (1280, 720, 30));
+        assert_eq!(p75.audio_kbps, 128);
+        assert!(p75.video_kbps < 850);
+
+        // Never upscales a user who set 1024x768 @ 48fps
+        let custom = compute_adaptive_render_plan(4500.0, 460, 1024, 768, 48).expect("custom plan");
+        assert!(custom.width <= 1024 && custom.height <= 720);
+        assert_eq!(custom.width % 2, 0);
+        assert_eq!(custom.height % 2, 0);
+        assert_eq!(custom.fps, 30);
+    }
+
+    #[test]
+    fn test_build_danser_spatch_json_and_low_vram() {
+        assert!(build_danser_spatch(None, false).is_none());
+        let lv = build_danser_spatch(None, true).unwrap();
+        let lv_json: serde_json::Value = serde_json::from_str(&lv).unwrap();
+        assert_eq!(lv_json["Recording"]["h264_nvenc"]["Preset"], "p4");
+
+        let plan = compute_adaptive_render_plan(1720.0, 460, 1920, 1080, 60).unwrap();
+        let normal_str = build_danser_spatch(Some(&plan), false).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&normal_str).unwrap();
+        assert_eq!(v["Recording"]["FrameWidth"], 1920);
+        assert_eq!(v["Recording"]["FrameHeight"], 1080);
+        assert_eq!(v["Recording"]["h264_nvenc"]["RateControl"], "vbr");
+        assert_eq!(
+            v["Recording"]["h264_nvenc"]["Bitrate"],
+            format!("{}k", plan.video_kbps)
+        );
+        assert!(v["Recording"]["h264_nvenc"]["AdditionalOptions"]
+            .as_str()
+            .unwrap()
+            .contains("-spatial_aq 1"));
+
+        let both_str = build_danser_spatch(Some(&plan), true).unwrap();
+        let vb: serde_json::Value = serde_json::from_str(&both_str).unwrap();
+        assert_eq!(vb["Recording"]["h264_nvenc"]["Preset"], "p4");
+        assert!(!vb["Recording"]["h264_nvenc"]["AdditionalOptions"]
+            .as_str()
+            .unwrap()
+            .contains("-rc-lookahead"));
+    }
+
+    #[test]
+    fn test_format_pp_field() {
+        assert_eq!(
+            format_pp_field("512.34", "600.00", "512.34", true, Some(("250.1", "210.2", "52.0")), None),
+            "**512.34pp** / 600.00pp\nAim `250.1` • Speed `210.2` • Acc `52.0`"
+        );
+        assert_eq!(
+            format_pp_field("400.00", "550.00", "480.00", false, None, Some("March 2025")),
+            "**400.00pp** (FC: **480.00pp**) / 550.00pp  •  *March 2025*"
         );
     }
 }

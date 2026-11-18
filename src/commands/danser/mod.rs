@@ -8,6 +8,6 @@ pub mod queue;
 mod render;
 pub mod render_score;
 pub mod screenshot;
-mod settings;
+pub mod settings;
 mod setup;
 mod skin;

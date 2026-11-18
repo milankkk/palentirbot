@@ -24,6 +24,7 @@ pub async fn handle_modal(ctx: Arc<Context>, modal: InteractionModal) {
     let res = match name.as_str() {
         "pagination_page" => handle_pagination_modal(ctx, modal).await,
         _ if name.starts_with("oset_modal_") => crate::commands::owner::settings::handle_owner_settings_modal(ctx, modal).await,
+        _ if name.starts_with("uset_m:") => crate::commands::danser::settings::menu::handle_user_settings_modal(ctx, modal).await,
         _ => {
             let response = twilight_model::http::interaction::InteractionResponse {
                 kind: twilight_model::http::interaction::InteractionResponseType::ChannelMessageWithSource,

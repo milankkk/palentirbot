@@ -3,7 +3,7 @@ use std::sync::Arc;
 use eyre::Result;
 
 use crate::{
-    core::Context,
+    core::{settings::DanserSettings, Context},
     util::{
         builder::MessageBuilder, interaction::InteractionCommand, Authored, InteractionCommandExt,
     },
@@ -15,15 +15,8 @@ use super::{
     PresetChoice, SettingsPreset,
 };
 
-pub async fn preset(
-    ctx: Arc<Context>,
-    command: InteractionCommand,
-    args: SettingsPreset,
-) -> Result<()> {
-    let author = command.user_id()?;
-    let (user_path, mut settings) = load_or_init_user_settings(author, command.id).await?;
-
-    let label = match args.preset {
+pub(crate) fn apply_preset(settings: &mut DanserSettings, preset: PresetChoice) -> &'static str {
+    match preset {
         PresetChoice::Standard => {
             settings.recording.frame_width = 1920;
             settings.recording.frame_height = 1080;
@@ -67,7 +60,18 @@ pub async fn preset(
             settings.gameplay.show_results_screen = true;
             "Cinematic Motion Blur"
         }
-    };
+    }
+}
+
+pub async fn preset(
+    ctx: Arc<Context>,
+    command: InteractionCommand,
+    args: SettingsPreset,
+) -> Result<()> {
+    let author = command.user_id()?;
+    let (user_path, mut settings) = load_or_init_user_settings(author, command.id).await?;
+
+    let label = apply_preset(&mut settings, args.preset);
 
     if let Err(err) = save_user_settings(author, command.id, &user_path, &settings).await {
         let _ = command
