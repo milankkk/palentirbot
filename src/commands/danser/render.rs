@@ -230,6 +230,7 @@ pub async fn slash_render(ctx: Arc<Context>, mut command: InteractionCommand) ->
         skip_intro: skip_intro.unwrap_or(false),
         offset_ms: offset.map(|v| v.clamp(-5000, 5000) as i32),
         force_rerender: force.unwrap_or(false),
+        skip_info_embed: false,
     };
 
     let mut replay_data = if let Some(ref att) = attachment {

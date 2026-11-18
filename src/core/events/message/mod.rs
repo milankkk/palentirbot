@@ -236,6 +236,32 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
             finalize_enqueue(ctx, replay_data, queue_msg).await;
         }
 
+        // ── rr / rtop / rrn / link ────────────────────────────────────────────
+        "rr" => {
+            crate::commands::danser::profile_render::handle_prefix_rr(
+                ctx, &msg, args_str, &prefix,
+            )
+            .await;
+        }
+        "rtop" => {
+            crate::commands::danser::profile_render::handle_prefix_rtop(
+                ctx, &msg, args_str, &prefix,
+            )
+            .await;
+        }
+        "rrn" => {
+            crate::commands::danser::profile_render::handle_prefix_rrn(
+                ctx, &msg, args_str, &prefix,
+            )
+            .await;
+        }
+        "link" => {
+            crate::commands::danser::profile_render::handle_prefix_link(
+                ctx, &msg, args_str, &prefix,
+            )
+            .await;
+        }
+
         // ── screenshot ────────────────────────────────────────────────────────
         "ss" | "screenshot" => {
             crate::commands::danser::screenshot::handle_prefix_screenshot(ctx, &msg, args_str)
@@ -268,6 +294,10 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
                  `{p}aicontext` — Show context window usage & engine stats (aliases: `{p}context`, `{p}aic`)\n\
                  `{p}ping` — Check latency\n\
                  `{p}render` — Render a replay (attach `.osr`, pass an osu! score URL, or reply to a score embed). Args: `start=MM:SS` `end=MM:SS` `pitch=<float>` `skin=\"<name>\"` `skip` `offset=<ms>` `force`\n\
+                 `{p}rr [user]` — List renderable recent osu!standard plays with render buttons\n\
+                 `{p}rtop [user]` — List renderable osu!standard plays from a player's top 200 (paginated)\n\
+                 `{p}rrn [user]` — Analyze and immediately render the most recent osu!standard play\n\
+                 `{p}link <user>` — Link your osu! profile for `{p}rr`, `{p}rtop`, and `{p}rrn`\n\
                  `{p}ss <time>` — Snap a PNG screenshot from an `.osr`, score URL, or replied score embed (`{p}screenshot`)\n\
                  `{p}queue` — Show the render queue\n\
                  `{p}skinlist` — List available skins\n\

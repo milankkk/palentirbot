@@ -74,6 +74,8 @@ pub async fn handle_component(ctx: Arc<Context>, component: InteractionComponent
         _ if name.starts_with("uset_preset:") => crate::commands::danser::settings::menu::handle_user_settings_preset(ctx, component).await,
         _ if name.starts_with("uset_reset:") => crate::commands::danser::settings::menu::handle_user_settings_reset(ctx, component).await,
         _ if name.starts_with("uset_done:") => crate::commands::danser::settings::menu::handle_user_settings_done(ctx, component).await,
+        _ if name.starts_with("pr_pg:") => crate::commands::danser::profile_render::handle_profile_page_button(ctx, component).await,
+        _ if name.starts_with("pr_ren:") => crate::commands::danser::profile_render::handle_profile_render_button(ctx, component).await,
         _ if name.starts_with("render_cancel:") => handle_render_cancel(ctx, component).await,
         _ => {
             let _ = respond_ephemeral(

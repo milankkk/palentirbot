@@ -24,6 +24,7 @@ pub struct RenderOptions {
     pub skip_intro: bool,
     pub offset_ms: Option<i32>,
     pub force_rerender: bool,
+    pub skip_info_embed: bool,
 }
 
 #[derive(Clone)]
@@ -35,6 +36,7 @@ pub struct ReplayData {
     pub skip_intro: bool,
     pub offset_ms: Option<i32>,
     pub force_rerender: bool,
+    pub skip_info_embed: bool,
     pub path: PathBuf,
     pub replay: ReplaySlim,
     pub time_points: TimePoints,
@@ -69,6 +71,7 @@ impl ReplayData {
             skip_intro: opts.skip_intro,
             offset_ms: opts.offset_ms,
             force_rerender: opts.force_rerender,
+            skip_info_embed: opts.skip_info_embed,
             path,
             replay,
             time_points: TimePoints {

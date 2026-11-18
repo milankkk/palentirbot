@@ -24,7 +24,18 @@ impl Database {
         let base_sql = include_str!("../../migrations/20221130212623_base_schemas.up.sql")
             .replace("CREATE TABLE blacklisted_", "CREATE TABLE IF NOT EXISTS blacklisted_");
         if let Err(err) = sqlx::raw_sql(&base_sql).execute(&self.pool).await {
-            warn!(?err, "database migration check failed");
+            warn!(?err, "database base migration check failed");
+        }
+
+        const OSU_LINKS_SQL: &str = "
+            CREATE TABLE IF NOT EXISTS osu_links (
+                discord_id BIGINT PRIMARY KEY,
+                osu_user_id BIGINT NOT NULL,
+                osu_username TEXT NOT NULL
+            );
+        ";
+        if let Err(err) = sqlx::raw_sql(OSU_LINKS_SQL).execute(&self.pool).await {
+            warn!(?err, "database osu_links migration check failed");
         }
     }
 }

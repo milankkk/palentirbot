@@ -84,6 +84,7 @@ async fn process_single_replay(
         skip_intro,
         offset_ms,
         force_rerender,
+        skip_info_embed,
         path,
         replay,
         time_points,
@@ -273,19 +274,15 @@ async fn process_single_replay(
 
     let title_for_display = format!("{mapset_title} [{map_version}]");
 
-    let TitleResult {
-        title: video_title,
-        stars,
-        pp_v4,
-        pp_latest,
-        pp_2025,
-        pp_2024,
-        pp_2022,
-        pp_2021,
-        max_possible_combo,
-        map_first_obj_ms,
-        map_last_obj_ms,
-    } = match create_title(&replay, map_path.clone(), &title_for_display, is_lazer).await {
+    let title_result = match create_title(
+        &replay,
+        map_path.clone(),
+        &title_for_display,
+        is_lazer,
+        !skip_info_embed,
+    )
+    .await
+    {
         Ok(result) => result,
         Err(err) => {
             let err = err.wrap_err("failed to create title");
@@ -295,6 +292,10 @@ async fn process_single_replay(
             return Err(err);
         }
     };
+    let video_title = title_result.title.clone();
+    let stars = title_result.stars;
+    let map_first_obj_ms = title_result.map_first_obj_ms;
+    let map_last_obj_ms = title_result.map_last_obj_ms;
 
     // Store the formatted title back early so the queue embed shows it immediately
     if let Some(front) = ctx.replay_queue.queue.lock().await.front_mut() {
@@ -832,218 +833,6 @@ async fn process_single_replay(
         )
     };
 
-    let _legacy_mods = GameModsLegacy::from_bits(replay.mods);
-    let acc = replay.accuracy();
-
-    use rosu_v2::prelude::Grade;
-    use twilight_model::channel::message::embed::EmbedField;
-    let emojis = &BotConfig::get().emojis;
-
-    let score_value = {
-        use crate::util::numbers::with_comma_int;
-        with_comma_int(replay.score as u64).to_string()
-    };
-
-    let grade = replay.grade;
-    tracing::warn!("grade reported: {:?}", grade);
-    let rank_value = match grade {
-        Grade::XH => emojis.grade_xh.to_string(),
-        Grade::X => emojis.grade_x.to_string(),
-        Grade::SH => emojis.grade_sh.to_string(),
-        Grade::S => emojis.grade_s.to_string(),
-        Grade::A => emojis.grade_a.to_string(),
-        Grade::B => emojis.grade_b.to_string(),
-        Grade::C => emojis.grade_c.to_string(),
-        Grade::D => emojis.grade_d.to_string(),
-        _ => emojis.grade_fail.to_string(),
-    };
-
-    let is_perfect_fc = u32::from(replay.max_combo) == max_possible_combo && replay.count_miss == 0;
-    let replay_datetime: Option<time::OffsetDateTime> = replay
-        .timestamp
-        .and_then(|ts: i64| time::OffsetDateTime::from_unix_timestamp(ts).ok());
-
-    let active_pp = pp_latest.unwrap_or(pp_v4);
-    let display_pp = active_pp.pp;
-    let display_max_pp = active_pp.max_pp;
-    let display_nochoke_pp = active_pp.nochoke_pp;
-
-    let (aim_pp, speed_pp, acc_pp) = (active_pp.aim_pp, active_pp.speed_pp, active_pp.acc_pp);
-
-    let embed_description = format!(
-        "{rank_value}  **{score_value}**  •  **{acc}%**  •  **{}/{}x**\n{} {}  {} {}  {} {}  {} {}",
-        replay.max_combo,
-        max_possible_combo,
-        emojis.hit_300,
-        replay.count_300,
-        emojis.hit_100,
-        replay.count_100,
-        emojis.hit_50,
-        replay.count_50,
-        emojis.hit_miss,
-        replay.count_miss,
-    );
-
-    let pp_str = format!("{display_pp:.2}");
-    let max_pp_str = format!("{display_max_pp:.2}");
-    let nochoke_pp_str = format!("{display_nochoke_pp:.2}");
-    let breakdown_strs = match (aim_pp, speed_pp, acc_pp) {
-        (Some(aim), Some(speed), Some(acc_val)) => Some((
-            format!("{aim:.1}"),
-            format!("{speed:.1}"),
-            format!("{acc_val:.1}"),
-        )),
-        _ => None,
-    };
-    let pp_field_value = format_pp_field(
-        &pp_str,
-        &max_pp_str,
-        &nochoke_pp_str,
-        is_perfect_fc,
-        breakdown_strs
-            .as_ref()
-            .map(|(a, s, c)| (a.as_str(), s.as_str(), c.as_str())),
-        None,
-    );
-    let embed_fields = vec![EmbedField {
-        inline: false,
-        name: "PP".to_owned(),
-        value: pp_field_value,
-    }];
-
-    let embed_title = if video_title.chars().count() > 256 {
-        let mut s: String = video_title.chars().take(253).collect();
-        s.push_str("...");
-        s
-    } else {
-        video_title.clone()
-    };
-
-    let footer_text = match adaptive_plan.as_ref() {
-        Some(plan) => format!(
-            "Played • Adaptive {}p{} ({:.1} Mbps)",
-            plan.height,
-            plan.fps,
-            f64::from(plan.video_kbps) / 1000.0
-        ),
-        None => "Played".to_owned(),
-    };
-
-    let mut embed_builder = EmbedBuilder::new()
-        .color(0x96DFE3)
-        .title(embed_title)
-        .url(format!("https://osu.ppy.sh/beatmaps/{map_id}"))
-        .description(embed_description)
-        .fields(embed_fields)
-        .footer(footer_text);
-    if let Some(dt) = replay_datetime {
-        embed_builder = embed_builder.timestamp(dt);
-    }
-
-    let embed = embed_builder.build();
-    let mut components: Vec<twilight_model::channel::message::Component> = vec![];
-
-    let mut options = Vec::new();
-    let mut push_opt = |id: &str, label: &str, desc: &str, t: PpTriple, is_default: bool| {
-        let base_val = format!(
-            "{id}|{is_perfect_fc}|{:.2}|{:.2}|{:.2}",
-            t.pp, t.max_pp, t.nochoke_pp
-        );
-        if base_val.len() > 100 {
-            return;
-        }
-        let mut value = base_val.clone();
-        if let (Some(aim), Some(speed), Some(acc_val)) = (t.aim_pp, t.speed_pp, t.acc_pp) {
-            let ext = format!("{base_val}|{aim:.1}|{speed:.1}|{acc_val:.1}");
-            if ext.len() <= 100 {
-                value = ext;
-            }
-        }
-        options.push(
-            twilight_model::channel::message::component::SelectMenuOption {
-                default: is_default,
-                description: Some(desc.to_string()),
-                emoji: None,
-                label: label.to_string(),
-                value,
-            },
-        );
-    };
-
-    if let Some(lat) = pp_latest {
-        push_opt(
-            "pp_lat",
-            "Latest Rework (C# backend)",
-            "Real-time official osu! backend calculations",
-            lat,
-            true,
-        );
-    }
-    push_opt(
-        "pp_v4",
-        "rosu-pp v4 (July 2026)",
-        "Performance points & star rating updates",
-        pp_v4,
-        pp_latest.is_none(),
-    );
-
-    if let Some(t) = pp_2025 {
-        push_opt("pp_v25", "March 2025 Rework", "March 2025 Rework", t, false);
-    }
-    if let Some(t) = pp_2024 {
-        push_opt(
-            "pp_v24",
-            "October 2024 Combo Scaling Removal",
-            "Removal of combo scaling from standard PP",
-            t,
-            false,
-        );
-    }
-    if let Some(t) = pp_2022 {
-        push_opt(
-            "pp_v22",
-            "September 2022 Rework",
-            "Major performance & difficulty changes",
-            t,
-            false,
-        );
-    }
-    if let Some(t) = pp_2021 {
-        push_opt(
-            "pp_v21",
-            "November 2021 Xexxar Rework",
-            "Rhythm complexity & aim rework",
-            t,
-            false,
-        );
-    }
-
-    let has_pp_select = options.len() > 1;
-    if has_pp_select {
-        components.push(
-            twilight_model::channel::message::component::Component::ActionRow(
-                twilight_model::channel::message::component::ActionRow {
-                    components: vec![
-                        twilight_model::channel::message::component::Component::SelectMenu(
-                            twilight_model::channel::message::component::SelectMenu {
-                                custom_id: "pp_version_select".to_string(),
-                                disabled: false,
-                                max_values: Some(1),
-                                min_values: Some(1),
-                                options: Some(options),
-                                placeholder: Some("Select PP Version".to_string()),
-                                channel_types: None,
-                                default_values: None,
-                                kind:
-                                    twilight_model::channel::message::component::SelectMenuType::Text,
-                            },
-                        ),
-                    ],
-                },
-            ),
-        );
-    }
-
     let watch_url = link.strip_suffix(".mp4").unwrap_or(&link).to_string();
     let mut link_buttons = vec![twilight_model::channel::message::component::Component::Button(
         twilight_model::channel::message::component::Button {
@@ -1076,8 +865,6 @@ async fn process_single_replay(
             components: link_buttons,
         },
     );
-    let remaining_components = vec![link_buttons_row.clone()];
-    components.push(link_buttons_row);
 
     if cancelled.load(Ordering::Acquire) {
         return handle_cancelled_cleanup(
@@ -1091,54 +878,48 @@ async fn process_single_replay(
         .await;
     }
 
-    let embed_builder = MessageBuilder::new().embed(embed).components(components);
-    let embed_msg_id = match input_channel.create_message(&ctx, &embed_builder).await {
-        Ok(msg) => Some(msg.id),
-        Err(err) => {
-            warn!(
-                "{:?}",
-                err.wrap_err("failed to send replay details embed")
-            );
-            None
+    if !skip_info_embed {
+        let info = build_replay_info_embed(&replay, map_id, &title_result, adaptive_plan.as_ref());
+        let has_pp_select = info.pp_select_row.is_some();
+        let mut components = Vec::with_capacity(2);
+        if let Some(pp_row) = info.pp_select_row {
+            components.push(pp_row);
         }
-    };
+        let remaining_components = vec![link_buttons_row.clone()];
+        components.push(link_buttons_row.clone());
 
-    let pp_timeout_secs = pp_select_timeout_secs();
-    if let (true, Some(embed_msg_id)) = (has_pp_select && pp_timeout_secs > 0, embed_msg_id) {
-        let ctx_pp = Arc::clone(&ctx);
-        tokio::spawn(async move {
-            let mut prev_check = Instant::now();
-            let hard_cap = prev_check + Duration::from_secs(pp_timeout_secs.saturating_mul(2).max(300));
-            let mut deadline = prev_check + Duration::from_secs(pp_timeout_secs);
-            loop {
-                sleep_until(deadline).await;
-                if let Some(last_act) =
-                    crate::core::events::interaction::last_pp_select_activity(embed_msg_id)
-                {
-                    if last_act > prev_check && last_act < hard_cap {
-                        prev_check = last_act;
-                        let extended = (last_act + Duration::from_secs(60)).min(hard_cap);
-                        if extended > deadline {
-                            deadline = extended;
-                            continue;
-                        }
-                    }
-                }
-                break;
+        let embed_builder = MessageBuilder::new()
+            .embed(info.embed)
+            .components(components);
+        let embed_msg_id = match input_channel.create_message(&ctx, &embed_builder).await {
+            Ok(msg) => Some(msg.id),
+            Err(err) => {
+                warn!(
+                    "{:?}",
+                    err.wrap_err("failed to send replay details embed")
+                );
+                None
             }
-            crate::core::events::interaction::clear_pp_select(embed_msg_id);
-            let builder = MessageBuilder::new().components(remaining_components);
-            if let Err(err) = (embed_msg_id, input_channel).update(&ctx_pp, &builder).await {
-                tracing::debug!(?err, msg_id = %embed_msg_id, "failed to remove expired PP dropdown");
-            }
-        });
+        };
+
+        if let (true, Some(embed_msg_id)) = (has_pp_select, embed_msg_id) {
+            spawn_pp_select_expiry(
+                Arc::clone(&ctx),
+                input_channel,
+                embed_msg_id,
+                remaining_components,
+            );
+        }
     }
 
     let content = format!("<@{user}> [Replay]({watch_url})");
 
-    let builder = MessageBuilder::new()
+    let mut builder = MessageBuilder::new()
         .content(content.clone())
         .allowed_user_mention(user);
+    if skip_info_embed {
+        builder = builder.components(vec![link_buttons_row]);
+    }
     if let Some((msg_id, channel_id)) = queue_message {
         let _ = ctx.http.delete_message(channel_id, msg_id).await;
     }
@@ -2204,6 +1985,7 @@ async fn create_title(
     map_path: PathBuf,
     map_title: &str,
     is_lazer: bool,
+    include_historical_pp: bool,
 ) -> Result<TitleResult> {
     let osu_bytes: Arc<[u8]> = Arc::from(
         tokio::fs::read(&map_path)
@@ -2317,9 +2099,13 @@ async fn create_title(
     .await
     .context("rosu_pp calculation task panicked")??;
 
-    let pp_latest = calc_latest_pp(&map_path, replay, max_possible_combo, is_lazer).await;
+    let pp_latest = if include_historical_pp {
+        calc_latest_pp(&map_path, replay, max_possible_combo, is_lazer).await
+    } else {
+        None
+    };
 
-    let (pp_2025, pp_2024, pp_2022, pp_2021) = if !is_lazer {
+    let (pp_2025, pp_2024, pp_2022, pp_2021) = if include_historical_pp && !is_lazer {
         let osu_bytes_old = Arc::clone(&osu_bytes);
         tokio::task::spawn_blocking(move || {
             let pp_2025 = rosu_pp_2025::Beatmap::from_bytes(&osu_bytes_old)
@@ -2474,6 +2260,366 @@ async fn create_title(
         map_first_obj_ms,
         map_last_obj_ms,
     })
+}
+
+pub(crate) struct ReplayInfoEmbed {
+    pub title: String,
+    pub embed: twilight_model::channel::message::Embed,
+    pub pp_select_row: Option<twilight_model::channel::message::Component>,
+}
+
+fn build_replay_info_embed(
+    replay: &ReplaySlim,
+    map_id: u32,
+    title_result: &TitleResult,
+    adaptive_plan: Option<&AdaptiveRenderPlan>,
+) -> ReplayInfoEmbed {
+    use rosu_v2::prelude::Grade;
+    use twilight_model::channel::message::embed::EmbedField;
+
+    let acc = replay.accuracy();
+    let emojis = &BotConfig::get().emojis;
+
+    let score_value = {
+        use crate::util::numbers::with_comma_int;
+        with_comma_int(replay.score as u64).to_string()
+    };
+
+    let grade = replay.grade;
+    let rank_value = match grade {
+        Grade::XH => emojis.grade_xh.to_string(),
+        Grade::X => emojis.grade_x.to_string(),
+        Grade::SH => emojis.grade_sh.to_string(),
+        Grade::S => emojis.grade_s.to_string(),
+        Grade::A => emojis.grade_a.to_string(),
+        Grade::B => emojis.grade_b.to_string(),
+        Grade::C => emojis.grade_c.to_string(),
+        Grade::D => emojis.grade_d.to_string(),
+        _ => emojis.grade_fail.to_string(),
+    };
+
+    let max_possible_combo = title_result.max_possible_combo;
+    let is_perfect_fc = u32::from(replay.max_combo) == max_possible_combo && replay.count_miss == 0;
+    let replay_datetime: Option<time::OffsetDateTime> = replay
+        .timestamp
+        .and_then(|ts: i64| time::OffsetDateTime::from_unix_timestamp(ts).ok());
+
+    let active_pp = title_result.pp_latest.unwrap_or(title_result.pp_v4);
+    let display_pp = active_pp.pp;
+    let display_max_pp = active_pp.max_pp;
+    let display_nochoke_pp = active_pp.nochoke_pp;
+    let (aim_pp, speed_pp, acc_pp) = (active_pp.aim_pp, active_pp.speed_pp, active_pp.acc_pp);
+
+    let embed_description = format!(
+        "{rank_value}  **{score_value}**  •  **{acc}%**  •  **{}/{}x**\n{} {}  {} {}  {} {}  {} {}",
+        replay.max_combo,
+        max_possible_combo,
+        emojis.hit_300,
+        replay.count_300,
+        emojis.hit_100,
+        replay.count_100,
+        emojis.hit_50,
+        replay.count_50,
+        emojis.hit_miss,
+        replay.count_miss,
+    );
+
+    let pp_str = format!("{display_pp:.2}");
+    let max_pp_str = format!("{display_max_pp:.2}");
+    let nochoke_pp_str = format!("{display_nochoke_pp:.2}");
+    let breakdown_strs = match (aim_pp, speed_pp, acc_pp) {
+        (Some(aim), Some(speed), Some(acc_val)) => Some((
+            format!("{aim:.1}"),
+            format!("{speed:.1}"),
+            format!("{acc_val:.1}"),
+        )),
+        _ => None,
+    };
+    let pp_field_value = format_pp_field(
+        &pp_str,
+        &max_pp_str,
+        &nochoke_pp_str,
+        is_perfect_fc,
+        breakdown_strs
+            .as_ref()
+            .map(|(a, s, c)| (a.as_str(), s.as_str(), c.as_str())),
+        None,
+    );
+    let embed_fields = vec![EmbedField {
+        inline: false,
+        name: "PP".to_owned(),
+        value: pp_field_value,
+    }];
+
+    let embed_title = if title_result.title.chars().count() > 256 {
+        let mut s: String = title_result.title.chars().take(253).collect();
+        s.push_str("...");
+        s
+    } else {
+        title_result.title.clone()
+    };
+
+    let footer_text = match adaptive_plan {
+        Some(plan) => format!(
+            "Played • Adaptive {}p{} ({:.1} Mbps)",
+            plan.height,
+            plan.fps,
+            f64::from(plan.video_kbps) / 1000.0
+        ),
+        None => "Played".to_owned(),
+    };
+
+    let mut embed_builder = EmbedBuilder::new()
+        .color(0x96DFE3)
+        .title(embed_title)
+        .url(format!("https://osu.ppy.sh/beatmaps/{map_id}"))
+        .description(embed_description)
+        .fields(embed_fields)
+        .footer(footer_text);
+    if let Some(dt) = replay_datetime {
+        embed_builder = embed_builder.timestamp(dt);
+    }
+
+    let embed = embed_builder.build();
+
+    let mut options = Vec::new();
+    let mut push_opt = |id: &str, label: &str, desc: &str, t: PpTriple, is_default: bool| {
+        let base_val = format!(
+            "{id}|{is_perfect_fc}|{:.2}|{:.2}|{:.2}",
+            t.pp, t.max_pp, t.nochoke_pp
+        );
+        if base_val.len() > 100 {
+            return;
+        }
+        let mut value = base_val.clone();
+        if let (Some(aim), Some(speed), Some(acc_val)) = (t.aim_pp, t.speed_pp, t.acc_pp) {
+            let ext = format!("{base_val}|{aim:.1}|{speed:.1}|{acc_val:.1}");
+            if ext.len() <= 100 {
+                value = ext;
+            }
+        }
+        options.push(
+            twilight_model::channel::message::component::SelectMenuOption {
+                default: is_default,
+                description: Some(desc.to_string()),
+                emoji: None,
+                label: label.to_string(),
+                value,
+            },
+        );
+    };
+
+    if let Some(lat) = title_result.pp_latest {
+        push_opt(
+            "pp_lat",
+            "Latest Rework (C# backend)",
+            "Real-time official osu! backend calculations",
+            lat,
+            true,
+        );
+    }
+    push_opt(
+        "pp_v4",
+        "rosu-pp v4 (July 2026)",
+        "Performance points & star rating updates",
+        title_result.pp_v4,
+        title_result.pp_latest.is_none(),
+    );
+    if let Some(t) = title_result.pp_2025 {
+        push_opt("pp_v25", "March 2025 Rework", "March 2025 Rework", t, false);
+    }
+    if let Some(t) = title_result.pp_2024 {
+        push_opt(
+            "pp_v24",
+            "October 2024 Combo Scaling Removal",
+            "Removal of combo scaling from standard PP",
+            t,
+            false,
+        );
+    }
+    if let Some(t) = title_result.pp_2022 {
+        push_opt(
+            "pp_v22",
+            "September 2022 Rework",
+            "Major performance & difficulty changes",
+            t,
+            false,
+        );
+    }
+    if let Some(t) = title_result.pp_2021 {
+        push_opt(
+            "pp_v21",
+            "November 2021 Xexxar Rework",
+            "Rhythm complexity & aim rework",
+            t,
+            false,
+        );
+    }
+
+    let pp_select_row = if options.len() > 1 {
+        Some(
+            twilight_model::channel::message::component::Component::ActionRow(
+                twilight_model::channel::message::component::ActionRow {
+                    components: vec![
+                        twilight_model::channel::message::component::Component::SelectMenu(
+                            twilight_model::channel::message::component::SelectMenu {
+                                custom_id: "pp_version_select".to_string(),
+                                disabled: false,
+                                max_values: Some(1),
+                                min_values: Some(1),
+                                options: Some(options),
+                                placeholder: Some("Select PP Version".to_string()),
+                                channel_types: None,
+                                default_values: None,
+                                kind: twilight_model::channel::message::component::SelectMenuType::Text,
+                            },
+                        ),
+                    ],
+                },
+            ),
+        )
+    } else {
+        None
+    };
+
+    ReplayInfoEmbed {
+        title: title_result.title.clone(),
+        embed,
+        pp_select_row,
+    }
+}
+
+pub(crate) fn spawn_pp_select_expiry(
+    ctx: Arc<Context>,
+    channel_id: Id<ChannelMarker>,
+    embed_msg_id: Id<MessageMarker>,
+    remaining_components: Vec<twilight_model::channel::message::Component>,
+) {
+    let pp_timeout_secs = pp_select_timeout_secs();
+    if pp_timeout_secs == 0 {
+        return;
+    }
+    tokio::spawn(async move {
+        let mut prev_check = Instant::now();
+        let hard_cap =
+            prev_check + Duration::from_secs(pp_timeout_secs.saturating_mul(2).max(300));
+        let mut deadline = prev_check + Duration::from_secs(pp_timeout_secs);
+        loop {
+            sleep_until(deadline).await;
+            if let Some(last_act) =
+                crate::core::events::interaction::last_pp_select_activity(embed_msg_id)
+            {
+                if last_act > prev_check && last_act < hard_cap {
+                    prev_check = last_act;
+                    let extended = (last_act + Duration::from_secs(60)).min(hard_cap);
+                    if extended > deadline {
+                        deadline = extended;
+                        continue;
+                    }
+                }
+            }
+            break;
+        }
+        crate::core::events::interaction::clear_pp_select(embed_msg_id);
+        let builder = MessageBuilder::new().components(remaining_components);
+        if let Err(err) = (embed_msg_id, channel_id).update(&ctx, &builder).await {
+            tracing::debug!(?err, msg_id = %embed_msg_id, "failed to remove expired PP dropdown");
+        }
+    });
+}
+
+/// Download/verify the beatmap for a replay, calculate PP & difficulty, and build the score info embed.
+pub(crate) async fn analyze_replay_for_info(
+    ctx: &Context,
+    replay: &ReplaySlim,
+    is_lazer: bool,
+) -> std::result::Result<ReplayInfoEmbed, String> {
+    let Some(hash) = replay.beatmap_hash.as_deref() else {
+        return Err("Missing the beatmap hash in the replay file.".to_owned());
+    };
+
+    let mut res = ctx.osu().beatmap().checksum(hash).await;
+    if let Err(ref err) = res {
+        if Context::is_osu_auth_error(err) {
+            if let Ok(fresh) = ctx.refresh_osu_client().await {
+                res = fresh.beatmap().checksum(hash).await;
+            }
+        }
+    }
+
+    let (mapset_id, map_id, map_version, mapset_title) = match res {
+        Ok(map) => match map.mapset {
+            Some(mapset) => (
+                mapset.mapset_id,
+                map.map_id,
+                map.version,
+                format!("{} - {}", mapset.artist, mapset.title),
+            ),
+            None => {
+                return Err(
+                    "The mapset was not received when requesting the map from the osu! API."
+                        .to_owned(),
+                );
+            }
+        },
+        Err(err) => {
+            let is_not_found = matches!(err, rosu_v2::error::OsuError::NotFound);
+            warn!(?err, hash, "failed to request beatmap during replay analysis");
+            return Err(if is_not_found {
+                "Failed to retrieve map. Maybe it's not submitted?".to_owned()
+            } else {
+                "Failed to contact the osu! API while looking up the beatmap. Please try again in a moment."
+                    .to_owned()
+            });
+        }
+    };
+
+    let config = BotConfig::get();
+    let mut mapset_path = config.paths.songs();
+    mapset_path.push(mapset_id.to_string());
+
+    let mapset_already_cached = tokio::fs::try_exists(&mapset_path).await.unwrap_or(false);
+    if !mapset_already_cached {
+        if let Err(err) = download_mapset_inner(ctx, mapset_id, false).await {
+            warn!(?err, mapset_id, "failed to download mapset during replay analysis");
+            return Err(
+                "Failed to download beatmap. Mirrors are likely down, try again later.".to_owned(),
+            );
+        }
+    }
+
+    let mut found = find_beatmap_osu_file(mapset_id, map_id, &map_version, Some(hash)).await;
+    let needs_refresh = match &found {
+        Ok((_, md5_ok)) => !md5_ok && mapset_already_cached,
+        Err(_) => mapset_already_cached,
+    };
+    if needs_refresh {
+        if let Err(err) = download_mapset_inner(ctx, mapset_id, true).await {
+            warn!(?err, mapset_id, "failed to refresh cached mapset during replay analysis");
+            return Err(
+                "Failed to download beatmap. Mirrors are likely down, try again later.".to_owned(),
+            );
+        }
+        found = find_beatmap_osu_file(mapset_id, map_id, &map_version, Some(hash)).await;
+    }
+
+    let (map_osu_file, _) = found.map_err(|err| {
+        warn!(?err, mapset_id, map_id, "failed to find beatmap .osu file");
+        "Could not find matching difficulty file in beatmapset.".to_owned()
+    })?;
+
+    let mut map_path = config.paths.songs();
+    map_path.push(format!("{mapset_id}/{map_osu_file}"));
+    let title_for_display = format!("{mapset_title} [{map_version}]");
+
+    let title_result = create_title(replay, map_path, &title_for_display, is_lazer, true)
+        .await
+        .map_err(|err| {
+            warn!(?err, "failed to analyze replay PP/title");
+            "There was an error while analyzing the replay file.".to_owned()
+        })?;
+
+    Ok(build_replay_info_embed(replay, map_id, &title_result, None))
 }
 
 async fn find_beatmap_osu_file(

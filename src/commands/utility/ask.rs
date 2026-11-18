@@ -1755,6 +1755,10 @@ pub fn is_non_ai_command_with_prefix(content: &str, guild_prefix: Option<&str>) 
                 cmd_token.as_str(),
                 "render"
                     | "r"
+                    | "rr"
+                    | "rtop"
+                    | "rrn"
+                    | "link"
                     | "queue"
                     | "q"
                     | "skin"
@@ -2817,5 +2821,15 @@ mod tests {
         )
         .expect("valid embed");
         assert!(!is_osu_profile_embed(&err_embed));
+    }
+
+    #[test]
+    fn test_profile_render_commands_filtered_from_passive_ai() {
+        assert!(is_non_ai_command("!rr"));
+        assert!(is_non_ai_command("!rr mrekk"));
+        assert!(is_non_ai_command("!rtop WhiteCat"));
+        assert!(is_non_ai_command("!rrn"));
+        assert!(is_non_ai_command("!link 7562902"));
+        assert!(is_non_ai_command_with_prefix(".rtop mrekk", Some(".")));
     }
 }

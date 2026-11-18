@@ -356,6 +356,7 @@ pub fn parse_prefix_render_args(
             skip_intro: raw.skip_intro,
             offset_ms: raw.offset_ms,
             force_rerender: raw.force_rerender,
+            skip_info_embed: false,
         },
         raw.score_ref,
     ))
@@ -549,7 +550,7 @@ pub enum ScorePrepareOutcome {
     Unavailable(&'static str),
 }
 
-async fn prepare_score_replay_data(
+pub(crate) async fn prepare_score_replay_data(
     ctx: &Context,
     score_to_render: Score,
     input_channel: Id<ChannelMarker>,
