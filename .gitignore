@@ -13,9 +13,13 @@ prompt.txt
 # Temporary files and directories
 scratch/
 cache/
-scripts/
+scripts/*
 !scripts/setup_danser.sh
 *.osu
 *.osr
 *repomix*
 *.backup-*
+*.bak
+*.bak*
+__pycache__/
+*.py[cod]

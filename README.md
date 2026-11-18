@@ -4,7 +4,7 @@ A modern revival of [shishabot](https://github.com/mezodev0/shishabot) using upd
 
 ![Preview](https://cdn.insertdomainname.be/example.png)
 
-[**Invite the bot to your server**](https://discord.com/oauth2/authorize?client_id=1490728112173092875&permissions=4503599627388928&integration_type=0&scope=bot+applications.commands)
+[**Invite the bot to your server**](https://discord.com/oauth2/authorize?client_id=1490728112173092875&permissions=274878286848&integration_type=0&scope=bot+applications.commands)
 
 ### Features
 - Default prefix: `!` (configurable per server via `/setup setprefix`)
@@ -58,9 +58,9 @@ podman compose up -d --build
 #### 4. (Optional) Pull an Ollama model
 If you plan to use AI features with local Ollama:
 ```bash
-docker exec -it palentirbot-ollama ollama pull huihui_ai/qwen3-abliterated:4b
+docker exec -it palentirbot-ollama ollama pull huihui_ai/qwen3.5-abliterated:9b
 # or with podman:
-podman exec -it palentirbot-ollama ollama pull huihui_ai/qwen3-abliterated:4b
+podman exec -it palentirbot-ollama ollama pull huihui_ai/qwen3.5-abliterated:9b
 ```
 
 ---
@@ -92,16 +92,19 @@ python3 upload.py
 *(Note: A `Caddyfile.example` is included if you wish to use Caddy for reverse-proxying.)*
 
 ### 4. Danser Setup
-1. Download and extract [Danser](https://github.com/Wieku/danser-go) into the `./data/danser` directory.
-   > **Note:** For headless servers, rename `danser-cli` to `danser` and `danser` to `danser-gui` or also set up a fake monitor for it to launch on in case it doesnt work (this is what did it for me)
-2. Make it executable and run it once to generate the settings files:
+1. Run the helper script from the repository root (or manually extract [Danser](https://github.com/Wieku/danser-go) directly into `./data/`):
 ```bash
-cd data/danser
-chmod +x danser
-./danser
+./scripts/setup_danser.sh ./data
 ```
-3. Danser will generate a `settings/` folder containing `default.json` and `credentials.json`.
-4. In `default.json`, adjust your encoder settings, skin settings, colors, etc.
+   > **Note:** For headless servers, rename `danser-cli` to `danser` and `danser` to `danser-gui` inside `./data/`, or run under `xvfb-run` if no display server is attached.
+2. If setting up manually, make `./data/danser` executable and run it once from `./data/` to generate `settings/`:
+```bash
+cd data
+chmod +x danser
+./danser -noupdatecheck -settings=default
+```
+3. Danser will generate `./data/settings/` containing `default.json` and `credentials.json`.
+4. In `default.json`, adjust your encoder settings, skin settings, colors, and ensure `OsuSongsDir` / `OsuSkinsDir` / `OsuReplaysDir` / `OutputDir` point to `./data/Songs`, `./data/Skins`, `./data/Replays`.
 5. In `credentials.json`, input your osu! API Client ID and Secret (generate these in your osu! profile settings under OAuth).
 
 ### 5. Run the Bot

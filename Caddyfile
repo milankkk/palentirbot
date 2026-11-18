@@ -2,6 +2,10 @@
 	root * /srv/replays
 	encode zstd gzip
 
+	# Block dotfiles and temporary staging artifacts (e.g. .tmp.mp4, .tmp.jpg)
+	@hidden path /.*
+	respond @hidden 404
+
 	# Redirect /watch/filename.mp4 to /watch/filename
 	@watchmp4 path_regexp watchmp4 ^(/watch/[A-Za-z0-9._-]+)\.mp4$
 	redir @watchmp4 {re.watchmp4.1} 301
@@ -73,6 +77,11 @@
     </script>
 </body>
 </html>` 200
+	}
+
+	# Proxy upload requests to internal fileserver container
+	handle /upload* {
+		reverse_proxy fileserver:{$UPLOAD_PORT:5555}
 	}
 
 	# Serve static replay files

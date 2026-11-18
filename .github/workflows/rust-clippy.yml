@@ -15,6 +15,7 @@ on:
     paths:
     - "**.rs"
     - "**/Cargo.toml"
+    - "**/Cargo.lock"
   pull_request:
     branches: [ "main" ]
 
@@ -34,7 +35,7 @@ jobs:
           components: clippy
 
       - name: Run cargo clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Run cargo test
-        run: cargo test --workspace
+        run: cargo test --workspace --locked

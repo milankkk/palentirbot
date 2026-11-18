@@ -15,7 +15,13 @@ def _load_env_file():
                         continue
                     k, v = line.split("=", 1)
                     k = k.strip()
-                    v = v.strip().strip("'\"")
+                    v = v.strip()
+                    if len(v) >= 2 and (
+                        (v[0] == '"' and v[-1] == '"') or (v[0] == "'" and v[-1] == "'")
+                    ):
+                        v = v[1:-1]
+                    elif "#" in v:
+                        v = v.split("#", 1)[0].strip()
                     if k and k not in os.environ:
                         os.environ[k] = v
         except Exception:
@@ -100,8 +106,11 @@ def health():
 
 @app.route("/upload", methods=["POST"])
 def upload():
-    secret_val = request.form.get("secret", "")
-    if not SECRET or not hmac.compare_digest(secret_val, SECRET):
+    header_secret = request.headers.get("X-Upload-Secret")
+    secret_val = header_secret if header_secret is not None else request.form.get("secret", "")
+    if not SECRET or not hmac.compare_digest(
+        secret_val.encode("utf-8"), SECRET.encode("utf-8")
+    ):
         return jsonify({"error": 401, "text": "Unauthorized"}), 401
 
     if "video" not in request.files:
@@ -115,7 +124,9 @@ def upload():
     if not safe_name or not safe_name.lower().endswith(".mp4"):
         return jsonify({"error": 400, "text": "Invalid .mp4 filename"}), 400
 
-    filename = f"{uuid.uuid4()}_{safe_name}"
+    safe_stem, _ = os.path.splitext(safe_name)
+    safe_stem = safe_stem[:120].strip("._-") or "replay"
+    filename = f"{uuid.uuid4()}_{safe_stem}.mp4"
     final_path = os.path.join(UPLOAD_DIR, filename)
     tmp_path = os.path.join(UPLOAD_DIR, f".{filename}.tmp")
     try:
@@ -132,6 +143,7 @@ def upload():
 
     watch_base = BASE_URL if BASE_URL.endswith("/watch") else f"{BASE_URL}/watch"
     url = f"{watch_base}/{stem}"
+    video_url = f"{BASE_URL}/{stem}.mp4"
 
     meta_path = os.path.join(UPLOAD_DIR, f"{stem}.json")
     tmp_meta = os.path.join(UPLOAD_DIR, f".{stem}.tmp.json")
@@ -148,6 +160,7 @@ def upload():
             "size_bytes": os.path.getsize(final_path),
             "uploaded_at": int(time.time()),
             "watch_url": url,
+            "video_url": video_url,
         }
         with open(tmp_meta, "w", encoding="utf-8") as mf:
             json.dump(meta, mf, ensure_ascii=False, separators=(",", ":"))
@@ -159,6 +172,7 @@ def upload():
     return jsonify({
         "error": 0,
         "text": url,
+        "video_url": video_url,
         "thumbnail_url": f"{BASE_URL}/{stem}.jpg" if has_thumb else None,
         "width": width,
         "height": height,

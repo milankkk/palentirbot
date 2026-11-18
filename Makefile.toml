@@ -1,13 +1,27 @@
-extend = "../../Makefile.toml"
+[tasks.check]
+command = "cargo"
+args = ["check", "--workspace", "--all-targets", "--locked"]
 
-[tasks.examples_build]
-alias = "build"
+[tasks.clippy]
+command = "cargo"
+args = ["clippy", "--workspace", "--all-targets", "--locked", "--", "-D", "warnings"]
 
-[tasks.examples_build_release]
-alias = "build_release"
+[tasks.test]
+command = "cargo"
+args = ["test", "--workspace", "--locked"]
 
-[tasks.examples_run]
-alias = "run"
+[tasks.build]
+command = "cargo"
+args = ["build", "--locked"]
 
-[tasks.examples_run_release]
-alias = "run_release"
+[tasks.build_release]
+command = "cargo"
+args = ["build", "--release", "--locked"]
+
+[tasks.run]
+command = "cargo"
+args = ["run", "--locked"]
+
+[tasks.run_release]
+command = "cargo"
+args = ["run", "--release", "--locked"]

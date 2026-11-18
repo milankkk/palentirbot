@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
-set -e
+set -euo pipefail
 
 DATA_DIR="${DANSER_PATH:-/app/data}"
+SAFE_DATA_DIR=${DATA_DIR//\\/\\\\}
+SAFE_DATA_DIR=${SAFE_DATA_DIR//&/\\&}
+SAFE_DATA_DIR=${SAFE_DATA_DIR//|/\\|}
+SAFE_DATA_DIR=${SAFE_DATA_DIR//\"/\\\"}
 mkdir -p "${DATA_DIR}/Downloads" "${DATA_DIR}/Replays" "${DATA_DIR}/Skins" "${DATA_DIR}/Songs" "${DATA_DIR}/settings" /app/logs
 
 DANSER_EXEC="${DATA_DIR}/danser"
@@ -38,28 +42,32 @@ if [ ! -f "${SETTINGS_FILE}" ]; then
     echo "[palentirbot] Generating default Danser settings..."
     (
         cd "${DATA_DIR}"
-        export LD_LIBRARY_PATH="${DATA_DIR}:${LD_LIBRARY_PATH:-}"
+        export LD_LIBRARY_PATH="${DATA_DIR}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
         xvfb-run -a -s "-screen 0 1920x1080x24" ./danser -noupdatecheck -settings=default >/dev/null 2>&1 || true
     )
     if [ -f "${SETTINGS_FILE}" ]; then
-        sed -i 's|"OsuSongsDir":.*|"OsuSongsDir": "'"${DATA_DIR}"'/Songs",|' "${SETTINGS_FILE}" 2>/dev/null || true
-        sed -i 's|"OsuSkinsDir":.*|"OsuSkinsDir": "'"${DATA_DIR}"'/Skins",|' "${SETTINGS_FILE}" 2>/dev/null || true
-        sed -i 's|"OsuReplaysDir":.*|"OsuReplaysDir": "'"${DATA_DIR}"'/Replays",|' "${SETTINGS_FILE}" 2>/dev/null || true
-        sed -i 's|"OutputDir":.*|"OutputDir": "'"${DATA_DIR}"'/Replays",|' "${SETTINGS_FILE}" 2>/dev/null || true
+        sed -i 's|"OsuSongsDir":.*|"OsuSongsDir": "'"${SAFE_DATA_DIR}"'/Songs",|' "${SETTINGS_FILE}" 2>/dev/null || true
+        sed -i 's|"OsuSkinsDir":.*|"OsuSkinsDir": "'"${SAFE_DATA_DIR}"'/Skins",|' "${SETTINGS_FILE}" 2>/dev/null || true
+        sed -i 's|"OsuReplaysDir":.*|"OsuReplaysDir": "'"${SAFE_DATA_DIR}"'/Replays",|' "${SETTINGS_FILE}" 2>/dev/null || true
+        sed -i 's|"OutputDir":.*|"OutputDir": "'"${SAFE_DATA_DIR}"'/Replays",|' "${SETTINGS_FILE}" 2>/dev/null || true
     fi
     echo "[palentirbot] Default settings generated."
 fi
 
 # Ensure OutputDir is always patched to Replays dir even if default.json pre-existed
 if [ -f "${SETTINGS_FILE}" ]; then
-    sed -i 's|"OutputDir":.*|"OutputDir": "'"${DATA_DIR}"'/Replays",|' "${SETTINGS_FILE}" 2>/dev/null || true
+    sed -i 's|"OutputDir":.*|"OutputDir": "'"${SAFE_DATA_DIR}"'/Replays",|' "${SETTINGS_FILE}" 2>/dev/null || true
 fi
 
 # 3. Create default prompt.txt inside data directory if missing
 PROMPT_FILE="${DATA_DIR}/prompt.txt"
 if [ ! -f "${PROMPT_FILE}" ]; then
     echo "[palentirbot] Creating default ${PROMPT_FILE}..."
-    printf "You are a helpful osu! Discord bot assistant.\nCurrent user: {username} ({user_id})\n" > "${PROMPT_FILE}"
+    if [ -f "/app/prompt.example.txt" ]; then
+        cp /app/prompt.example.txt "${PROMPT_FILE}"
+    else
+        printf "You are Render Slave, a helpful osu! Discord bot assistant.\nCurrent requester Discord username: {username}\n" > "${PROMPT_FILE}"
+    fi
 fi
 
 # 4. Pre-populate credentials.json if osu! credentials are provided
@@ -71,7 +79,11 @@ if [ -n "${OSU_CLIENT_ID:-}" ] && [ -n "${OSU_CLIENT_SECRET:-}" ]; then
         esc_id=${esc_id//\"/\\\"}
         esc_secret=${OSU_CLIENT_SECRET//\\/\\\\}
         esc_secret=${esc_secret//\"/\\\"}
-        printf '{\n    "ClientId": "%s",\n    "ClientSecret": "%s"\n}\n' "${esc_id}" "${esc_secret}" > "${CREDENTIALS_FILE}"
+        (
+            umask 077
+            printf '{\n    "ClientId": "%s",\n    "ClientSecret": "%s"\n}\n' "${esc_id}" "${esc_secret}" > "${CREDENTIALS_FILE}"
+        )
+        chmod 600 "${CREDENTIALS_FILE}"
     fi
 fi
 
