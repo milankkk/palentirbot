@@ -13,7 +13,8 @@ const MAX_OSU_FILE_BYTES: usize = 5 * 1024 * 1024;
 
 macro_rules! osu_call_with_refresh {
     ($osu_ctx:expr, |$client:ident| $req:expr) => {{
-        let $client: &Osu = $osu_ctx.osu;
+        let latest_osu = $osu_ctx.ctx.map(|c| c.osu());
+        let $client: &Osu = latest_osu.as_deref().unwrap_or($osu_ctx.osu);
         match $req.await {
             Ok(val) => Ok(val),
             Err(err) => {
@@ -59,15 +60,81 @@ pub fn parse_game_mode(raw: Option<&str>) -> GameMode {
     }
 }
 
-/// Parse classic osu! mod acronyms (e.g. `HDDT`, `HD,HR`, `+EZDT`, `HD and DT`, `4KHD`) into legacy bitmask + label.
-pub fn parse_mod_bits(raw: Option<&str>) -> (u32, String) {
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ParsedMods {
+    bits: u32,
+    label: String,
+    has_classic: bool,
+}
+
+fn mod_pair_bit(pair: &str) -> u32 {
+    match pair {
+        "NF" => 1 << 0,
+        "EZ" => 1 << 1,
+        "TD" => 1 << 2,
+        "HD" => 1 << 3,
+        "HR" => 1 << 4,
+        "SD" => 1 << 5,
+        "DT" => 1 << 6,
+        "RX" => 1 << 7,
+        "HT" => 1 << 8,
+        "DC" => 1 << 8,
+        "NC" => (1 << 9) | (1 << 6),
+        "FL" => 1 << 10,
+        "SO" => 1 << 12,
+        "PF" => (1 << 14) | (1 << 5),
+        _ => 0,
+    }
+}
+
+fn mod_full_name(upper: &str) -> Option<&'static str> {
+    match upper {
+        "NOFAIL" => Some("NF"),
+        "EASY" => Some("EZ"),
+        "TOUCHDEVICE" => Some("TD"),
+        "HIDDEN" => Some("HD"),
+        "HARDROCK" => Some("HR"),
+        "SUDDENDEATH" => Some("SD"),
+        "DOUBLETIME" => Some("DT"),
+        "RELAX" => Some("RX"),
+        "HALFTIME" => Some("HT"),
+        "DAYCORE" => Some("DC"),
+        "NIGHTCORE" => Some("NC"),
+        "FLASHLIGHT" => Some("FL"),
+        "SPUNOUT" => Some("SO"),
+        "PERFECT" => Some("PF"),
+        "CLASSIC" => Some("CL"),
+        _ => None,
+    }
+}
+
+fn push_resolved_mod(labels: &mut Vec<&'static str>, canonical: &'static str) {
+    match canonical {
+        "EZ" => labels.retain(|&m| m != "HR"),
+        "HR" => labels.retain(|&m| m != "EZ"),
+        "DT" | "NC" => labels.retain(|&m| !matches!(m, "HT" | "DC" | "DT" | "NC")),
+        "HT" | "DC" => labels.retain(|&m| !matches!(m, "DT" | "NC" | "HT" | "DC")),
+        "NF" => labels.retain(|&m| !matches!(m, "SD" | "PF")),
+        "SD" | "PF" => labels.retain(|&m| !matches!(m, "NF" | "SD" | "PF")),
+        _ => {}
+    }
+    if !labels.contains(&canonical) {
+        labels.push(canonical);
+    }
+}
+
+fn parse_mods_detailed(raw: Option<&str>) -> ParsedMods {
     let input = raw.unwrap_or("").trim();
     if input.is_empty() {
-        return (0, "NM".to_owned());
+        return ParsedMods {
+            bits: 0,
+            label: "NM".to_owned(),
+            has_classic: false,
+        };
     }
 
-    let mut bits = 0u32;
-    let mut labels = Vec::new();
+    let mut labels: Vec<&'static str> = Vec::new();
+    let mut has_classic = false;
 
     for token in input
         .split(|c: char| !c.is_ascii_alphanumeric())
@@ -81,8 +148,21 @@ pub fn parse_mod_bits(raw: Option<&str>) -> (u32, String) {
             continue;
         }
 
+        if let Some(full) = mod_full_name(&upper) {
+            if full == "CL" {
+                has_classic = true;
+            } else {
+                push_resolved_mod(&mut labels, full);
+            }
+            continue;
+        }
+
         let bytes = upper.as_bytes();
         let mut i = 0usize;
+        let mut token_mods: Vec<&'static str> = Vec::new();
+        let mut token_has_classic = false;
+        let mut valid_token = true;
+
         while i < bytes.len() {
             // Skip mania key count markers like `4K`, `7K`, `10K` inside `4KHD` / `HD4K`.
             if bytes[i].is_ascii_digit() {
@@ -91,57 +171,77 @@ pub fn parse_mod_bits(raw: Option<&str>) -> (u32, String) {
                 }
                 if i < bytes.len() && bytes[i] == b'K' {
                     i += 1;
+                } else {
+                    valid_token = false;
+                    break;
                 }
                 continue;
             }
 
-            if i + 1 >= bytes.len() {
+            if i + 2 > bytes.len() {
+                valid_token = false;
                 break;
-            }
-            if bytes[i + 1].is_ascii_digit() {
-                i += 1;
-                continue;
             }
 
             let pair = &upper[i..i + 2];
             if pair == "CL" {
+                token_has_classic = true;
                 i += 2;
                 continue;
             }
-            let (bit, canonical) = match pair {
-                "NF" => (1 << 0, "NF"),
-                "EZ" => (1 << 1, "EZ"),
-                "TD" => (1 << 2, "TD"),
-                "HD" => (1 << 3, "HD"),
-                "HR" => (1 << 4, "HR"),
-                "SD" => (1 << 5, "SD"),
-                "DT" => (1 << 6, "DT"),
-                "RX" => (1 << 7, "RX"),
-                "HT" => (1 << 8, "HT"),
-                "DC" => (1 << 8, "DC"),
-                "NC" => ((1 << 9) | (1 << 6), "NC"),
-                "FL" => (1 << 10, "FL"),
-                "SO" => (1 << 12, "SO"),
-                "PF" => ((1 << 14) | (1 << 5), "PF"),
-                _ => (0, ""),
-            };
-            if bit != 0 {
-                if !labels.contains(&canonical) {
-                    bits |= bit;
-                    labels.push(canonical);
+
+            let canonical = match pair {
+                "NF" => "NF",
+                "EZ" => "EZ",
+                "TD" => "TD",
+                "HD" => "HD",
+                "HR" => "HR",
+                "SD" => "SD",
+                "DT" => "DT",
+                "RX" => "RX",
+                "HT" => "HT",
+                "DC" => "DC",
+                "NC" => "NC",
+                "FL" => "FL",
+                "SO" => "SO",
+                "PF" => "PF",
+                _ => {
+                    valid_token = false;
+                    break;
                 }
-                i += 2;
-            } else {
-                i += 1;
+            };
+            token_mods.push(canonical);
+            i += 2;
+        }
+
+        if valid_token {
+            if token_has_classic {
+                has_classic = true;
+            }
+            for canonical in token_mods {
+                push_resolved_mod(&mut labels, canonical);
             }
         }
     }
 
-    if labels.is_empty() {
-        (0, "NM".to_owned())
+    let bits = labels.iter().fold(0u32, |acc, m| acc | mod_pair_bit(m));
+    let label = if labels.is_empty() {
+        "NM".to_owned()
     } else {
-        (bits, labels.concat())
+        labels.concat()
+    };
+
+    ParsedMods {
+        bits,
+        label,
+        has_classic,
     }
+}
+
+/// Parse classic osu! mod acronyms and full mod names (e.g. `HDDT`, `HD,HR`, `+EZDT`, `Nightcore`, `4KHD`) into legacy bitmask + label.
+pub fn parse_mod_bits(raw: Option<&str>) -> (u32, String) {
+    let parsed = parse_mods_detailed(raw);
+    (parsed.bits, parsed.label)
 }
 
 /// Parse an osu! beatmap ID from either a raw number or a `/b/`, `/beatmaps/`, `#mode/` URL.
@@ -510,9 +610,32 @@ pub async fn execute_osu_player_tool(
         },
     );
 
-    let top_scores = top_res.unwrap_or_default();
-    let recent_scores = recent_res.unwrap_or_default();
-    let extra_scores = extra_res.unwrap_or_default();
+    let mut warnings = Vec::new();
+    let top_scores = match top_res {
+        Ok(scores) => scores,
+        Err(err) => {
+            tracing::warn!(user_id = user.user_id, ?err, "failed to fetch top plays");
+            warnings.push("Failed to fetch top plays from osu! API.".to_owned());
+            Vec::new()
+        }
+    };
+    let recent_scores = match recent_res {
+        Ok(scores) => scores,
+        Err(err) => {
+            tracing::warn!(user_id = user.user_id, ?err, "failed to fetch recent plays");
+            warnings.push("Failed to fetch recent plays from osu! API.".to_owned());
+            Vec::new()
+        }
+    };
+    let extra_scores = match extra_res {
+        Ok(scores) => scores,
+        Err(err) => {
+            let kind = if want_firsts { "first-place" } else { "pinned" };
+            tracing::warn!(user_id = user.user_id, ?err, "failed to fetch {kind} plays");
+            warnings.push(format!("Failed to fetch {kind} plays from osu! API."));
+            Vec::new()
+        }
+    };
     for s in top_scores
         .iter()
         .chain(recent_scores.iter())
@@ -602,6 +725,9 @@ pub async fn execute_osu_player_tool(
             obj.insert("first_place_plays".to_owned(), serde_json::Value::Array(extra_plays));
         } else {
             obj.insert("pinned_plays".to_owned(), serde_json::Value::Array(extra_plays));
+        }
+        if !warnings.is_empty() {
+            obj.insert("warnings".to_owned(), serde_json::json!(warnings));
         }
     }
 
@@ -1084,7 +1210,23 @@ pub async fn execute_osu_beatmap_tool(
     };
     verified_ids.insert(map.map_id);
 
-    let (mod_bits, mods_label) = parse_mod_bits(args.get("mods").and_then(|v| v.as_str()));
+    let parsed_mods = parse_mods_detailed(args.get("mods").and_then(|v| v.as_str()));
+    let mod_bits = parsed_mods.bits;
+    let requested_lazer = args.get("lazer").and_then(|v| v.as_bool()).unwrap_or(false);
+    let effective_lazer = if parsed_mods.has_classic {
+        false
+    } else {
+        requested_lazer
+    };
+    let mods_label = if parsed_mods.has_classic && requested_lazer {
+        if parsed_mods.label == "NM" {
+            "CL".to_owned()
+        } else {
+            format!("{}CL", parsed_mods.label)
+        }
+    } else {
+        parsed_mods.label
+    };
     let custom_params = CustomPerfParams {
         accuracy: args
             .get("accuracy")
@@ -1112,7 +1254,7 @@ pub async fn execute_osu_beatmap_tool(
             .and_then(|v| v.as_f64())
             .filter(|n| n.is_finite())
             .map(|cr| cr.clamp(0.5, 2.0)),
-        lazer: args.get("lazer").and_then(|v| v.as_bool()).unwrap_or(false),
+        lazer: effective_lazer,
     };
 
     let target_mode = requested_mode.unwrap_or(map.mode);
@@ -1508,7 +1650,15 @@ pub async fn execute_osu_scores_tool(
         };
     }
 
-    let (mod_bits, mods_label) = parse_mod_bits(args.get("mods").and_then(|v| v.as_str()));
+    let raw_mods = args
+        .get("mods")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let (mod_bits, mods_label) = match raw_mods {
+        Some(m) => parse_mod_bits(Some(m)),
+        None => (0, "all".to_owned()),
+    };
     let res = osu_call_with_refresh!(osu_ctx, |osu| {
         let mut req = osu.beatmap_scores(map_id).limit(10);
         if let Some(m) = requested_mode {
@@ -1788,7 +1938,8 @@ fn slice_wiki_markdown(markdown: &str, anchor: Option<&str>, max_chars: usize) -
         if !needle.is_empty() {
             let mut found_byte = None;
             let mut offset = 0usize;
-            for line in markdown.lines() {
+            for raw_line in markdown.split_inclusive('\n') {
+                let line = raw_line.trim_end_matches(['\r', '\n']);
                 let trimmed = line.trim_start();
                 if trimmed.starts_with('#') {
                     let heading_norm: String = trimmed
@@ -1802,9 +1953,9 @@ fn slice_wiki_markdown(markdown: &str, anchor: Option<&str>, max_chars: usize) -
                         break;
                     }
                 }
-                offset += line.len() + 1;
+                offset += raw_line.len();
             }
-            found_byte.unwrap_or(0)
+            found_byte.filter(|&idx| markdown.is_char_boundary(idx)).unwrap_or(0)
         } else {
             0
         }
@@ -1950,6 +2101,29 @@ mod tests {
             ((1 << 3) | (1 << 6), "HDDT".to_owned())
         );
         assert_eq!(parse_mod_bits(Some("DC")), ((1 << 8), "DC".to_owned()));
+        assert_eq!(
+            parse_mod_bits(Some("Nightcore")),
+            ((1 << 9) | (1 << 6), "NC".to_owned())
+        );
+        assert_eq!(
+            parse_mod_bits(Some("Flashlight")),
+            (1 << 10, "FL".to_owned())
+        );
+        assert_eq!(parse_mod_bits(Some("DTHT")), (1 << 8, "HT".to_owned()));
+        assert_eq!(parse_mod_bits(Some("EZHR")), (1 << 4, "HR".to_owned()));
+        assert_eq!(parse_mod_bits(Some("randomword")), (0, "NM".to_owned()));
+
+        let detailed = parse_mods_detailed(Some("HDCL"));
+        assert!(detailed.has_classic);
+        assert_eq!(detailed.label, "HD");
+    }
+
+    #[test]
+    fn test_slice_wiki_markdown_crlf_utf8() {
+        let md = "Intro line 😀\r\n日本語テスト 🔥\r\nMore text ✨\r\n## Combo scaling removal\r\nBody here.";
+        let sliced = slice_wiki_markdown(md, Some("combo-scaling-removal"), 200);
+        assert!(sliced.starts_with("## Combo scaling removal"));
+        assert!(sliced.contains("Body here."));
     }
 
     #[test]

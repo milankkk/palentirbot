@@ -229,9 +229,11 @@ impl WebSearchClient {
                 eyre::bail!("remote server returned HTTP {}", res.status());
             }
 
-            if let Some(len) = res.content_length() {
-                if len as usize > max_bytes {
-                    eyre::bail!("remote file is too large ({len} bytes > {max_bytes} byte limit)");
+            if accept.starts_with("image/") {
+                if let Some(len) = res.content_length() {
+                    if len as usize > max_bytes {
+                        eyre::bail!("remote file is too large ({len} bytes > {max_bytes} byte limit)");
+                    }
                 }
             }
 
@@ -788,10 +790,12 @@ pub fn format_search_results(query: &str, results: &[SearchResultItem], max_item
     out
 }
 
-/// Extract up to `max_actions` `<search>...</search>` or `<browse>...</browse>` tags from text.
+/// Extract up to `max_actions` `<search>...</search>` or `<browse>...</browse>` tags from text
+/// outside Markdown code blocks and inline code spans.
 pub fn extract_search_actions(text: &str, max_actions: usize) -> Vec<AiSearchAction> {
     let mut actions = Vec::new();
-    let mut remaining = text;
+    let masked = mask_markdown_code(text);
+    let mut remaining = masked.as_str();
 
     while actions.len() < max_actions {
         let next_search = remaining.find("<search>");
@@ -841,13 +845,14 @@ pub fn extract_search_actions(text: &str, max_actions: usize) -> Vec<AiSearchAct
 }
 
 /// Extract up to `max_calls` `<tool_call>{"name": ..., "arguments": {...}}</tool_call>` blocks
-/// emitted as literal text when the model runtime fails to parse special tool tokens.
+/// emitted as literal text outside Markdown code spans/blocks when the model runtime fails to parse special tool tokens.
 pub fn extract_inline_tool_calls(
     text: &str,
     max_calls: usize,
 ) -> Vec<(String, serde_json::Value)> {
     let mut calls = Vec::new();
-    let mut remaining = text;
+    let masked = mask_markdown_code(text);
+    let mut remaining = masked.as_str();
 
     while calls.len() < max_calls {
         let Some(open_idx) = remaining.find("<tool_call>") else {
@@ -926,12 +931,12 @@ pub fn is_private_or_local_ip(ip: std::net::IpAddr) -> bool {
     }
 }
 
-pub async fn validate_and_resolve_url(url_str: &str) -> Result<ValidatedTarget> {
+fn parse_and_validate_url_target(url_str: &str) -> Result<(reqwest::Url, String, u16)> {
     let raw = url_str
         .trim()
         .trim_matches(|c| matches!(c, '"' | '\'' | '`' | '<' | '>'))
         .trim();
-    let parsed = reqwest::Url::parse(raw).context("invalid URL")?;
+    let mut parsed = reqwest::Url::parse(raw).context("invalid URL")?;
     let scheme = parsed.scheme();
     if scheme != "http" && scheme != "https" {
         eyre::bail!("URL scheme must be http or https");
@@ -946,6 +951,11 @@ pub async fn validate_and_resolve_url(url_str: &str) -> Result<ValidatedTarget> 
         .to_owned();
     if host.is_empty() {
         eyre::bail!("URL has empty host");
+    }
+    if parsed.host_str().is_some_and(|h| h.ends_with('.')) {
+        parsed
+            .set_host(Some(&host))
+            .context("failed to normalize host")?;
     }
     let host_lower = host.to_ascii_lowercase();
 
@@ -966,6 +976,12 @@ pub async fn validate_and_resolve_url(url_str: &str) -> Result<ValidatedTarget> 
     if !matches!(port, 80 | 443) {
         eyre::bail!("Only ports 80 and 443 are permitted (got {port})");
     }
+
+    Ok((parsed, host, port))
+}
+
+pub async fn validate_and_resolve_url(url_str: &str) -> Result<ValidatedTarget> {
+    let (parsed, host, port) = parse_and_validate_url_target(url_str)?;
 
     if let Ok(ip) = host.parse::<IpAddr>() {
         if is_private_or_local_ip(ip) {
@@ -1472,22 +1488,26 @@ fn collect_code_protected_ranges(text: &str) -> Vec<(usize, usize)> {
     ranges
 }
 
+/// Replace fenced Markdown code blocks and inline code spans with whitespace.
+pub fn mask_markdown_code(text: &str) -> String {
+    let ranges = collect_code_protected_ranges(text);
+    if ranges.is_empty() {
+        return text.to_owned();
+    }
+    let mut buf = String::with_capacity(text.len());
+    let mut last = 0usize;
+    for (start, end) in ranges {
+        buf.push_str(&text[last..start]);
+        buf.push(' ');
+        last = end;
+    }
+    buf.push_str(&text[last..]);
+    buf
+}
+
 /// Returns URLs present in `text` that were not observed in `verified`, ignoring code spans/blocks.
 pub fn find_unverified_urls(text: &str, verified: &HashSet<String>) -> Vec<String> {
-    let ranges = collect_code_protected_ranges(text);
-    let prose = if ranges.is_empty() {
-        text.to_owned()
-    } else {
-        let mut buf = String::with_capacity(text.len());
-        let mut last = 0usize;
-        for (start, end) in ranges {
-            buf.push_str(&text[last..start]);
-            buf.push(' ');
-            last = end;
-        }
-        buf.push_str(&text[last..]);
-        buf
-    };
+    let prose = mask_markdown_code(text);
     let canon = build_canonical_set(verified);
     extract_http_urls(&prose)
         .into_iter()
@@ -1726,6 +1746,12 @@ mod tests {
                 AiSearchAction::Browse("https://osu.ppy.sh".to_owned()),
             ]
         );
+
+        let masked = "Use `<search>ignored inline</search>` and:\n```xml\n<browse>https://evil.example/ignored</browse>\n```\n<search>real query</search>";
+        assert_eq!(
+            extract_search_actions(masked, 5),
+            vec![AiSearchAction::Search("real query".to_owned())]
+        );
     }
 
     #[tokio::test]
@@ -1745,6 +1771,12 @@ mod tests {
         assert!(validate_url_for_ssrf("http://[100::1]/").await.is_err());
         assert!(validate_url_for_ssrf("http://[::ffff:127.0.0.1]/").await.is_err());
         assert!(validate_url_for_ssrf("file:///etc/passwd").await.is_err());
+
+        let (norm_url, norm_host, port) =
+            parse_and_validate_url_target("https://example.com./path?q=1").expect("valid target");
+        assert_eq!(norm_host, "example.com");
+        assert_eq!(norm_url.host_str(), Some("example.com"));
+        assert_eq!(port, 443);
     }
 
     #[test]
@@ -1867,6 +1899,16 @@ mod tests {
             vec![(
                 "image_search".to_owned(),
                 serde_json::json!({"query": "puffy mouth meme"}),
+            )]
+        );
+
+        let code_masked = "Inline `<tool_call>{\"name\":\"web_search\",\"arguments\":{\"query\":\"bad\"}}</tool_call>`\n```\n<tool_call>{\"name\":\"web_search\",\"arguments\":{\"query\":\"also_bad\"}}</tool_call>\n```\n<tool_call>{\"name\":\"web_search\",\"arguments\":{\"query\":\"ok\"}}</tool_call>";
+        let masked_calls = extract_inline_tool_calls(code_masked, 5);
+        assert_eq!(
+            masked_calls,
+            vec![(
+                "web_search".to_owned(),
+                serde_json::json!({"query": "ok"}),
             )]
         );
 

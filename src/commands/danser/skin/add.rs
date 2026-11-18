@@ -14,6 +14,7 @@ use crate::{
         ai::search::validate_and_resolve_url, replay_queue::process::extract_zip_safely,
         BotConfig, Context as TwilightContext,
     },
+    custom_client::MAX_SKIN_BYTES,
     util::{
         builder::MessageBuilder,
         constants::GENERAL_ISSUE,
@@ -120,10 +121,22 @@ pub async fn add(
                 command.error_callback(&ctx, content, true).await?;
                 return Ok(());
             }
+            if skin.size == 0 || skin.size > MAX_SKIN_BYTES as u64 {
+                let content = format!(
+                    "The `.osk` attachment must be between 1 byte and {} MB.",
+                    MAX_SKIN_BYTES / (1024 * 1024)
+                );
+                command.error_callback(&ctx, content, true).await?;
+                return Ok(());
+            }
             let filename = sanitize_skin_dir_name(&skin.filename);
             let builder = MessageBuilder::new().embed("Downloading...");
             command.callback(&ctx, builder, false).await?;
-            let bytes = match ctx.client().get_discord_attachment(&skin).await {
+            let bytes = match ctx
+                .client()
+                .get_discord_attachment_limited(&skin, MAX_SKIN_BYTES)
+                .await
+            {
                 Ok(bytes) => bytes,
                 Err(err) => {
                     let _ = command.error(&ctx, "Failed to download attachment").await;
@@ -133,11 +146,13 @@ pub async fn add(
             (bytes, filename)
         }
         (None, Some(url)) => {
+            command.defer(&ctx, false).await?;
+
             let target = match validate_and_resolve_url(&url).await {
                 Ok(t) => t,
                 Err(err) => {
                     command
-                        .error_callback(&ctx, format!("Invalid or disallowed URL: {err}"), true)
+                        .error(&ctx, format!("Invalid or disallowed URL: {err}"))
                         .await?;
                     return Ok(());
                 }
@@ -145,13 +160,13 @@ pub async fn add(
 
             if !target.url.path().to_ascii_lowercase().ends_with(".osk") {
                 command
-                    .error_callback(&ctx, "The URL must point to a .osk file!", true)
+                    .error(&ctx, "The URL must point to a .osk file!")
                     .await?;
                 return Ok(());
             }
 
             let builder = MessageBuilder::new().embed("Downloading from URL...");
-            command.callback(&ctx, builder, false).await?;
+            command.update(&ctx, &builder).await?;
 
             let bytes = match ctx.client().get_skin_from_url(&url).await {
                 Ok(b) => b,
@@ -232,31 +247,45 @@ pub async fn add(
 
     const MAX_UNCOMPRESSED_SKIN_BYTES: u64 = 512 * 1024 * 1024; // 512 MB
     const MAX_SKIN_ENTRIES: usize = 5_000;
+    let staging_seq = FLATTEN_SEQ.fetch_add(1, Ordering::Relaxed);
+    let staging_dir = skins_root.join(format!(".tmp_skin_{staging_seq}"));
+    let staging_dir_clone = staging_dir.clone();
     let skin_file_clone = skin_file.clone();
     let skins_root_clone = skins_root.clone();
     let extract_res = tokio::task::spawn_blocking(move || -> Result<bool, Report> {
         extract_zip_safely(
             &bytes,
-            &skin_file_clone,
+            &staging_dir_clone,
             MAX_UNCOMPRESSED_SKIN_BYTES,
             MAX_SKIN_ENTRIES,
         )?;
 
-        let mut skin_ini_path = skin_file_clone.clone();
+        let mut skin_ini_path = staging_dir_clone.clone();
         skin_ini_path.push("skin.ini");
 
         if !(case_insensitive_exists(&skin_ini_path)?
-            || move_directory(&skins_root_clone, &skin_file_clone)?)
+            || move_directory(&skins_root_clone, &staging_dir_clone)?)
         {
-            if skin_file_clone.parent() == Some(skins_root_clone.as_path()) {
-                fs::remove_dir_all(&skin_file_clone).with_context(|| {
+            if staging_dir_clone.parent() == Some(skins_root_clone.as_path()) {
+                fs::remove_dir_all(&staging_dir_clone).with_context(|| {
                     format!(
-                        "failed to remove directory after failing to assure skin.ini for {skin_file_clone:?}"
+                        "failed to remove staging directory after failing to assure skin.ini for {staging_dir_clone:?}"
                     )
                 })?;
             }
             return Ok(false);
         }
+
+        if skin_file_clone.exists() {
+            let _ = fs::remove_dir_all(&staging_dir_clone);
+            eyre::bail!("target skin directory `{skin_file_clone:?}` already exists");
+        }
+
+        fs::rename(&staging_dir_clone, &skin_file_clone).with_context(|| {
+            format!(
+                "failed moving validated skin from {staging_dir_clone:?} to {skin_file_clone:?}"
+            )
+        })?;
 
         Ok(true)
     })
@@ -265,22 +294,25 @@ pub async fn add(
     match extract_res {
         Ok(Ok(true)) => {}
         Ok(Ok(false)) => {
+            if staging_dir.parent() == Some(skins_root.as_path()) {
+                let _ = tokio::fs::remove_dir_all(&staging_dir).await;
+            }
             let content = "There was an error getting the folder containing the skin elements! \
                 Try re-exporting the skin!";
             command.error(&ctx, content).await?;
             return Ok(());
         }
         Ok(Err(err)) => {
-            if skin_file.parent() == Some(skins_root.as_path()) {
-                let _ = tokio::fs::remove_dir_all(&skin_file).await;
+            if staging_dir.parent() == Some(skins_root.as_path()) {
+                let _ = tokio::fs::remove_dir_all(&staging_dir).await;
             }
             let msg = err.to_string();
             let _ = command.error(&ctx, msg).await;
             return Err(err);
         }
         Err(err) => {
-            if skin_file.parent() == Some(skins_root.as_path()) {
-                let _ = tokio::fs::remove_dir_all(&skin_file).await;
+            if staging_dir.parent() == Some(skins_root.as_path()) {
+                let _ = tokio::fs::remove_dir_all(&staging_dir).await;
             }
             let _ = command.error(&ctx, GENERAL_ISSUE).await;
             return Err(Report::from(err).wrap_err("extraction task panicked"));

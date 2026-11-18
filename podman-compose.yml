@@ -24,8 +24,7 @@ services:
       # Linked automatically with fileserver service
       UPLOAD_URL: http://fileserver:${UPLOAD_PORT:-5555}/upload
       PUBLIC_REPLAY_BASE_URL: ${PUBLIC_REPLAY_BASE_URL:-http://localhost:${CADDY_HTTP_PORT:-8085}}
-      UPLOAD_SECRET: ${UPLOAD_SECRET:-palentir_replay_secret_key}
-      UPLOAD_MBPS: ${UPLOAD_MBPS:-auto}
+      UPLOAD_SECRET: ${UPLOAD_SECRET:?Set UPLOAD_SECRET in .env}
       OLLAMA_URL: http://ollama:11434
       DANSER_PATH: /app/data
       FOLDERS_PATH: /app/data
@@ -78,7 +77,7 @@ services:
     environment:
       UPLOAD_DIR: /uploads
       # Linked automatically with bot service
-      UPLOAD_SECRET: ${UPLOAD_SECRET:-palentir_replay_secret_key}
+      UPLOAD_SECRET: ${UPLOAD_SECRET:?Set UPLOAD_SECRET in .env}
       UPLOAD_PORT: ${UPLOAD_PORT:-5555}
       BASE_URL: ${PUBLIC_REPLAY_BASE_URL:-http://localhost:${CADDY_HTTP_PORT:-8085}}
     volumes:
@@ -107,6 +106,7 @@ services:
     volumes:
       - uploaded_replays:/srv/replays:ro,z
       - ./Caddyfile:/etc/caddy/Caddyfile:ro,z
+      - ./fileserver/gallery.html:/etc/caddy/gallery.html:ro,z
       - caddy_data:/data:Z
       - caddy_config:/config:Z
 

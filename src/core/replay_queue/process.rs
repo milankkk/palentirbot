@@ -26,9 +26,12 @@ use tokio::process::Command;
 use tokio::sync::{Mutex as AsyncMutex, Notify};
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, Duration};
-use twilight_model::id::{
-    marker::{ChannelMarker, MessageMarker, UserMarker},
-    Id,
+use twilight_model::{
+    channel::message::MessageFlags,
+    id::{
+        marker::{ChannelMarker, MessageMarker, UserMarker},
+        Id,
+    },
 };
 use zip::ZipArchive;
 
@@ -41,6 +44,8 @@ impl ReplayQueue {
 
     async fn async_process(ctx: Arc<Context>) -> Result<()> {
         let config = BotConfig::get();
+        sweep_stale_temp_dirs(&config.paths.songs()).await;
+        sweep_stale_temp_dirs(&config.paths.skins()).await;
         let mut danser_path = config.paths.danser().to_owned();
         danser_path.push("danser");
         if !tokio::fs::try_exists(&danser_path).await.unwrap_or(false) {
@@ -167,21 +172,18 @@ async fn process_single_replay(
         ctx.replay_queue.set_status(ReplayStatus::Downloading).await;
         ctx.replay_queue.notify.notify_waiters();
 
-        let dl_cancelled = tokio::select! {
-            biased;
-            _ = cancel_notify.notified() => true,
-            res = download_mapset_inner(&ctx, mapset_id, false) => {
-                if let Err(err) = res {
-                    warn!("{err:?}");
-                    let content = "Failed to download map. Mirrors are likely down, try again later.";
-                    let _ = input_channel.error(&ctx, content).await;
-                    return Err(err);
-                }
-                false
-            }
-        };
-        if dl_cancelled || cancelled.load(Ordering::Acquire) {
-            return handle_cancelled_cleanup(&ctx, queue_message, &path, None, input_channel, user).await;
+        if download_mapset_cancellable(
+            &ctx,
+            mapset_id,
+            false,
+            input_channel,
+            &cancel_notify,
+            &cancelled,
+        )
+        .await?
+        {
+            return handle_cancelled_cleanup(&ctx, queue_message, &path, None, input_channel, user)
+                .await;
         }
         tracing::debug!("Finished map download for mapset {mapset_id}");
     }
@@ -227,7 +229,19 @@ async fn process_single_replay(
         );
         ctx.replay_queue.set_status(ReplayStatus::Downloading).await;
         ctx.replay_queue.notify.notify_waiters();
-        download_mapset_inner(&ctx, mapset_id, true).await?;
+        if download_mapset_cancellable(
+            &ctx,
+            mapset_id,
+            true,
+            input_channel,
+            &cancel_notify,
+            &cancelled,
+        )
+        .await?
+        {
+            return handle_cancelled_cleanup(&ctx, queue_message, &path, None, input_channel, user)
+                .await;
+        }
         found = find_beatmap_osu_file(mapset_id, map_id, &map_version, beatmap_hash).await;
     }
 
@@ -278,9 +292,17 @@ async fn process_single_replay(
         return handle_cancelled_cleanup(&ctx, queue_message, &path, None, input_channel, user).await;
     }
 
-    let osr_bytes = tokio::fs::read(&path)
-        .await
-        .context("failed to read queued .osr file for cache key")?;
+    let osr_bytes = match tokio::fs::read(&path).await {
+        Ok(b) => b,
+        Err(err) => {
+            let err = Report::from(err).wrap_err("failed to read queued .osr file for cache key");
+            warn!("{err:?}");
+            let _ = input_channel
+                .error(&ctx, "Failed to read the queued replay file.")
+                .await;
+            return Err(err);
+        }
+    };
     let cache_key = crate::core::replay_queue::cache::build_render_cache_key(
         &osr_bytes,
         beatmap_hash.unwrap_or(""),
@@ -322,9 +344,17 @@ async fn process_single_replay(
 
         tracing::debug!(mods = replay.mods, "replay mods being sent to danser");
 
-        let canonical_path = tokio::fs::canonicalize(&path)
-            .await
-            .context("failed to canonicalize replay path")?;
+        let canonical_path = match tokio::fs::canonicalize(&path).await {
+            Ok(p) => p,
+            Err(err) => {
+                let err = Report::from(err).wrap_err("failed to canonicalize replay path");
+                warn!("{err:?}");
+                let _ = input_channel
+                    .error(&ctx, "Failed to access the queued replay file on disk.")
+                    .await;
+                return Err(err);
+            }
+        };
 
         let ld_library_path = build_danser_ld_library_path(config.paths.danser());
 
@@ -332,13 +362,44 @@ async fn process_single_replay(
             .set_status(ReplayStatus::Rendering(0))
             .await;
 
-        ctx.ai()
-            .release_gpu_for_render(&cancel_notify, &cancelled)
-            .await;
+        let _gpu_guard = {
+            let lock_fut = ctx.gpu_lock().lock();
+            let cancel_fut = cancel_notify.notified();
+            tokio::pin!(cancel_fut);
+            cancel_fut.as_mut().enable();
+            if cancelled.load(Ordering::Acquire) {
+                return handle_cancelled_cleanup(
+                    &ctx,
+                    queue_message,
+                    &path,
+                    None,
+                    input_channel,
+                    user,
+                )
+                .await;
+            }
+            tokio::select! {
+                biased;
+                _ = &mut cancel_fut => {
+                    return handle_cancelled_cleanup(
+                        &ctx,
+                        queue_message,
+                        &path,
+                        None,
+                        input_channel,
+                        user,
+                    )
+                    .await;
+                }
+                guard = lock_fut => guard,
+            }
+        };
 
         if cancelled.load(Ordering::Acquire) {
             return handle_cancelled_cleanup(&ctx, queue_message, &path, None, input_channel, user).await;
         }
+
+        ctx.ai().unload_loaded_models().await;
 
         for attempt in 1..=2u8 {
             let low_vram_nvenc = attempt == 2;
@@ -409,7 +470,7 @@ async fn process_single_replay(
                         "danser reported fatal error during render"
                     );
                     (
-                        true,
+                        should_retry_low_vram(&line),
                         "Danser encountered a fatal encoding/rendering error. Check logs for details."
                             .to_owned(),
                         format!("danser fatal error: {line}"),
@@ -480,7 +541,7 @@ async fn process_single_replay(
             if can_retry && attempt == 1 {
                 warn!("Attempt 1 failed under full NVENC settings; unloading VRAM and retrying with low-VRAM GPU h264_nvenc settings");
                 cleanup_danser_intermediate(config.paths.replays(), filename).await;
-                ctx.ai().unload_idle_models().await;
+                ctx.ai().unload_loaded_models().await;
                 sleep(Duration::from_secs(1)).await;
                 ctx.replay_queue
                     .set_status(ReplayStatus::Rendering(0))
@@ -504,6 +565,7 @@ async fn process_single_replay(
             let _ = input_channel.error(&ctx, user_msg).await;
             eyre::bail!("{bail_msg}");
         }
+        drop(_gpu_guard);
 
         tracing::debug!(
             mods_bits = replay.mods,
@@ -561,6 +623,24 @@ async fn process_single_replay(
         let mut old_filepath = config.paths.replays().clone();
         old_filepath.push(format!("{filename}.mp4"));
 
+        match tokio::fs::metadata(&old_filepath).await {
+            Ok(meta) if meta.len() > 0 => {}
+            Ok(_) => {
+                cleanup_danser_outputs(config.paths.replays(), filename, &path).await;
+                let _ = input_channel
+                    .error(&ctx, "Danser exited without writing any video output.")
+                    .await;
+                eyre::bail!("danser produced an empty output file at {old_filepath:?}");
+            }
+            Err(err) => {
+                cleanup_danser_outputs(config.paths.replays(), filename, &path).await;
+                let _ = input_channel
+                    .error(&ctx, "Danser exited without creating the output video file.")
+                    .await;
+                return Err(err).context("danser output mp4 missing after exit 0");
+            }
+        }
+
         let mut new_filepath = config.paths.replays().clone();
         new_filepath.push(format!("{safe_filename}.mp4"));
 
@@ -580,6 +660,21 @@ async fn process_single_replay(
         } else {
             replay_hash
         };
+        let upload_cancel_fut = cancel_notify.notified();
+        tokio::pin!(upload_cancel_fut);
+        upload_cancel_fut.as_mut().enable();
+        if cancelled.load(Ordering::Acquire) {
+            return handle_cancelled_cleanup(
+                &ctx,
+                queue_message,
+                &path,
+                Some(&new_filepath),
+                input_channel,
+                user,
+            )
+            .await;
+        }
+
         let upload_fut = ctx.client().upload_video(
             &video_title,
             user,
@@ -590,7 +685,7 @@ async fn process_single_replay(
 
         let upload_res = tokio::select! {
             biased;
-            _ = cancel_notify.notified() => None,
+            _ = &mut upload_cancel_fut => None,
             res = upload_fut => Some(res),
         };
 
@@ -957,19 +1052,22 @@ async fn process_single_replay(
             let msg_id = sent_msg.id;
             tokio::spawn(async move {
                 sleep(Duration::from_secs(6)).await;
-                let has_video = match ctx_verify.http.message(input_channel, msg_id).await {
+                let should_retry = match ctx_verify.http.message(input_channel, msg_id).await {
                     Ok(resp) => match resp.model().await {
-                        Ok(m) => m.embeds.iter().any(|e| e.video.is_some()),
-                        Err(_) => true,
+                        Ok(m) => {
+                            let suppressed = m.flags.is_some_and(|f| {
+                                f.contains(MessageFlags::SUPPRESS_EMBEDS)
+                            });
+                            !suppressed && !m.embeds.iter().any(|e| e.video.is_some())
+                        }
+                        Err(_) => false,
                     },
-                    Err(_) => true,
+                    Err(_) => false,
                 };
-                if !has_video {
-                    let sep = if watch_url_retry.contains('?') { '&' } else { '?' };
-                    let busted = format!("{watch_url_retry}{sep}v=2");
-                    let retry_builder = MessageBuilder::new()
-                        .content(format!("<@{user}> [Replay]({busted})"))
-                        .allowed_user_mention(user);
+                if should_retry {
+                    let busted = append_cache_buster(&watch_url_retry);
+                    let retry_builder =
+                        MessageBuilder::new().content(format!("<@{user}> [Replay]({busted})"));
                     let _ = (msg_id, input_channel)
                         .update(&ctx_verify, &retry_builder)
                         .await;
@@ -1271,6 +1369,7 @@ async fn run_danser_attempt(
     let mut child = command
         .spawn()
         .map_err(|err| Report::from(err).wrap_err("failed to start danser command"))?;
+    let pgid = child.id();
 
     let stdout = child.stdout.take().expect("missing stdout on child");
     let stderr = child.stderr.take().expect("missing stderr on child");
@@ -1338,17 +1437,13 @@ async fn run_danser_attempt(
 
     match stop {
         SelectStop::Cancelled => {
-            terminate_danser_group(&mut child).await;
+            terminate_danser_group(&mut child, pgid).await;
             let _ = drain_or_abort_stdio(stdout_handle, stderr_handle).await;
             Ok(DanserAttemptOutcome::Cancelled)
         }
         SelectStop::Fatal => {
-            if tokio::time::timeout(Duration::from_millis(250), child.wait())
-                .await
-                .is_err()
-            {
-                terminate_danser_group(&mut child).await;
-            }
+            let _ = tokio::time::timeout(Duration::from_millis(250), child.wait()).await;
+            terminate_danser_group(&mut child, pgid).await;
             let (out_tail, err_tail) = drain_or_abort_stdio(stdout_handle, stderr_handle).await;
             let line = watchdog.take_fatal().unwrap_or_default();
             Ok(DanserAttemptOutcome::FatalLine {
@@ -1358,10 +1453,14 @@ async fn run_danser_attempt(
             })
         }
         SelectStop::Exit(Ok(status)) => {
+            let fatal = watchdog.take_fatal();
+            if fatal.is_some() || !status.success() {
+                terminate_danser_group(&mut child, pgid).await;
+            }
             let (out_tail, err_tail) = drain_or_abort_stdio(stdout_handle, stderr_handle).await;
             let out_tail = out_tail.unwrap_or_default();
             let err_tail = err_tail.unwrap_or_default();
-            if let Some(line) = watchdog.take_fatal() {
+            if let Some(line) = fatal {
                 return Ok(DanserAttemptOutcome::FatalLine {
                     line,
                     out_tail,
@@ -1378,12 +1477,12 @@ async fn run_danser_attempt(
             Ok(DanserAttemptOutcome::Success)
         }
         SelectStop::Exit(Err(err)) => {
-            terminate_danser_group(&mut child).await;
+            terminate_danser_group(&mut child, pgid).await;
             let _ = drain_or_abort_stdio(stdout_handle, stderr_handle).await;
             Err(Report::from(err).wrap_err("failed to run danser command"))
         }
         SelectStop::TotalTimeout => {
-            terminate_danser_group(&mut child).await;
+            terminate_danser_group(&mut child, pgid).await;
             let (out_tail, err_tail) = drain_or_abort_stdio(stdout_handle, stderr_handle).await;
             Ok(DanserAttemptOutcome::TotalTimeout {
                 out_tail: out_tail.unwrap_or_default(),
@@ -1394,7 +1493,7 @@ async fn run_danser_attempt(
             idle_secs,
             saw_progress,
         } => {
-            terminate_danser_group(&mut child).await;
+            terminate_danser_group(&mut child, pgid).await;
             let (out_tail, err_tail) = drain_or_abort_stdio(stdout_handle, stderr_handle).await;
             Ok(DanserAttemptOutcome::Stalled {
                 idle_secs,
@@ -1566,6 +1665,71 @@ pub(crate) fn extract_zip_safely(
     Ok(())
 }
 
+async fn sweep_stale_temp_dirs(dir: &Path) {
+    let Ok(mut entries) = tokio::fs::read_dir(dir).await else {
+        return;
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with(".tmp_") || name.starts_with(".old_") || name.starts_with(".flatten_tmp_") {
+            let path = entry.path();
+            if tokio::fs::metadata(&path).await.is_ok_and(|m| m.is_dir()) {
+                let _ = tokio::fs::remove_dir_all(&path).await;
+            }
+        }
+    }
+}
+
+async fn download_mapset_cancellable(
+    ctx: &Context,
+    mapset_id: u32,
+    force_redownload: bool,
+    input_channel: Id<ChannelMarker>,
+    cancel_notify: &Notify,
+    cancelled: &AtomicBool,
+) -> Result<bool> {
+    let cancel_fut = cancel_notify.notified();
+    tokio::pin!(cancel_fut);
+    cancel_fut.as_mut().enable();
+    if cancelled.load(Ordering::Acquire) {
+        return Ok(true);
+    }
+    tokio::select! {
+        biased;
+        _ = &mut cancel_fut => Ok(true),
+        res = download_mapset_inner(ctx, mapset_id, force_redownload) => {
+            if let Err(err) = res {
+                warn!("{err:?}");
+                let content = "Failed to download map. Mirrors are likely down, try again later.";
+                let _ = input_channel.error(ctx, content).await;
+                return Err(err);
+            }
+            Ok(false)
+        }
+    }
+}
+
+struct TmpExtractGuard {
+    tmp_path: PathBuf,
+    aborted: Arc<AtomicBool>,
+    armed: bool,
+}
+
+impl Drop for TmpExtractGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.aborted.store(true, Ordering::Release);
+            let path = std::mem::take(&mut self.tmp_path);
+            if !path.as_os_str().is_empty() {
+                tokio::spawn(async move {
+                    let _ = tokio::fs::remove_dir_all(&path).await;
+                });
+            }
+        }
+    }
+}
+
 pub(crate) async fn download_mapset(ctx: &Context, mapset_id: u32) -> Result<()> {
     download_mapset_inner(ctx, mapset_id, false).await
 }
@@ -1591,14 +1755,31 @@ async fn download_mapset_inner(
     let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
     let tmp_path = songs_root.join(format!(".tmp_{mapset_id}_{seq}"));
     let tmp_clone = tmp_path.clone();
+    let aborted = Arc::new(AtomicBool::new(false));
+    let aborted_clone = Arc::clone(&aborted);
+    let mut tmp_guard = TmpExtractGuard {
+        tmp_path: tmp_path.clone(),
+        aborted,
+        armed: true,
+    };
 
     let extract_res = tokio::task::spawn_blocking(move || {
-        extract_zip_safely(&bytes, &tmp_clone, MAX_UNCOMPRESSED_MAPSET_BYTES, MAX_MAPSET_ENTRIES)
+        let res = extract_zip_safely(
+            &bytes,
+            &tmp_clone,
+            MAX_UNCOMPRESSED_MAPSET_BYTES,
+            MAX_MAPSET_ENTRIES,
+        );
+        if res.is_err() || aborted_clone.load(Ordering::Acquire) {
+            let _ = std::fs::remove_dir_all(&tmp_clone);
+        }
+        res
     })
     .await
     .context("blocking zip extraction task panicked")?;
 
     if extract_res.is_err() {
+        tmp_guard.armed = false;
         let _ = tokio::fs::remove_dir_all(&tmp_path).await;
         return extract_res;
     }
@@ -1609,21 +1790,27 @@ async fn download_mapset_inner(
             if let Err(err) = tokio::fs::rename(&tmp_path, &out_path).await {
                 let _ = tokio::fs::rename(&old_tmp, &out_path).await;
                 let _ = tokio::fs::remove_dir_all(&tmp_path).await;
+                tmp_guard.armed = false;
                 return Err(err).context("failed moving extracted beatmapset into place");
             }
+            tmp_guard.armed = false;
             let _ = tokio::fs::remove_dir_all(&old_tmp).await;
         } else {
             let _ = tokio::fs::remove_dir_all(&out_path).await;
             if let Err(err) = tokio::fs::rename(&tmp_path, &out_path).await {
                 let _ = tokio::fs::remove_dir_all(&tmp_path).await;
+                tmp_guard.armed = false;
                 return Err(err).context("failed replacing cached beatmapset");
             }
+            tmp_guard.armed = false;
         }
     } else if let Err(err) = tokio::fs::rename(&tmp_path, &out_path).await {
         let _ = tokio::fs::remove_dir_all(&tmp_path).await;
+        tmp_guard.armed = false;
         return Err(err).context("failed moving extracted beatmapset into place");
     }
 
+    tmp_guard.armed = false;
     Ok(())
 }
 
@@ -2268,9 +2455,31 @@ async fn handle_cancelled_cleanup(
     Ok(())
 }
 
-pub(crate) async fn terminate_danser_group(child: &mut tokio::process::Child) {
+pub(crate) fn should_retry_low_vram(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    !["beatmap not found", "skin not found", "replay not found", "failed to load beatmap", "invalid replay", "no such file"]
+        .iter()
+        .any(|pat| lower.contains(pat))
+}
+
+pub(crate) fn append_cache_buster(url: &str) -> String {
+    let (base, frag) = match url.split_once('#') {
+        Some((b, f)) => (b, Some(f)),
+        None => (url, None),
+    };
+    let sep = if base.contains('?') { '&' } else { '?' };
+    match frag {
+        Some(f) => format!("{base}{sep}v=2#{f}"),
+        None => format!("{base}{sep}v=2"),
+    }
+}
+
+pub(crate) async fn terminate_danser_group(
+    child: &mut tokio::process::Child,
+    pgid: Option<u32>,
+) {
     #[cfg(unix)]
-    if let Some(pid) = child.id() {
+    if let Some(pid) = child.id().or(pgid) {
         if pid > 1 {
             let pgid_arg = format!("-{pid}");
             let _ = tokio::task::spawn_blocking(move || {
@@ -2500,6 +2709,24 @@ mod tests {
             ld == "/opt/danser:/opt/danser/ffmpeg/lib"
                 || ld.starts_with("/opt/danser:/opt/danser/ffmpeg/lib:"),
             "unexpected LD_LIBRARY_PATH: {ld}"
+        );
+    }
+
+    #[test]
+    fn test_should_retry_low_vram_and_append_cache_buster() {
+        assert!(!should_retry_low_vram("Error: Beatmap not found in Songs"));
+        assert!(!should_retry_low_vram("Skin not found: MySkin"));
+        assert!(!should_retry_low_vram("Invalid replay header"));
+        assert!(should_retry_low_vram("CUDA_ERROR_OUT_OF_MEMORY"));
+        assert!(should_retry_low_vram("[h264_nvenc] OpenEncodeSessionEx failed"));
+
+        assert_eq!(
+            append_cache_buster("https://replays.example.com/watch/abc"),
+            "https://replays.example.com/watch/abc?v=2"
+        );
+        assert_eq!(
+            append_cache_buster("https://replays.example.com/watch/abc?foo=1#t=10"),
+            "https://replays.example.com/watch/abc?foo=1&v=2#t=10"
         );
     }
 }

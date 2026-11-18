@@ -93,7 +93,6 @@ async fn process_shard(ctx: Arc<Context>, mut shard: Shard) {
         };
 
         ctx.cache.update(&event);
-        ctx.standby.process(&event);
         let ctx = Arc::clone(&ctx);
 
         tokio::spawn(async move {

@@ -1,8 +1,9 @@
-use std::{convert::TryFrom, process::Stdio, sync::Arc, time::Duration};
+use std::{collections::HashMap, convert::TryFrom, process::Stdio, sync::{Arc, Mutex as StdMutex}, time::Duration};
 
 use command_macros::SlashCommand;
 use eyre::Result;
-use tokio::{io::AsyncReadExt as _, process::Command, sync::Mutex};
+use once_cell::sync::Lazy;
+use tokio::{io::AsyncReadExt as _, process::Command};
 use twilight_interactions::command::{AutocompleteValue, CommandModel, CreateCommand};
 use twilight_model::{
     channel::{Attachment, Message},
@@ -38,7 +39,48 @@ use crate::{
     },
 };
 
-static SCREENSHOT_LOCK: Mutex<()> = Mutex::const_new(());
+const MAX_SCREENSHOTS_PER_USER: usize = 1;
+const MAX_ACTIVE_SCREENSHOTS: usize = 6;
+
+static ACTIVE_SCREENSHOTS: Lazy<StdMutex<HashMap<Id<UserMarker>, usize>>> =
+    Lazy::new(|| StdMutex::new(HashMap::new()));
+
+struct ScreenshotSlotGuard {
+    user: Id<UserMarker>,
+}
+
+impl ScreenshotSlotGuard {
+    fn acquire(user: Id<UserMarker>, is_owner: bool) -> std::result::Result<Self, &'static str> {
+        let mut counts = ACTIVE_SCREENSHOTS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let total: usize = counts.values().sum();
+        if total >= MAX_ACTIVE_SCREENSHOTS {
+            return Err("Too many screenshots are currently processing globally. Please wait a moment and try again.");
+        }
+        let user_active = counts.get(&user).copied().unwrap_or(0);
+        if !is_owner && user_active >= MAX_SCREENSHOTS_PER_USER {
+            return Err("You already have a screenshot in progress. Please wait for it to finish.");
+        }
+        *counts.entry(user).or_insert(0) += 1;
+        Ok(Self { user })
+    }
+}
+
+impl Drop for ScreenshotSlotGuard {
+    fn drop(&mut self) {
+        let mut counts = ACTIVE_SCREENSHOTS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(count) = counts.get_mut(&self.user) {
+            if *count <= 1 {
+                counts.remove(&self.user);
+            } else {
+                *count -= 1;
+            }
+        }
+    }
+}
 
 fn max_discord_attachment_bytes(ctx: &Context, guild_id: Option<Id<GuildMarker>>) -> usize {
     match guild_id.and_then(|gid| ctx.cache.guild(gid, |g| g.premium_tier()).ok()) {
@@ -169,9 +211,18 @@ pub async fn slash_screenshot(ctx: Arc<Context>, mut command: InteractionCommand
         _ => None,
     };
 
+    let user = command.user_id()?;
+    let is_owner = BotConfig::get().owners.contains(&user);
+    let _slot_guard = match ScreenshotSlotGuard::acquire(user, is_owner) {
+        Ok(guard) => guard,
+        Err(msg) => {
+            command.error_callback(&ctx, msg, true).await?;
+            return Ok(());
+        }
+    };
+
     command.defer(&ctx, false).await?;
 
-    let user = command.user_id()?;
     if let Err(err_msg) = check_render_access(&ctx, user, command.guild_id, command.channel_id).await {
         command.error(&ctx, err_msg).await?;
         return Ok(());
@@ -343,6 +394,15 @@ pub async fn handle_prefix_screenshot(ctx: Arc<Context>, msg: &Message, args_str
             }
         },
         None => None,
+    };
+
+    let is_owner = BotConfig::get().owners.contains(&msg.author.id);
+    let _slot_guard = match ScreenshotSlotGuard::acquire(msg.author.id, is_owner) {
+        Ok(guard) => guard,
+        Err(err_msg) => {
+            let _ = msg.error(&ctx, err_msg).await;
+            return;
+        }
     };
 
     let opts = RenderOptions {
@@ -539,8 +599,8 @@ async fn run_screenshot_inner(
         })?;
     }
 
-    let _guard = SCREENSHOT_LOCK.lock().await;
-    ctx.ai().unload_idle_models().await;
+    let _gpu_guard = ctx.gpu_lock().lock().await;
+    ctx.ai().unload_loaded_models().await;
 
     let mut danser_bin = config.paths.danser().to_owned();
     danser_bin.push("danser");
@@ -589,12 +649,23 @@ async fn run_screenshot_inner(
         tracing::warn!(?err, "failed to launch danser for screenshot");
         "Failed to run danser for screenshot.".to_owned()
     })?;
+    let pgid = child.id();
 
     let stderr_handle = child.stderr.take().map(|mut stderr| {
         tokio::spawn(async move {
             let mut buf = Vec::new();
-            let mut limited = (&mut stderr).take(16 * 1024);
-            let _ = limited.read_to_end(&mut buf).await;
+            let mut tmp = [0u8; 4096];
+            loop {
+                match stderr.read(&mut tmp).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if buf.len() < 16 * 1024 {
+                            let take = n.min(16 * 1024 - buf.len());
+                            buf.extend_from_slice(&tmp[..take]);
+                        }
+                    }
+                }
+            }
             buf
         })
     });
@@ -603,7 +674,7 @@ async fn run_screenshot_inner(
     let status = match wait_res {
         Ok(Ok(status)) => status,
         Ok(Err(err)) => {
-            terminate_danser_group(&mut child).await;
+            terminate_danser_group(&mut child, pgid).await;
             if let Some(h) = stderr_handle {
                 h.abort();
             }
@@ -613,7 +684,7 @@ async fn run_screenshot_inner(
             return Err("Failed to run danser for screenshot.".to_owned());
         }
         Err(_) => {
-            terminate_danser_group(&mut child).await;
+            terminate_danser_group(&mut child, pgid).await;
             if let Some(h) = stderr_handle {
                 h.abort();
             }

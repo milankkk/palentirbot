@@ -18,7 +18,7 @@ use tracing_subscriber::{
     EnvFilter, Layer as _,
 };
 
-pub fn init() -> WorkerGuard {
+pub fn init() -> Option<WorkerGuard> {
     // Displays ERROR, WARN, and INFO from palentirbot
     // and ERROR and WARN from dependencies
     let stdout_filter: EnvFilter = concat!(env!("CARGO_PKG_NAME"), "=info,warn")
@@ -29,30 +29,44 @@ pub fn init() -> WorkerGuard {
         .event_format(StdoutEventFormat::default())
         .with_filter(stdout_filter);
 
-    let file_appender = rolling::daily("./logs", "shishabot.log");
-    let (file_writer, guard) = NonBlocking::new(file_appender);
+    match rolling::Builder::new()
+        .rotation(rolling::Rotation::DAILY)
+        .filename_prefix("shishabot.log")
+        .build("./logs")
+    {
+        Ok(file_appender) => {
+            let (file_writer, guard) = NonBlocking::new(file_appender);
 
-    // Check RUST_LOG in .env, if it's not found it'll
-    // display ERROR, WARN, INFO, DEBUG, and TRACE from palentirbot
-    // and ERROR, WARN, INFO from dependencies.
-    let file_filter = match EnvFilter::try_from_default_env() {
-        Ok(filter) => filter,
-        Err(_) => concat!(env!("CARGO_PKG_NAME"), "=trace,info")
-            .parse()
-            .unwrap(),
-    };
+            // Check RUST_LOG in .env, if it's not found it'll
+            // display ERROR, WARN, INFO, DEBUG, and TRACE from palentirbot
+            // and ERROR, WARN, INFO from dependencies.
+            let file_filter = match EnvFilter::try_from_default_env() {
+                Ok(filter) => filter,
+                Err(_) => concat!(env!("CARGO_PKG_NAME"), "=trace,info")
+                    .parse()
+                    .unwrap(),
+            };
 
-    let file_layer = Layer::default()
-        .event_format(FileEventFormat::default())
-        .with_writer(file_writer)
-        .with_filter(file_filter);
+            let file_layer = Layer::default()
+                .event_format(FileEventFormat::default())
+                .with_writer(file_writer)
+                .with_filter(file_filter);
 
-    tracing_subscriber::registry()
-        .with(stdout_layer)
-        .with(file_layer)
-        .init();
+            tracing_subscriber::registry()
+                .with(stdout_layer)
+                .with(file_layer)
+                .init();
 
-    guard
+            Some(guard)
+        }
+        Err(err) => {
+            eprintln!(
+                "Warning: failed to initialize file logger in ./logs ({err}); continuing with stdout logging only"
+            );
+            tracing_subscriber::registry().with(stdout_layer).init();
+            None
+        }
+    }
 }
 
 struct StdoutEventFormat {

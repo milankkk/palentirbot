@@ -30,6 +30,14 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
         })
         .unwrap_or(false);
 
+    let is_dm = msg.guild_id.is_none();
+    let is_ai_channel = msg
+        .guild_id
+        .and_then(|gid| ctx.guild_settings(gid, |s| s.ai_channel))
+        .flatten()
+        == Some(msg.channel_id);
+    let ai_passive_eligible = is_reply_to_bot || is_dm || is_ai_channel;
+
     let content = match msg.content.strip_prefix(prefix.as_str()) {
         Some(rest) => rest.trim_start(),
         None => {
@@ -51,22 +59,12 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
                 }
                 return;
             }
-            let is_dm = msg.guild_id.is_none();
-            let is_ai_channel = msg
-                .guild_id
-                .and_then(|gid| ctx.guild_settings(gid, |s| s.ai_channel))
-                .flatten()
-                == Some(msg.channel_id);
-            if (is_dm || is_ai_channel)
-                && (!trimmed.is_empty() || !msg.attachments.is_empty())
-                && !crate::commands::utility::is_non_ai_command_with_prefix(trimmed, Some(&prefix))
-            {
-                crate::commands::utility::handle_prefix_ask(ctx, &msg, &msg.content, &prefix).await;
-            }
+            forward_passive_ai_if_eligible(ctx, &msg, &prefix, is_dm || is_ai_channel).await;
             return;
         }
     };
     if content.is_empty() {
+        forward_passive_ai_if_eligible(ctx, &msg, &prefix, ai_passive_eligible).await;
         return;
     }
 
@@ -247,7 +245,7 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
         // ── queue ─────────────────────────────────────────────────────────────
         "queue" => {
             use crate::util::builder::MessageBuilder;
-            let embed = crate::commands::danser::build_queue_embed(&ctx)
+            let embed = crate::commands::danser::build_queue_embed(&ctx, msg.channel_id)
                 .await
                 .build();
             let _ = msg
@@ -350,7 +348,24 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
             }
         }
 
-        // ── unknown: silently ignore ──────────────────────────────────────────
-        _ => {}
+        // ── unknown: forward to passive AI if eligible ────────────────────────
+        _ => {
+            forward_passive_ai_if_eligible(ctx, &msg, &prefix, ai_passive_eligible).await;
+        }
+    }
+}
+
+async fn forward_passive_ai_if_eligible(
+    ctx: Arc<Context>,
+    msg: &Message,
+    prefix: &str,
+    eligible: bool,
+) {
+    let trimmed = msg.content.trim();
+    if eligible
+        && (!trimmed.is_empty() || !msg.attachments.is_empty())
+        && !crate::commands::utility::is_non_ai_command_with_prefix(trimmed, Some(prefix))
+    {
+        crate::commands::utility::handle_prefix_ask(ctx, msg, &msg.content, prefix).await;
     }
 }

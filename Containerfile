@@ -51,6 +51,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libzstd1 \
     unzip \
     xvfb \
+    tini \
+    jq \
     procps \
     && rm -rf /var/lib/apt/lists/*
 
@@ -80,4 +82,4 @@ ENV DANSER_PATH="/app/data" \
     FOLDERS_PATH="/app/data" \
     AI_SYSTEM_PROMPT="/app/data/prompt.txt"
 
-ENTRYPOINT ["/app/entrypoint.sh"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/app/entrypoint.sh"]

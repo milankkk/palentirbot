@@ -1,10 +1,13 @@
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::sync::{
-    atomic::{AtomicBool, AtomicU64, Ordering},
-    Arc,
+    atomic::{AtomicU64, Ordering},
+    Arc, Mutex as StdMutex,
 };
 use tokio::sync::{Mutex, Notify};
-use twilight_model::id::{marker::UserMarker, Id};
+use twilight_model::id::{
+    marker::{ChannelMarker, UserMarker},
+    Id,
+};
 
 pub use self::cache::RenderCache;
 pub use self::data::{
@@ -29,7 +32,7 @@ pub struct ReplayQueue {
     pub cache: RenderCache,
     work_notify: Notify,
     next_job_id: AtomicU64,
-    updater_running: AtomicBool,
+    active_updaters: StdMutex<HashSet<Id<ChannelMarker>>>,
 }
 
 impl ReplayQueue {
@@ -41,18 +44,39 @@ impl ReplayQueue {
             cache: RenderCache::load().await,
             work_notify: Notify::new(),
             next_job_id: AtomicU64::new(0),
-            updater_running: AtomicBool::new(false),
+            active_updaters: StdMutex::new(HashSet::new()),
         }
     }
 
-    pub fn try_start_updater(&self) -> bool {
-        self.updater_running
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
+    pub fn try_start_channel_updater(&self, channel_id: Id<ChannelMarker>) -> bool {
+        let mut guard = self
+            .active_updaters
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        guard.insert(channel_id)
     }
 
-    pub fn finish_updater(&self) {
-        self.updater_running.store(false, Ordering::Release);
+    pub fn finish_channel_updater(&self, channel_id: Id<ChannelMarker>) {
+        let mut guard = self
+            .active_updaters
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        guard.remove(&channel_id);
+    }
+
+    /// Lock ordering invariant: ALWAYS locks `queue` BEFORE `active_updaters`.
+    pub async fn finish_channel_updater_if_idle(&self, channel_id: Id<ChannelMarker>) -> bool {
+        let q = self.queue.lock().await;
+        let has_jobs = q.iter().any(|entry| entry.input_channel == channel_id);
+        if has_jobs {
+            return false;
+        }
+        let mut updaters = self
+            .active_updaters
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        updaters.remove(&channel_id);
+        true
     }
 
     pub fn allocate_job_id(&self) -> u64 {
@@ -121,16 +145,6 @@ impl ReplayQueue {
             self.notify.notify_waiters();
             CancelResult::RemovedQueued(Box::new(removed))
         }
-    }
-
-    pub async fn is_active(&self) -> bool {
-        let is_empty = self.queue.lock().await.is_empty();
-        let status = *self.status.lock().await;
-        !is_empty || !matches!(status, ReplayStatus::Waiting)
-    }
-
-    pub async fn is_rendering(&self) -> bool {
-        matches!(*self.status.lock().await, ReplayStatus::Rendering(_))
     }
 
     pub async fn pop(&self) -> Option<ReplayData> {

@@ -34,7 +34,7 @@ pub async fn view(ctx: Arc<Context>, command: InteractionCommand) -> Result<()> 
             })
         })
         .flatten()
-        .unwrap_or_else(|| "None".to_owned());
+        .unwrap_or_else(|| "All channels (unrestricted)".to_owned());
 
     let ai_channel = ctx
         .guild_settings(guild_id, |s| s.ai_channel)

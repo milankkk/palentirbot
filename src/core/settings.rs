@@ -205,6 +205,22 @@ impl DanserSettings {
 
         self.skin.cursor.long_trail_length = self.skin.cursor.long_trail_length.clamp(0, 10_000);
         self.cursor.trail_max_length = self.cursor.trail_max_length.clamp(0, 10_000);
+
+        clamp_finite(&mut self.skin.cursor.long_trail_density, 0.1, 10.0);
+        clamp_finite(&mut self.cursor.trail_density, 0.1, 10.0);
+        clamp_finite(&mut self.playfield.background.triangles.density, 0.0, 5.0);
+        clamp_finite(&mut self.playfield.background.triangles.scale, 0.1, 5.0);
+
+        self.audio.linux_unix.bass_playback_buffer_length =
+            self.audio.linux_unix.bass_playback_buffer_length.clamp(10, 500);
+        self.audio.linux_unix.bass_device_buffer_length =
+            self.audio.linux_unix.bass_device_buffer_length.clamp(10, 500);
+        self.audio.linux_unix.bass_update_period =
+            self.audio.linux_unix.bass_update_period.clamp(1, 100);
+        self.audio.linux_unix.bass_device_update_period =
+            self.audio.linux_unix.bass_device_update_period.clamp(1, 100);
+
+        self.objects.colors.combo_colors.truncate(16);
     }
 }
 
@@ -1191,5 +1207,31 @@ mod tests {
         let serialized = serde_json::to_value(&parsed).unwrap();
         let server_obj = serialized["Servers"][0].as_object().unwrap();
         assert!(!server_obj.contains_key("output_channel"));
+    }
+
+    #[test]
+    fn danser_settings_sanitize_user_upload_clamps_and_truncates() {
+        let mut settings = DanserSettings::default();
+        settings.skin.cursor.long_trail_density = f64::INFINITY;
+        settings.cursor.trail_density = 9_999.0;
+        settings.playfield.background.triangles.density = 999.0;
+        settings.playfield.background.triangles.scale = -5.0;
+        settings.audio.linux_unix.bass_playback_buffer_length = 9_999_999;
+        settings.audio.linux_unix.bass_device_buffer_length = 1;
+        settings.audio.linux_unix.bass_update_period = 0;
+        settings.audio.linux_unix.bass_device_update_period = 50_000;
+        settings.objects.colors.combo_colors = vec![Hsv::default(); 50];
+
+        settings.sanitize_user_upload();
+
+        assert!((settings.skin.cursor.long_trail_density - 0.1).abs() < f64::EPSILON);
+        assert!((settings.cursor.trail_density - 10.0).abs() < f64::EPSILON);
+        assert!((settings.playfield.background.triangles.density - 5.0).abs() < f64::EPSILON);
+        assert!((settings.playfield.background.triangles.scale - 0.1).abs() < f64::EPSILON);
+        assert_eq!(settings.audio.linux_unix.bass_playback_buffer_length, 500);
+        assert_eq!(settings.audio.linux_unix.bass_device_buffer_length, 10);
+        assert_eq!(settings.audio.linux_unix.bass_update_period, 1);
+        assert_eq!(settings.audio.linux_unix.bass_device_update_period, 100);
+        assert_eq!(settings.objects.colors.combo_colors.len(), 16);
     }
 }

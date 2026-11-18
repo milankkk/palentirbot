@@ -253,6 +253,8 @@ pub async fn handle_owner_ai(
                 return Ok(());
             }
 
+            command.defer(&ctx, true).await?;
+
             let installed = ctx.ai().list_models().await.unwrap_or_default();
             let cfg = ctx
                 .ai()
@@ -273,7 +275,14 @@ pub async fn handle_owner_ai(
             } else {
                 format!("Switched active model to `{}`.", cfg.model)
             };
-            reply_embed(&ctx, &command, "AI Model Updated", note, None).await
+            let embed = EmbedBuilder::new()
+                .title("AI Model Updated")
+                .description(note)
+                .build();
+            command
+                .update(&ctx, &MessageBuilder::new().embed(embed))
+                .await?;
+            Ok(())
         }
         OwnerAi::Think(OwnerAiThink { enabled }) => {
             let cfg = ctx

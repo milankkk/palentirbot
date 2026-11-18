@@ -16,7 +16,6 @@ use twilight_model::{
         Id,
     },
 };
-use twilight_standby::Standby;
 
 use crate::{
     core::BotConfig, custom_client::CustomClient, database::Database, pagination::Pagination,
@@ -35,7 +34,6 @@ pub struct Context {
     pub shard_senders: Vec<MessageSender>,
     pub http: Arc<Client>,
     pub paginations: Arc<TokioMutexMap<Id<MessageMarker>, Pagination, IntBuildHasher>>,
-    pub standby: Standby,
     pub stats: Arc<BotStats>,
     pub replay_queue: ReplayQueue,
     root_settings: RootSettings,
@@ -43,6 +41,7 @@ pub struct Context {
     application_id: Id<ApplicationMarker>,
     clients: Clients,
     osu_refresh_lock: tokio::sync::Mutex<Option<Instant>>,
+    gpu_lock: tokio::sync::Mutex<()>,
     ai: AiClient,
 }
 
@@ -119,6 +118,10 @@ impl Context {
         &self.ai
     }
 
+    pub fn gpu_lock(&self) -> &tokio::sync::Mutex<()> {
+        &self.gpu_lock
+    }
+
     pub async fn new() -> Result<(Self, Vec<Shard>)> {
         let config = BotConfig::get();
 
@@ -177,11 +180,11 @@ impl Context {
             http,
             clients,
             osu_refresh_lock: tokio::sync::Mutex::new(None),
+            gpu_lock: tokio::sync::Mutex::new(()),
             shard_senders,
             application_id,
             root_settings,
             paginations: Arc::new(paginations),
-            standby: Standby::new(),
             stats,
             replay_queue: ReplayQueue::load().await,
             skin_list: Arc::new(Mutex::default()),

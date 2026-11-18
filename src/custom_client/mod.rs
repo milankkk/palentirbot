@@ -47,7 +47,7 @@ impl From<&'static BotConfig> for UploadData {
 }
 
 const MAX_DOWNLOAD_BYTES: usize = 250 * 1024 * 1024;
-const MAX_SKIN_BYTES: usize = 150 * 1024 * 1024;
+pub const MAX_SKIN_BYTES: usize = 150 * 1024 * 1024;
 
 impl CustomClient {
     pub fn new() -> Self {
@@ -123,6 +123,16 @@ impl CustomClient {
     }
 
     async fn make_get_request(&self, url: impl AsRef<str>, site: Site) -> Result<Bytes> {
+        self.make_get_request_limited(url, site, MAX_DOWNLOAD_BYTES)
+            .await
+    }
+
+    async fn make_get_request_limited(
+        &self,
+        url: impl AsRef<str>,
+        site: Site,
+        max_bytes: usize,
+    ) -> Result<Bytes> {
         let url = url.as_ref();
         let redacted_url = url.split('?').next().unwrap_or(url);
         self.ratelimit(site).await;
@@ -143,7 +153,7 @@ impl CustomClient {
             bail!("failed with status code {status} when requesting {redacted_url}");
         }
 
-        let bytes = Self::read_response_bytes_limited(response, redacted_url, MAX_DOWNLOAD_BYTES).await?;
+        let bytes = Self::read_response_bytes_limited(response, redacted_url, max_bytes).await?;
 
         tracing::debug!(
             "Got {} bytes from {redacted_url}, starts_with PK: {}",
@@ -156,6 +166,15 @@ impl CustomClient {
 
     pub async fn get_discord_attachment(&self, attachment: &Attachment) -> Result<Bytes> {
         self.make_get_request(&attachment.url, Site::DiscordAttachment)
+            .await
+    }
+
+    pub async fn get_discord_attachment_limited(
+        &self,
+        attachment: &Attachment,
+        max_bytes: usize,
+    ) -> Result<Bytes> {
+        self.make_get_request_limited(&attachment.url, Site::DiscordAttachment, max_bytes)
             .await
     }
 

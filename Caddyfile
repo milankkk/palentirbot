@@ -79,9 +79,24 @@
 </html>` 200
 	}
 
-	# Proxy upload requests to internal fileserver container
-	handle /upload* {
-		reverse_proxy fileserver:{$UPLOAD_PORT:5555}
+	# Block public access to internal fileserver endpoints (bot uploads over internal network)
+	@internal_only path /upload* /health*
+	handle @internal_only {
+		header Cache-Control "no-store"
+		header X-Robots-Tag "noindex"
+		respond "Not Found" 404
+	}
+
+	# Replay gallery at root
+	@gallery {
+		path /
+		method GET HEAD
+	}
+	handle @gallery {
+		file_server {
+			browse /etc/caddy/gallery.html
+			hide .*
+		}
 	}
 
 	# Serve static replay files

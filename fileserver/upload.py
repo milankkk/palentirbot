@@ -16,10 +16,10 @@ def _load_env_file():
                     k, v = line.split("=", 1)
                     k = k.strip()
                     v = v.strip()
-                    if len(v) >= 2 and (
-                        (v[0] == '"' and v[-1] == '"') or (v[0] == "'" and v[-1] == "'")
-                    ):
-                        v = v[1:-1]
+                    if v.startswith('"') and v.find('"', 1) != -1:
+                        v = v[1 : v.find('"', 1)]
+                    elif v.startswith("'") and v.find("'", 1) != -1:
+                        v = v[1 : v.find("'", 1)]
                     elif "#" in v:
                         v = v.split("#", 1)[0].strip()
                     if k and k not in os.environ:
@@ -30,18 +30,21 @@ def _load_env_file():
 _load_env_file()
 
 app = Flask(__name__)
-app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024  # 500 MB upload limit
+app.config["MAX_CONTENT_LENGTH"] = int(
+    os.environ.get("MAX_UPLOAD_BYTES", str(2 * 1024 * 1024 * 1024))
+)
 
 # Linked defaults matching bot configuration
 UPLOAD_DIR = os.environ.get("UPLOAD_DIR", "replays")
-SECRET = os.environ.get("UPLOAD_SECRET", "palentir_replay_secret_key")
+SECRET = (os.environ.get("UPLOAD_SECRET") or "").strip()
 BASE_URL = (os.environ.get("PUBLIC_REPLAY_BASE_URL") or os.environ.get("BASE_URL", "http://localhost:8085")).rstrip("/")
 HOST = os.environ.get("UPLOAD_HOST", "0.0.0.0")
 PORT = int(os.environ.get("UPLOAD_PORT") or os.environ.get("PORT") or 5555)
 
-if SECRET == "palentir_replay_secret_key":
-    import sys
-    print("WARNING: UPLOAD_SECRET is using the default fallback value. Set a strong secret in .env for production!", file=sys.stderr)
+if not SECRET or SECRET in ("palentir_replay_secret_key", "somethingYouMakeUp1234!"):
+    raise RuntimeError(
+        "UPLOAD_SECRET must be set to a strong non-default value in environment or .env"
+    )
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 

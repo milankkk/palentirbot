@@ -236,7 +236,7 @@ pub async fn edit(
         }
         ModifyResult::SkinNotFound => {
             let content = "No skin with the specified name is stored.\n\
-                Check `/skinlist` to see available skins.";
+                Check `/skin list` to see available skins.";
             command.error(&ctx, content).await?;
 
             Ok(())

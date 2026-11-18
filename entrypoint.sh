@@ -36,6 +36,29 @@ if [ ! -f "${DANSER_EXEC}" ]; then
     echo "[palentirbot] Danser download and extraction complete."
 fi
 
+patch_danser_settings() {
+    local file="$1"
+    local dir="$2"
+    if command -v jq >/dev/null 2>&1; then
+        local tmp="${file}.tmp"
+        if jq --arg songs "${dir}/Songs" \
+              --arg skins "${dir}/Skins" \
+              --arg replays "${dir}/Replays" \
+              '.General.OsuSongsDir = $songs
+               | .General.OsuSkinsDir = $skins
+               | .General.OsuReplaysDir = $replays
+               | .Recording.OutputDir = $replays' "$file" > "$tmp" 2>/dev/null; then
+            mv "$tmp" "$file"
+            return 0
+        fi
+        rm -f "$tmp"
+    fi
+    sed -i 's|"OsuSongsDir":.*|"OsuSongsDir": "'"${SAFE_DATA_DIR}"'/Songs",|' "$file" 2>/dev/null || true
+    sed -i 's|"OsuSkinsDir":.*|"OsuSkinsDir": "'"${SAFE_DATA_DIR}"'/Skins",|' "$file" 2>/dev/null || true
+    sed -i 's|"OsuReplaysDir":.*|"OsuReplaysDir": "'"${SAFE_DATA_DIR}"'/Replays",|' "$file" 2>/dev/null || true
+    sed -i 's|"OutputDir":.*|"OutputDir": "'"${SAFE_DATA_DIR}"'/Replays",|' "$file" 2>/dev/null || true
+}
+
 # 2. Run first-time initialization to generate settings if missing
 SETTINGS_FILE="${DATA_DIR}/settings/default.json"
 if [ ! -f "${SETTINGS_FILE}" ]; then
@@ -45,18 +68,12 @@ if [ ! -f "${SETTINGS_FILE}" ]; then
         export LD_LIBRARY_PATH="${DATA_DIR}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
         xvfb-run -a -s "-screen 0 1920x1080x24" ./danser -noupdatecheck -settings=default >/dev/null 2>&1 || true
     )
-    if [ -f "${SETTINGS_FILE}" ]; then
-        sed -i 's|"OsuSongsDir":.*|"OsuSongsDir": "'"${SAFE_DATA_DIR}"'/Songs",|' "${SETTINGS_FILE}" 2>/dev/null || true
-        sed -i 's|"OsuSkinsDir":.*|"OsuSkinsDir": "'"${SAFE_DATA_DIR}"'/Skins",|' "${SETTINGS_FILE}" 2>/dev/null || true
-        sed -i 's|"OsuReplaysDir":.*|"OsuReplaysDir": "'"${SAFE_DATA_DIR}"'/Replays",|' "${SETTINGS_FILE}" 2>/dev/null || true
-        sed -i 's|"OutputDir":.*|"OutputDir": "'"${SAFE_DATA_DIR}"'/Replays",|' "${SETTINGS_FILE}" 2>/dev/null || true
-    fi
     echo "[palentirbot] Default settings generated."
 fi
 
-# Ensure OutputDir is always patched to Replays dir even if default.json pre-existed
+# Always ensure Danser paths point inside DATA_DIR even if default.json was created on host
 if [ -f "${SETTINGS_FILE}" ]; then
-    sed -i 's|"OutputDir":.*|"OutputDir": "'"${SAFE_DATA_DIR}"'/Replays",|' "${SETTINGS_FILE}" 2>/dev/null || true
+    patch_danser_settings "${SETTINGS_FILE}" "${DATA_DIR}"
 fi
 
 # 3. Create default prompt.txt inside data directory if missing
@@ -87,6 +104,15 @@ if [ -n "${OSU_CLIENT_ID:-}" ] && [ -n "${OSU_CLIENT_SECRET:-}" ]; then
     fi
 fi
 
-# 5. Start the bot
+# 5. Start headless Xvfb display and hand PID-child directly to palentirbot (under tini)
+export DISPLAY=":99"
+Xvfb "${DISPLAY}" -screen 0 1920x1080x24 -nolisten tcp >/dev/null 2>&1 &
+XVFB_PID=$!
+for _ in $(seq 1 30); do
+    [ -S /tmp/.X11-unix/X99 ] && break
+    kill -0 "${XVFB_PID}" 2>/dev/null || break
+    sleep 0.1
+done
+
 echo "[palentirbot] Starting Discord Bot..."
-exec xvfb-run -a -s "-screen 0 1920x1080x24" /app/palentirbot "$@"
+exec /app/palentirbot "$@"

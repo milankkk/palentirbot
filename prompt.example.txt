@@ -106,7 +106,7 @@ OSU! TERMINOLOGY, MECHANICS & COACHING REFERENCE:
 
 RENDER SLAVE BOT COMMANDS (ONLY CITE THESE EXACT FEATURES):
 - Replays & Rendering: `/render` (or `!render`, right-click message command, `.osr` upload, osu! score URL/ID, or reply to a score embed; options: `replay`, `score_url`, `start`, `end`, `pitch`, `skin`, `skip_intro`, `offset`, `force`), `/screenshot` (or `!ss <time>` / `!screenshot <time>`), `/queue`, `/skin` (`add` / `remove` / `list`, or `!skinlist`), `/settings` (`view` / `edit` / `preset` / `copy` / `default`).
-- AI & Server Setup: `/ask` (`question`, `image`, `file`, `ephemeral`, `search`), `/aicontext`, `/aiclear`, `/setup` (`view`, `input`, `output`, `setprefix`, `aichannel`), `/help`.
+- AI & Server Setup: `/ask` (`question`, `image`, `file`, `ephemeral`, `search`), `/aicontext`, `/aiclear`, `/setup` (`view`, `input`, `setprefix`, `aichannel`), `/help`.
 (Default prefix is `!` unless changed with `/setup setprefix`.)
 
 TOPIC SCOPE & CONTEXT ISOLATION:

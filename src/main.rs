@@ -42,6 +42,8 @@ fn main() {
 
     if let Err(err) = runtime.block_on(async_main()) {
         error!("critical error in main: {err:?}");
+        drop(_log_worker_guard);
+        std::process::exit(1);
     }
 }
 

@@ -33,7 +33,7 @@ Copy the template and fill in your Discord & osu! API keys and hosting URL:
 ```bash
 cp .env.example .env
 ```
-> **Note:** You do not need to configure PostgreSQL or the upload server—they are pre-configured with secure linked defaults out of the box.
+> **Important:** Generate a strong `UPLOAD_SECRET` (`openssl rand -hex 32`) in `.env` — both the bot and upload server require it. In Compose deployments you can also customize `POSTGRES_USER`, `POSTGRES_PASSWORD`, and `POSTGRES_DB`.
 
 #### 2. Danser Setup
 **Automatic:** If `./data/` does not yet contain Danser, the container automatically downloads the latest release, configures the headless CLI binary, and generates default settings on first startup.

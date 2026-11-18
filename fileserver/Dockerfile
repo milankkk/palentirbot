@@ -12,4 +12,4 @@ COPY upload.py /app/upload.py
 
 EXPOSE 5555
 
-CMD ["gunicorn", "-w", "2", "-b", "0.0.0.0:5555", "--timeout", "120", "upload:app"]
+CMD ["sh", "-c", "exec gunicorn -w 2 -b 0.0.0.0:${UPLOAD_PORT:-5555} --timeout 600 upload:app"]

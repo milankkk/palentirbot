@@ -29,106 +29,186 @@ use crate::{
 /// Displays the current replay queue
 pub struct Queue;
 
-pub async fn build_queue_embed(ctx: &Context) -> EmbedBuilder {
-    let queue_guard = ctx.replay_queue.queue.lock().await;
-    let queue_guard: &std::collections::VecDeque<crate::core::replay_queue::ReplayData> =
-        &queue_guard;
+pub async fn build_queue_embed(
+    ctx: &Context,
+    viewer_channel: Id<ChannelMarker>,
+) -> EmbedBuilder {
+    build_queue_embed_with_scope(ctx, viewer_channel).await.0
+}
 
+async fn build_queue_embed_with_scope(
+    ctx: &Context,
+    viewer_channel: Id<ChannelMarker>,
+) -> (EmbedBuilder, bool) {
+    let viewer_guild = ctx
+        .cache
+        .channel(viewer_channel, |c| c.guild_id)
+        .ok()
+        .flatten();
+    let same_scope = |entry_channel: Id<ChannelMarker>| -> bool {
+        if entry_channel == viewer_channel {
+            return true;
+        }
+        let Some(vg) = viewer_guild else {
+            return false;
+        };
+        ctx.cache
+            .channel(entry_channel, |c| c.guild_id)
+            .ok()
+            .flatten()
+            == Some(vg)
+    };
+
+    let queue_guard = ctx.replay_queue.queue.lock().await;
     let status = *ctx.replay_queue.status.lock().await;
 
     let mut embed = EmbedBuilder::new()
         .title("Current queue")
         .timestamp(OffsetDateTime::now_utc());
 
+    let visible_count = queue_guard
+        .iter()
+        .filter(|entry| same_scope(entry.input_channel))
+        .count();
+
+    if queue_guard.is_empty() {
+        return (embed.description("The queue is empty"), false);
+    }
+    if visible_count == 0 {
+        return (embed.description("No replays queued for this server."), false);
+    }
+
     let mut iter = queue_guard.iter();
     if let Some(data) = iter.next() {
-        let name = "Progress".to_owned();
-        let value = format!(
-            "**<@{user}>**\n`{map}`\n\
-            Downloading: {downloading}\n\
-            Rendering: {rendering}\n\
-            Uploading: {uploading}",
-            user = data.user,
-            map = data
+        let mut fields = Vec::with_capacity(2);
+        if same_scope(data.input_channel) {
+            let raw_map = data
                 .title
-                .clone()
-                .unwrap_or_else(|| data.replay_name().into_owned()),
-            downloading = match status {
-                ReplayStatus::Waiting => ProcessStatus::Waiting,
-                ReplayStatus::Downloading => ProcessStatus::Running(None),
-                ReplayStatus::MapFound => ProcessStatus::MapFound,
-                _ => ProcessStatus::Done,
-            },
-            rendering = match status {
-                ReplayStatus::Waiting | ReplayStatus::Downloading | ReplayStatus::MapFound =>
-                    ProcessStatus::Waiting,
-                ReplayStatus::Rendering(p) => ProcessStatus::Running(Some(p)),
-                _ => ProcessStatus::Done,
-            },
-            uploading = match status {
-                ReplayStatus::Uploading => ProcessStatus::Running(None),
-                _ => ProcessStatus::Waiting,
-            },
-        );
+                .as_deref()
+                .map(str::to_owned)
+                .unwrap_or_else(|| data.replay_name().into_owned());
+            let map: String = raw_map.chars().take(250).collect();
+            let value = format!(
+                "**<@{user}>**\n`{map}`\n\
+                Downloading: {downloading}\n\
+                Rendering: {rendering}\n\
+                Uploading: {uploading}",
+                user = data.user,
+                downloading = match status {
+                    ReplayStatus::Waiting => ProcessStatus::Waiting,
+                    ReplayStatus::Downloading => ProcessStatus::Running(None),
+                    ReplayStatus::MapFound => ProcessStatus::MapFound,
+                    _ => ProcessStatus::Done,
+                },
+                rendering = match status {
+                    ReplayStatus::Waiting | ReplayStatus::Downloading | ReplayStatus::MapFound =>
+                        ProcessStatus::Waiting,
+                    ReplayStatus::Rendering(p) => ProcessStatus::Running(Some(p)),
+                    _ => ProcessStatus::Done,
+                },
+                uploading = match status {
+                    ReplayStatus::Uploading => ProcessStatus::Running(None),
+                    _ => ProcessStatus::Waiting,
+                },
+            );
+            fields.push(EmbedField {
+                inline: false,
+                name: "Progress".to_owned(),
+                value,
+            });
+        } else {
+            fields.push(EmbedField {
+                inline: false,
+                name: "Progress".to_owned(),
+                value: "Another server's replay is currently processing.".to_owned(),
+            });
+        }
 
-        let mut fields = vec![EmbedField {
-            inline: false,
-            name,
-            value,
-        }];
+        let mut upcoming_val = String::with_capacity(128);
+        const MAX_FIELD_LEN: usize = 980;
+        let mut remaining = 0usize;
 
-        if iter.len() > 0 {
-            let name = "Upcoming".to_owned();
-            let mut value = String::with_capacity(128);
-            const MAX_FIELD_LEN: usize = 980;
-            let mut remaining = 0usize;
-
-            for (data, idx) in iter.zip(2..) {
-                let title = data
-                    .title
-                    .clone()
-                    .unwrap_or_else(|| data.replay_name().into_owned());
-                let line = format!("`{idx}.` <@{}>: {title}\n", data.user);
-                if value.len() + line.len() > MAX_FIELD_LEN {
-                    remaining += 1;
-                } else {
-                    value.push_str(&line);
-                }
+        for (entry, pos) in iter.zip(2usize..) {
+            if !same_scope(entry.input_channel) {
+                continue;
             }
-            if remaining > 0 {
-                let _ = write!(value, "...and {remaining} more");
+            let raw_title = entry
+                .title
+                .as_deref()
+                .map(str::to_owned)
+                .unwrap_or_else(|| entry.replay_name().into_owned());
+            let title: String = raw_title.chars().take(120).collect();
+            let line = format!("`#{pos}` <@{}>: {title}\n", entry.user);
+            if upcoming_val.len() + line.len() > MAX_FIELD_LEN {
+                remaining += 1;
+            } else {
+                upcoming_val.push_str(&line);
             }
-            if !value.is_empty() {
-                fields.push(EmbedField {
-                    inline: false,
-                    name,
-                    value,
-                });
-            }
+        }
+        if remaining > 0 {
+            let _ = write!(upcoming_val, "...and {remaining} more");
+        }
+        if !upcoming_val.is_empty() {
+            fields.push(EmbedField {
+                inline: false,
+                name: "Upcoming".to_owned(),
+                value: upcoming_val,
+            });
         }
 
         embed = embed.fields(fields);
-    } else {
-        embed = embed.description("The queue is empty");
     }
 
-    embed
+    (embed, true)
 }
 
-struct UpdaterGuard(Arc<Context>);
+fn is_terminal_discord_error(err: &twilight_http::Error) -> bool {
+    matches!(
+        err.kind(),
+        twilight_http::error::ErrorType::Response { status, .. }
+            if matches!(status.get(), 403 | 404)
+    )
+}
+
+struct UpdaterGuard {
+    ctx: Arc<Context>,
+    channel_id: Id<ChannelMarker>,
+    armed: bool,
+}
+
+impl UpdaterGuard {
+    fn new(ctx: Arc<Context>, channel_id: Id<ChannelMarker>) -> Self {
+        Self {
+            ctx,
+            channel_id,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
 
 impl Drop for UpdaterGuard {
     fn drop(&mut self) {
-        self.0.replay_queue.finish_updater();
+        if self.armed {
+            self.ctx.replay_queue.finish_channel_updater(self.channel_id);
+        }
     }
 }
 
 pub async fn send_queue_status(ctx: Arc<Context>, channel_id: Id<ChannelMarker>) -> Result<()> {
-    if !ctx.replay_queue.try_start_updater() {
+    if !ctx.replay_queue.try_start_channel_updater(channel_id) {
         return Ok(());
     }
-    let guard = UpdaterGuard(Arc::clone(&ctx));
-    let embed = build_queue_embed(&ctx).await.build();
+    let mut guard = UpdaterGuard::new(Arc::clone(&ctx), channel_id);
+    if ctx.replay_queue.finish_channel_updater_if_idle(channel_id).await {
+        guard.disarm();
+        return Ok(());
+    }
+
+    let embed = build_queue_embed(&ctx, channel_id).await.build();
 
     let msg: Message = ctx
         .http
@@ -139,51 +219,26 @@ pub async fn send_queue_status(ctx: Arc<Context>, channel_id: Id<ChannelMarker>)
         .await?;
 
     let message_id = msg.id;
-    spawn_queue_updater_with_guard(ctx, channel_id, message_id, guard);
+    spawn_channel_queue_updater(ctx, channel_id, message_id, guard);
     Ok(())
 }
 
-pub fn spawn_queue_updater(
+fn spawn_channel_queue_updater(
     ctx: Arc<Context>,
     channel_id: Id<ChannelMarker>,
     message_id: Id<MessageMarker>,
-) {
-    if !ctx.replay_queue.try_start_updater() {
-        return;
-    }
-    let guard = UpdaterGuard(Arc::clone(&ctx));
-    spawn_queue_updater_with_guard(ctx, channel_id, message_id, guard);
-}
-
-fn spawn_queue_updater_with_guard(
-    ctx: Arc<Context>,
-    channel_id: Id<ChannelMarker>,
-    message_id: Id<MessageMarker>,
-    guard: UpdaterGuard,
+    mut guard: UpdaterGuard,
 ) {
     tokio::spawn(async move {
-        let _guard = guard;
         const MIN_EDIT_INTERVAL: Duration = Duration::from_millis(1500);
         let notify = Arc::clone(&ctx.replay_queue.notify);
         let mut last_edit = tokio::time::Instant::now() - MIN_EDIT_INTERVAL;
 
         loop {
-            // Wait for a status notification or wake periodically up to 3s
             let _ = tokio::time::timeout(Duration::from_secs(3), notify.notified()).await;
 
-            // Read current state
-            let (is_empty, status) = {
-                let is_empty = {
-                    let q = ctx.replay_queue.queue.lock().await;
-                    let q: &std::collections::VecDeque<crate::core::ReplayData> = &q;
-                    q.is_empty()
-                };
-                let status = *ctx.replay_queue.status.lock().await;
-                (is_empty, status)
-            };
-
-            // Stop only after pop has completed: queue empty and status is Waiting
-            if is_empty && matches!(status, ReplayStatus::Waiting) {
+            if ctx.replay_queue.finish_channel_updater_if_idle(channel_id).await {
+                guard.disarm();
                 let _ = ctx.http.delete_message(channel_id, message_id).await;
                 break;
             }
@@ -191,38 +246,105 @@ fn spawn_queue_updater_with_guard(
             let elapsed = last_edit.elapsed();
             if elapsed < MIN_EDIT_INTERVAL {
                 tokio::time::sleep(MIN_EDIT_INTERVAL - elapsed).await;
-                let is_now_empty = ctx.replay_queue.queue.lock().await.is_empty();
-                let now_status = *ctx.replay_queue.status.lock().await;
-                if is_now_empty && matches!(now_status, ReplayStatus::Waiting) {
+                if ctx.replay_queue.finish_channel_updater_if_idle(channel_id).await {
+                    guard.disarm();
                     let _ = ctx.http.delete_message(channel_id, message_id).await;
                     break;
                 }
             }
 
-            let embed = build_queue_embed(&ctx).await.build();
-            let _ = ctx
+            let embed = build_queue_embed(&ctx, channel_id).await.build();
+            if let Err(err) = ctx
                 .http
                 .update_message(channel_id, message_id)
                 .embeds(Some(&[embed]))
-                .await;
+                .await
+            {
+                if is_terminal_discord_error(&err) {
+                    break;
+                }
+            }
+            last_edit = tokio::time::Instant::now();
+        }
+    });
+}
+
+fn spawn_slash_queue_updater(
+    ctx: Arc<Context>,
+    channel_id: Id<ChannelMarker>,
+    message_id: Id<MessageMarker>,
+) {
+    tokio::spawn(async move {
+        const MIN_EDIT_INTERVAL: Duration = Duration::from_millis(1500);
+        const MAX_WATCH_DURATION: Duration = Duration::from_secs(300);
+        let notify = Arc::clone(&ctx.replay_queue.notify);
+        let deadline = tokio::time::Instant::now() + MAX_WATCH_DURATION;
+        let mut last_edit = tokio::time::Instant::now() - MIN_EDIT_INTERVAL;
+
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            let wait = remaining.min(Duration::from_secs(3));
+            let _ = tokio::time::timeout(wait, notify.notified()).await;
+
+            let (embed, has_visible) = build_queue_embed_with_scope(&ctx, channel_id).await;
+            if !has_visible {
+                let _ = ctx
+                    .http
+                    .update_message(channel_id, message_id)
+                    .embeds(Some(&[embed.build()]))
+                    .await;
+                break;
+            }
+
+            let elapsed = last_edit.elapsed();
+            if elapsed < MIN_EDIT_INTERVAL {
+                let step = (MIN_EDIT_INTERVAL - elapsed)
+                    .min(deadline.saturating_duration_since(tokio::time::Instant::now()));
+                if !step.is_zero() {
+                    tokio::time::sleep(step).await;
+                }
+                let (embed_now, still_visible) = build_queue_embed_with_scope(&ctx, channel_id).await;
+                if !still_visible {
+                    let _ = ctx
+                        .http
+                        .update_message(channel_id, message_id)
+                        .embeds(Some(&[embed_now.build()]))
+                        .await;
+                    break;
+                }
+            }
+
+            let (embed, still_visible) = build_queue_embed_with_scope(&ctx, channel_id).await;
+            if let Err(err) = ctx
+                .http
+                .update_message(channel_id, message_id)
+                .embeds(Some(&[embed.build()]))
+                .await
+            {
+                if is_terminal_discord_error(&err) {
+                    break;
+                }
+            }
+            if !still_visible {
+                break;
+            }
             last_edit = tokio::time::Instant::now();
         }
     });
 }
 
 async fn slash_queue(ctx: Arc<Context>, command: InteractionCommand) -> Result<()> {
-    let embed = build_queue_embed(&ctx).await;
+    let (embed, has_visible) = build_queue_embed_with_scope(&ctx, command.channel_id).await;
     let builder = MessageBuilder::new().embed(embed);
     command.callback(&ctx, builder, false).await?;
 
-    let is_active = ctx.replay_queue.is_active().await;
-
-    if !is_active {
+    if !has_visible {
         return Ok(());
     }
 
-    // Fix 1: interaction() is a method call, not a field
-    // Fix 2: explicit Message type annotation to help inference
     let msg: Message = ctx
         .interaction()
         .response(&command.token)
@@ -230,10 +352,7 @@ async fn slash_queue(ctx: Arc<Context>, command: InteractionCommand) -> Result<(
         .model()
         .await?;
 
-    let channel_id = msg.channel_id;
-    let message_id = msg.id;
-
-    spawn_queue_updater(ctx, channel_id, message_id);
+    spawn_slash_queue_updater(ctx, msg.channel_id, msg.id);
 
     Ok(())
 }

@@ -398,13 +398,11 @@ pub async fn finalize_enqueue(
     let max_per_user =
         (!BotConfig::get().owners.contains(&user)).then_some(MAX_ACTIVE_RENDERS_PER_USER);
     match ctx.replay_queue.push(replay_data, max_per_user).await {
-        Ok((was_empty, _)) => {
-            if was_empty {
-                let ctx_clone = Arc::clone(&ctx);
-                tokio::spawn(async move {
-                    let _ = send_queue_status(ctx_clone, input_channel).await;
-                });
-            }
+        Ok((_, _)) => {
+            let ctx_clone = Arc::clone(&ctx);
+            tokio::spawn(async move {
+                let _ = send_queue_status(ctx_clone, input_channel).await;
+            });
         }
         Err(active) => {
             let _ = tokio::fs::remove_file(&osr_path).await;
@@ -705,13 +703,17 @@ pub async fn prepare_attachment_replay_data(
     player_hint: Option<String>,
     opts: RenderOptions,
 ) -> std::result::Result<ReplayData, String> {
+    const MAX_OSR_BYTES: u64 = 10 * 1024 * 1024;
     if !matches!(att.filename.rsplit('.').next(), Some(ext) if ext.eq_ignore_ascii_case("osr")) {
         return Err("The attachment must be a `.osr` file!".to_owned());
+    }
+    if att.size > MAX_OSR_BYTES {
+        return Err("The `.osr` file is too large (max 10 MB).".to_owned());
     }
 
     let bytes = ctx
         .client()
-        .get_discord_attachment(att)
+        .get_discord_attachment_limited(att, MAX_OSR_BYTES as usize)
         .await
         .map_err(|err| {
             tracing::error!(?err, "failed to download replay attachment");

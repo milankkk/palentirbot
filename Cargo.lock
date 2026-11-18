@@ -1526,7 +1526,6 @@ dependencies = [
  "twilight-http",
  "twilight-interactions",
  "twilight-model",
- "twilight-standby",
  "zip",
 ]
 
@@ -3051,19 +3050,6 @@ dependencies = [
  "serde-value",
  "serde_repr",
  "time",
-]
-
-[[package]]
-name = "twilight-standby"
-version = "0.16.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "375267fde44a8d52a8bf01c60d0769d9d2a289d056f278da4e99186ae04c5903"
-dependencies = [
- "dashmap",
- "futures-core",
- "tokio",
- "tracing",
- "twilight-model",
 ]
 
 [[package]]
