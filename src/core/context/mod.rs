@@ -51,7 +51,6 @@ impl Context {
         self.http.interaction(self.application_id)
     }
 
-    #[allow(dead_code)]
     pub fn bot_user_id(&self) -> Id<UserMarker> {
         self.application_id.cast()
     }

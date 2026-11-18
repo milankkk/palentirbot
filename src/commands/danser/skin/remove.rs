@@ -50,6 +50,16 @@ pub async fn remove(
         .await
         .context("failed to read entry in skins folder")?
     {
+        let Ok(ft) = entry.file_type().await else {
+            continue;
+        };
+        if !ft.is_dir() {
+            continue;
+        }
+        let name = entry.file_name();
+        if name.to_string_lossy().starts_with('.') {
+            continue;
+        }
         skin_list.push(entry);
     }
 
@@ -57,7 +67,15 @@ pub async fn remove(
 
     let skin_to_remove_opt = index.checked_sub(1).and_then(|idx| skin_list.get(idx));
     if let Some(skin_to_remove) = skin_to_remove_opt {
-        fs::remove_dir_all(skin_to_remove.path()).await?;
+        let target = skin_to_remove.path();
+        if target.parent() != Some(skin_path.as_path()) {
+            command.error(&ctx, "Invalid skin directory path.").await?;
+            return Ok(());
+        }
+        if let Err(err) = fs::remove_dir_all(&target).await {
+            let _ = command.error(&ctx, GENERAL_ISSUE).await;
+            return Err(err).context("failed to delete skin directory");
+        }
 
         // Reset the skin list cache
         ctx.skin_list().clear();

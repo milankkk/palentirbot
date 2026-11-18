@@ -46,6 +46,7 @@ pub struct SetupView;
 pub struct SetupInput {
     /// Add or remove a channel
     action: InputAction,
+    #[command(channel_types = "guild_text guild_announcement")]
     /// The channel you want to add/remove
     channel: Id<ChannelMarker>,
 }
@@ -62,6 +63,7 @@ pub enum InputAction {
 #[command(name = "output")]
 /// Configure the channel in which the replay will be sent (omit to reset)
 pub struct SetupOutput {
+    #[command(channel_types = "guild_text guild_announcement")]
     /// The channel you want as the output channel (leave empty to reset to requesting channel)
     pub channel: Option<Id<ChannelMarker>>,
 }
@@ -78,6 +80,7 @@ pub struct SetupSetPrefix {
 #[command(name = "aichannel")]
 /// Set a dedicated AI chat channel where no prefix is required (omit to clear)
 pub struct SetupAiChannel {
+    #[command(channel_types = "guild_text guild_announcement")]
     /// Channel for prefixless AI chat (leave empty to clear)
     pub channel: Option<Id<ChannelMarker>>,
 }

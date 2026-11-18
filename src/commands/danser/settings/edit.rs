@@ -25,33 +25,41 @@ pub(crate) fn autocomplete_skins(ctx: &Context, input: &str) -> Result<Vec<Comma
     let no_underscores = input.cow_replace('_', " ");
     let skin = no_underscores.cow_to_ascii_lowercase();
 
-    let mut skins: Vec<_> = ctx
+    let mut skins: Vec<(String, String)> = ctx
         .skin_list()
         .get()?
         .iter()
-        .map(|skin| {
-            skin.to_string_lossy()
-                .cow_replace('_', " ")
-                .to_ascii_lowercase()
+        .filter_map(|skin_os| {
+            let raw_name = skin_os.to_string_lossy().into_owned();
+            if raw_name.len() > 100 {
+                return None;
+            }
+            let norm = raw_name.cow_replace('_', " ").to_ascii_lowercase();
+            norm.contains(skin.as_ref()).then_some((norm, raw_name))
         })
-        .filter(|haystack| haystack.contains(skin.as_ref()))
         .take(25)
         .collect();
 
-    skins.sort_unstable_by_key(|opt| levenshtein_distance(opt, skin.as_ref()).0);
+    skins.sort_unstable_by_key(|(norm, _)| levenshtein_distance(norm, skin.as_ref()).0);
 
     Ok(skins
         .into_iter()
-        .map(|skin| CommandOptionChoice {
-            name: skin.clone(),
-            name_localizations: None,
-            value: twilight_model::application::command::CommandOptionChoiceValue::String(skin),
+        .map(|(norm, raw_name)| {
+            let display: String = norm.chars().take(100).collect();
+            CommandOptionChoice {
+                name: display,
+                name_localizations: None,
+                value: twilight_model::application::command::CommandOptionChoiceValue::String(
+                    raw_name,
+                ),
+            }
         })
         .collect())
 }
 
 pub(crate) fn resolve_skin_name(ctx: &Context, skin: &str) -> Result<Option<String>> {
-    let skin_lower = skin.trim().cow_replace('_', " ").to_ascii_lowercase();
+    let trimmed = skin.trim();
+    let skin_lower = trimmed.cow_replace('_', " ").to_ascii_lowercase();
     if skin_lower.is_empty() {
         return Ok(None);
     }
@@ -60,6 +68,9 @@ pub(crate) fn resolve_skin_name(ctx: &Context, skin: &str) -> Result<Option<Stri
     let skins = skin_list.get()?;
     Ok(skins.iter().find_map(|skin_| {
         let s = skin_.to_string_lossy();
+        if s.eq_ignore_ascii_case(trimmed) {
+            return Some(s.into_owned());
+        }
         let norm = s.cow_replace('_', " ").to_ascii_lowercase();
         (norm == skin_lower).then(|| s.into_owned())
     }))
@@ -134,33 +145,46 @@ pub async fn edit(
         }
     };
 
+    command.defer(&ctx, false).await?;
+
     let author = command.user_id()?;
 
     // Retrieve attachment if provided
     let attached = if let Some(ref attachment) = args.file {
         if !matches!(attachment.filename.rsplit('.').next(), Some(ext) if ext.eq_ignore_ascii_case("json")) {
             let content = "The attached file must be of type .json";
-            command.error_callback(&ctx, content, false).await?;
+            command.error(&ctx, content).await?;
+
+            return Ok(());
+        }
+
+        const MAX_SETTINGS_JSON_BYTES: u64 = 256 * 1024;
+        if attachment.size > MAX_SETTINGS_JSON_BYTES {
+            let content = "The attached settings file is too large (max 256 KB).";
+            command.error(&ctx, content).await?;
 
             return Ok(());
         }
 
         match ctx.client().get_discord_attachment(attachment).await {
             Ok(bytes) => match serde_json::from_slice::<DanserSettings>(&bytes) {
-                Ok(settings) => Some(settings),
+                Ok(mut settings) => {
+                    settings.sanitize_user_upload();
+                    Some(settings)
+                }
                 Err(err) => {
                     let content = format!(
                         "Failed to deserialize the attached .json data into danser settings: {err}\n\
                         Be sure you provide valid danser settings."
                     );
-                    command.error_callback(&ctx, content, false).await?;
+                    command.error(&ctx, content).await?;
 
                     return Ok(());
                 }
             },
             Err(err) => {
                 let content = "Failed to download the provided attachment";
-                let _ = command.error_callback(&ctx, content, false).await;
+                let _ = command.error(&ctx, content).await;
 
                 return Err(err.wrap_err("failed to download settings attachment"));
             }
@@ -190,7 +214,7 @@ pub async fn edit(
         ModifyResult::Change(changed) if changed || had_attachment => {
             if let Err(err) = save_user_settings(author, command.id, &user_path, &settings).await {
                 let content = "Failed to save modified settings";
-                let _ = command.error_callback(&ctx, content, false).await;
+                let _ = command.error(&ctx, content).await;
                 return Err(err);
             }
 
@@ -198,7 +222,7 @@ pub async fn edit(
             let embed = create_settings_embed(user, &settings);
             let content = "Successfully changed settings!";
             let builder = MessageBuilder::new().content(content).embed(embed);
-            command.callback(&ctx, builder, false).await?;
+            command.update(&ctx, &builder).await?;
 
             Ok(())
         }
@@ -206,20 +230,20 @@ pub async fn edit(
             let user = command.user()?;
             let embed = create_settings_embed(user, &settings);
             let builder = MessageBuilder::new().embed(embed);
-            command.callback(&ctx, builder, false).await?;
+            command.update(&ctx, &builder).await?;
 
             Ok(())
         }
         ModifyResult::SkinNotFound => {
             let content = "No skin with the specified name is stored.\n\
                 Check `/skinlist` to see available skins.";
-            command.error_callback(&ctx, content, false).await?;
+            command.error(&ctx, content).await?;
 
             Ok(())
         }
         ModifyResult::Err(err) => {
             let content = "Something went wrong while modifying the settings";
-            let _ = command.error_callback(&ctx, content, false).await;
+            let _ = command.error(&ctx, content).await;
 
             Err(err.wrap_err("failed to modify settings"))
         }

@@ -7,7 +7,7 @@ use twilight_model::channel::Attachment;
 
 use super::render_score::{
     build_queue_added_message, check_render_access, check_user_queue_limit, finalize_enqueue,
-    parse_osu_score_url, prepare_attachment_replay_data, prepare_score_by_id,
+    parse_osu_score_ref, prepare_attachment_replay_data, prepare_score_by_id, ParsedScoreUrl,
     ScorePrepareOutcome,
 };
 use super::settings::{autocomplete_skins, resolve_skin_name};
@@ -135,8 +135,14 @@ pub async fn slash_render(ctx: Arc<Context>, mut command: InteractionCommand) ->
     }
 
     let parsed_score_id = match score_url {
-        Some(ref url_str) if attachment.is_none() => match parse_osu_score_url(url_str) {
-            Some(id) => Some(id),
+        Some(ref url_str) if attachment.is_none() => match parse_osu_score_ref(url_str) {
+            Some(ParsedScoreUrl::UnsupportedMode) => {
+                command
+                    .error_callback(&ctx, "danser only accepts osu!standard plays, sorry :(", true)
+                    .await?;
+                return Ok(());
+            }
+            Some(parsed) => Some(parsed),
             None => {
                 command
                     .error_callback(
@@ -248,10 +254,10 @@ pub async fn slash_render(ctx: Arc<Context>, mut command: InteractionCommand) ->
                 return Ok(());
             }
         }
-    } else if let Some(score_id) = parsed_score_id {
+    } else if let Some(score_ref) = parsed_score_id {
         match prepare_score_by_id(
             &ctx,
-            score_id,
+            score_ref,
             command.channel_id,
             output_channel,
             user,
@@ -265,7 +271,7 @@ pub async fn slash_render(ctx: Arc<Context>, mut command: InteractionCommand) ->
                 return Ok(());
             }
             Err(err) => {
-                tracing::warn!(?err, score_id, "failed to fetch score by ID");
+                tracing::warn!(?err, ?score_ref, "failed to fetch score by ID");
                 command
                     .error(
                         &ctx,

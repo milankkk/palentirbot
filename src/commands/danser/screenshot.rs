@@ -1,25 +1,32 @@
-use std::{convert::TryFrom, sync::Arc, time::Duration};
+use std::{convert::TryFrom, process::Stdio, sync::Arc, time::Duration};
 
 use command_macros::SlashCommand;
 use eyre::Result;
-use tokio::{process::Command, sync::Mutex};
+use tokio::{io::AsyncReadExt as _, process::Command, sync::Mutex};
 use twilight_interactions::command::{AutocompleteValue, CommandModel, CreateCommand};
 use twilight_model::{
     channel::{Attachment, Message},
-    id::{marker::UserMarker, Id},
+    guild::PremiumTier,
+    id::{
+        marker::{GuildMarker, UserMarker},
+        Id,
+    },
 };
 
 use super::{
     render_score::{
-        check_render_access, parse_osu_score_url, prepare_attachment_replay_data,
+        check_render_access, parse_osu_score_ref, prepare_attachment_replay_data,
         prepare_score_by_id, render_score_from_message, split_quoted_tokens, EmbedRenderOutcome,
-        ScorePrepareOutcome,
+        ParsedScoreUrl, ScorePrepareOutcome,
     },
     settings::{autocomplete_skins, resolve_skin_name},
 };
 use crate::{
     core::{
-        replay_queue::{process::download_mapset, RenderOptions, ReplayData, TimePoints},
+        replay_queue::{
+            process::{download_mapset, terminate_danser_group},
+            RenderOptions, ReplayData, TimePoints,
+        },
         BotConfig, Context,
     },
     util::{
@@ -29,6 +36,14 @@ use crate::{
 };
 
 static SCREENSHOT_LOCK: Mutex<()> = Mutex::const_new(());
+
+fn max_discord_attachment_bytes(ctx: &Context, guild_id: Option<Id<GuildMarker>>) -> usize {
+    match guild_id.and_then(|gid| ctx.cache.guild(gid, |g| g.premium_tier()).ok()) {
+        Some(PremiumTier::Tier3) => 100 * 1024 * 1024,
+        Some(PremiumTier::Tier2) => 50 * 1024 * 1024,
+        _ => 10 * 1024 * 1024,
+    }
+}
 
 #[derive(CreateCommand, SlashCommand)]
 #[command(name = "screenshot")]
@@ -129,8 +144,14 @@ pub async fn slash_screenshot(ctx: Arc<Context>, mut command: InteractionCommand
     };
 
     let parsed_score_id = match score_url {
-        Some(ref url_str) if attachment.is_none() => match parse_osu_score_url(url_str) {
-            Some(id) => Some(id),
+        Some(ref url_str) if attachment.is_none() => match parse_osu_score_ref(url_str) {
+            Some(ParsedScoreUrl::UnsupportedMode) => {
+                command
+                    .error_callback(&ctx, "danser only accepts osu!standard plays, sorry :(", true)
+                    .await?;
+                return Ok(());
+            }
+            Some(parsed) => Some(parsed),
             None => {
                 command
                     .error_callback(
@@ -177,10 +198,10 @@ pub async fn slash_screenshot(ctx: Arc<Context>, mut command: InteractionCommand
                 return Ok(());
             }
         }
-    } else if let Some(score_id) = parsed_score_id {
+    } else if let Some(score_ref) = parsed_score_id {
         match prepare_score_by_id(
             &ctx,
-            score_id,
+            score_ref,
             command.channel_id,
             command.channel_id,
             user,
@@ -194,7 +215,7 @@ pub async fn slash_screenshot(ctx: Arc<Context>, mut command: InteractionCommand
                 return Ok(());
             }
             Err(err) => {
-                tracing::warn!(?err, score_id, "failed to fetch score for screenshot");
+                tracing::warn!(?err, ?score_ref, "failed to fetch score for screenshot");
                 command
                     .error(&ctx, "Could not fetch that score from the osu! API.")
                     .await?;
@@ -207,6 +228,18 @@ pub async fn slash_screenshot(ctx: Arc<Context>, mut command: InteractionCommand
 
     match take_replay_screenshot(&ctx, replay_data, secs, command.id, user).await {
         Ok((png_bytes, caption)) => {
+            let max_bytes = max_discord_attachment_bytes(&ctx, command.guild_id);
+            if png_bytes.len() > max_bytes {
+                let mb = png_bytes.len() as f64 / (1024.0 * 1024.0);
+                let limit_mb = max_bytes / (1024 * 1024);
+                command
+                    .error(
+                        &ctx,
+                        format!("Screenshot PNG ({mb:.2} MiB) exceeds this server's {limit_mb} MiB upload limit."),
+                    )
+                    .await?;
+                return Ok(());
+            }
             let builder = MessageBuilder::new()
                 .content(caption)
                 .attachment(format!("screenshot_{secs}s.png"), png_bytes);
@@ -237,28 +270,52 @@ pub async fn handle_prefix_screenshot(ctx: Arc<Context>, msg: &Message, args_str
     };
 
     let mut time_secs: Option<u32> = None;
-    let mut score_id: Option<u64> = None;
+    let mut score_id: Option<ParsedScoreUrl> = None;
     let mut raw_skin: Option<String> = None;
 
     for token in tokens {
-        if let Some(v) = token.strip_prefix("skin=").or_else(|| token.strip_prefix("SKIN=")) {
-            let trimmed = v.trim();
-            if trimmed.is_empty() {
-                let _ = msg.error(&ctx, "`skin=` cannot be empty.").await;
+        if let Some((key, val)) = token.split_once('=') {
+            match key.to_ascii_lowercase().as_str() {
+                "skin" => {
+                    let trimmed = val.trim();
+                    if trimmed.is_empty() {
+                        let _ = msg.error(&ctx, "`skin=` cannot be empty.").await;
+                        return;
+                    }
+                    raw_skin = Some(trimmed.to_owned());
+                    continue;
+                }
+                "time" | "t" if time_secs.is_none() => {
+                    match TimePoints::parse_single(val) {
+                        Ok(s) => time_secs = Some(s),
+                        Err(e) => {
+                            let _ = msg
+                                .error(&ctx, format!("Invalid timestamp `{val}`: {e}"))
+                                .await;
+                            return;
+                        }
+                    }
+                    continue;
+                }
+                _ => {}
+            }
+        }
+
+        if let Some(parsed) = parse_osu_score_ref(&token) {
+            if matches!(parsed, ParsedScoreUrl::UnsupportedMode) {
+                let _ = msg
+                    .error(&ctx, "danser only accepts osu!standard plays, sorry :(")
+                    .await;
                 return;
             }
-            raw_skin = Some(trimmed.to_owned());
-        } else if let Some(id) = parse_osu_score_url(&token) {
-            score_id = Some(id);
+            score_id = Some(parsed);
         } else if time_secs.is_none() {
-            let time_tok = token
-                .strip_prefix("time=")
-                .or_else(|| token.strip_prefix("t="))
-                .unwrap_or(&token);
-            match TimePoints::parse_single(time_tok) {
+            match TimePoints::parse_single(&token) {
                 Ok(s) => time_secs = Some(s),
                 Err(e) => {
-                    let _ = msg.error(&ctx, format!("Invalid timestamp `{time_tok}`: {e}")).await;
+                    let _ = msg
+                        .error(&ctx, format!("Invalid timestamp `{token}`: {e}"))
+                        .await;
                     return;
                 }
             }
@@ -328,7 +385,7 @@ pub async fn handle_prefix_screenshot(ctx: Arc<Context>, msg: &Message, args_str
                 return;
             }
             Err(err) => {
-                tracing::warn!(?err, score_id = sid, "failed to fetch score for !ss");
+                tracing::warn!(?err, score_id = ?sid, "failed to fetch score for !ss");
                 let _ = msg
                     .error(&ctx, "Could not fetch that score from the osu! API.")
                     .await;
@@ -391,14 +448,35 @@ pub async fn handle_prefix_screenshot(ctx: Arc<Context>, msg: &Message, args_str
 
     match take_replay_screenshot(&ctx, replay_data, secs, msg.id, msg.author.id).await {
         Ok((png_bytes, caption)) => {
-            if let Some(ref ph) = status_msg {
-                let _ = ph.delete(&ctx).await;
+            let max_bytes = max_discord_attachment_bytes(&ctx, msg.guild_id);
+            if png_bytes.len() > max_bytes {
+                if let Some(ref ph) = status_msg {
+                    let _ = ph.delete(&ctx).await;
+                }
+                let mb = png_bytes.len() as f64 / (1024.0 * 1024.0);
+                let limit_mb = max_bytes / (1024 * 1024);
+                let _ = msg
+                    .error(
+                        &ctx,
+                        format!("Screenshot PNG ({mb:.2} MiB) exceeds this server's {limit_mb} MiB upload limit."),
+                    )
+                    .await;
+                return;
             }
             let builder = MessageBuilder::new()
                 .content(caption)
                 .attachment(format!("screenshot_{secs}s.png"), png_bytes)
                 .reply(msg.id);
-            let _ = msg.channel_id.create_message(&ctx, &builder).await;
+            let send_res = msg.channel_id.create_message(&ctx, &builder).await;
+            if let Some(ref ph) = status_msg {
+                let _ = ph.delete(&ctx).await;
+            }
+            if let Err(err) = send_res {
+                tracing::warn!(?err, "failed to upload screenshot message");
+                let _ = msg
+                    .error(&ctx, "Failed to upload screenshot to Discord.")
+                    .await;
+            }
         }
         Err(err_msg) => {
             if let Some(ref ph) = status_msg {
@@ -441,7 +519,15 @@ async fn run_screenshot_inner(
         return Err("Missing the beatmap hash in the replay file.".to_owned());
     };
 
-    let map = ctx.osu().beatmap().checksum(hash).await.map_err(|err| {
+    let mut map_res = ctx.osu().beatmap().checksum(hash).await;
+    if let Err(ref err) = map_res {
+        if Context::is_osu_auth_error(err) {
+            if let Ok(fresh) = ctx.refresh_osu_client().await {
+                map_res = fresh.beatmap().checksum(hash).await;
+            }
+        }
+    }
+    let map = map_res.map_err(|err| {
         tracing::warn!(?err, %hash, "failed to resolve beatmap for screenshot");
         "Failed to retrieve map from osu! API. Maybe it's unsubmitted?".to_owned()
     })?;
@@ -485,8 +571,12 @@ async fn run_screenshot_inner(
     out_png.push(format!("screenshots/{out_name}.png"));
 
     let mut cmd = Command::new(&danser_bin);
+    #[cfg(unix)]
+    cmd.process_group(0);
     cmd.current_dir(config.paths.danser())
         .kill_on_drop(true)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
         .arg("-noupdatecheck")
         .arg("-replay")
         .arg(&canonical_osr)
@@ -501,17 +591,57 @@ async fn run_screenshot_inner(
         cmd.args(["-skin", skin_name]);
     }
 
-    let output = tokio::time::timeout(Duration::from_secs(30), cmd.output())
-        .await
-        .map_err(|_| "danser screenshot timed out after 30s.".to_owned())?
-        .map_err(|err| {
-            tracing::warn!(?err, "failed to launch danser for screenshot");
-            "Failed to run danser for screenshot.".to_owned()
-        })?;
+    let mut child = cmd.spawn().map_err(|err| {
+        tracing::warn!(?err, "failed to launch danser for screenshot");
+        "Failed to run danser for screenshot.".to_owned()
+    })?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        tracing::warn!(status = %output.status, stderr = %stderr, "danser -ss failed");
+    let stderr_handle = child.stderr.take().map(|mut stderr| {
+        tokio::spawn(async move {
+            let mut buf = Vec::new();
+            let mut limited = (&mut stderr).take(16 * 1024);
+            let _ = limited.read_to_end(&mut buf).await;
+            buf
+        })
+    });
+
+    let wait_res = tokio::time::timeout(Duration::from_secs(30), child.wait()).await;
+    let status = match wait_res {
+        Ok(Ok(status)) => status,
+        Ok(Err(err)) => {
+            terminate_danser_group(&mut child).await;
+            if let Some(h) = stderr_handle {
+                h.abort();
+            }
+            let _ = tokio::fs::remove_file(&out_png).await;
+            tracing::warn!(?err, "failed awaiting danser screenshot process");
+            return Err("Failed to run danser for screenshot.".to_owned());
+        }
+        Err(_) => {
+            terminate_danser_group(&mut child).await;
+            if let Some(h) = stderr_handle {
+                h.abort();
+            }
+            let _ = tokio::fs::remove_file(&out_png).await;
+            return Err("danser screenshot timed out after 30s.".to_owned());
+        }
+    };
+
+    let stderr_bytes = if let Some(mut h) = stderr_handle {
+        match tokio::time::timeout(Duration::from_secs(1), &mut h).await {
+            Ok(Ok(buf)) => buf,
+            _ => {
+                h.abort();
+                Vec::new()
+            }
+        }
+    } else {
+        Vec::new()
+    };
+
+    if !status.success() {
+        let stderr = String::from_utf8_lossy(&stderr_bytes);
+        tracing::warn!(status = %status, stderr = %stderr, "danser -ss failed");
         let _ = tokio::fs::remove_file(&out_png).await;
         return Err("danser failed to capture screenshot (timestamp may be past map end).".to_owned());
     }

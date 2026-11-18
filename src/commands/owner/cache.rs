@@ -30,6 +30,7 @@ pub async fn cache(ctx: Arc<Context>, command: InteractionCommand) -> Result<()>
 
     let embed = EmbedBuilder::new()
         .description(description)
+        .timestamp(ctx.stats.start_time)
         .footer(FooterBuilder::new("Boot time"))
         .build();
 

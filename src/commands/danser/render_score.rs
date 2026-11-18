@@ -1,4 +1,10 @@
-use std::{fmt::Write as _, sync::Arc};
+use std::{
+    fmt::Write as _,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+};
 
 use super::queue::send_queue_status;
 use super::settings::resolve_skin_name;
@@ -8,13 +14,17 @@ use crate::{
         BotConfig, Context, ReplayData, TimePoints,
     },
     util::{
-        builder::MessageBuilder, interaction::InteractionCommand, Authored, InteractionCommandExt,
+        builder::MessageBuilder, constants::GENERAL_ISSUE, interaction::InteractionCommand,
+        Authored, ChannelExt, InteractionCommandExt, MessageExt,
     },
 };
 use command_macros::msg_command;
 use eyre::{Context as _, Report, Result};
 use osu_db::{Mode, Replay};
-use rosu_v2::prelude::{GameMode, Score};
+use rosu_v2::{
+    error::OsuError,
+    prelude::{GameMode, Score},
+};
 use tokio::{fs::File, io::AsyncWriteExt as _};
 use twilight_interactions::command::CommandInputData;
 use twilight_model::{
@@ -34,6 +44,17 @@ use twilight_model::{
 };
 
 const MAX_ACTIVE_RENDERS_PER_USER: usize = 3;
+static OSR_FILE_SEQ: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ParsedScoreUrl {
+    /// `/scores/<id>` or bare numeric `<id>`
+    Id(u64),
+    /// `/scores/osu/<id>`
+    Osu(u64),
+    /// Non-standard score URL such as `/scores/taiko/<id>`
+    UnsupportedMode,
+}
 
 /// Sanitize filenames so slashes and special characters don't break file paths.
 pub fn sanitize_filename(name: &str) -> String {
@@ -45,11 +66,10 @@ pub fn sanitize_filename(name: &str) -> String {
         .collect()
 }
 
-/// Extract an osu! score ID from a URL (e.g. `https://osu.ppy.sh/scores/123456` or
-/// `https://osu.ppy.sh/scores/osu/123456`) or a standalone numeric ID (`>= 6` digits).
-pub fn parse_osu_score_url(input: &str) -> Option<u64> {
+/// Parse an osu! score URL or numeric ID while distinguishing mode-qualified URLs.
+pub fn parse_osu_score_ref(input: &str) -> Option<ParsedScoreUrl> {
     let trimmed = input.trim().trim_matches(|c| c == '<' || c == '>');
-    let without_query = trimmed.split(&['?', '#'][..]).next()?.trim_end_matches('/');
+    let without_query = trimmed.split(['?', '#']).next()?.trim_end_matches('/');
 
     if let Some((_, rest)) = without_query.split_once("://") {
         let lower = rest.to_ascii_lowercase();
@@ -69,16 +89,30 @@ pub fn parse_osu_score_url(input: &str) -> Option<u64> {
             if segments.next().is_some() {
                 return None;
             }
-            return second.parse::<u64>().ok();
+            let id = second.parse::<u64>().ok()?;
+            return match first.to_ascii_lowercase().as_str() {
+                "osu" => Some(ParsedScoreUrl::Osu(id)),
+                "taiko" | "fruits" | "catch" | "mania" => Some(ParsedScoreUrl::UnsupportedMode),
+                _ => None,
+            };
         }
-        return first.parse::<u64>().ok();
+        return first.parse::<u64>().ok().map(ParsedScoreUrl::Id);
     }
 
     if without_query.len() >= 6 && without_query.bytes().all(|b| b.is_ascii_digit()) {
-        return without_query.parse::<u64>().ok();
+        return without_query.parse::<u64>().ok().map(ParsedScoreUrl::Id);
     }
 
     None
+}
+
+/// Extract an osu! score ID from a URL or bare numeric ID, rejecting explicitly non-std URLs.
+#[allow(dead_code)]
+pub fn parse_osu_score_url(input: &str) -> Option<u64> {
+    match parse_osu_score_ref(input)? {
+        ParsedScoreUrl::Id(id) | ParsedScoreUrl::Osu(id) => Some(id),
+        ParsedScoreUrl::UnsupportedMode => None,
+    }
 }
 
 /// Verify user blacklist, server blacklist, and allowed input channel; returns resolved output channel.
@@ -165,6 +199,7 @@ pub struct RawPrefixRenderArgs {
     pub offset_ms: Option<i32>,
     pub force_rerender: bool,
     pub score_id: Option<u64>,
+    pub score_ref: Option<ParsedScoreUrl>,
 }
 
 pub(crate) fn split_quoted_tokens(input: &str) -> std::result::Result<Vec<String>, String> {
@@ -205,36 +240,92 @@ pub fn parse_raw_prefix_args(args: &str) -> std::result::Result<RawPrefixRenderA
     let mut parsed = RawPrefixRenderArgs::default();
 
     for token in tokens {
+        if let Some((key, v)) = token.split_once('=') {
+            match key.to_ascii_lowercase().as_str() {
+                "start" => {
+                    parsed.start =
+                        TimePoints::parse_single(v).map_err(|e| format!("Invalid `start`: {e}"))?;
+                }
+                "end" => {
+                    parsed.end =
+                        TimePoints::parse_single(v).map_err(|e| format!("Invalid `end`: {e}"))?;
+                }
+                "pitch" => {
+                    let p = v.parse::<f64>().map_err(|_| {
+                        "Invalid `pitch`: must be a positive number (e.g. `pitch=1.5`).".to_owned()
+                    })?;
+                    if !p.is_finite() || p <= 0.0 {
+                        return Err(
+                            "Invalid `pitch`: must be a positive number (e.g. `pitch=1.5`)."
+                                .to_owned(),
+                        );
+                    }
+                    parsed.pitch = Some(p.clamp(0.5, 5.0));
+                }
+                "skin" => {
+                    let trimmed = v.trim();
+                    if trimmed.is_empty() {
+                        return Err("`skin=` cannot be empty.".to_owned());
+                    }
+                    parsed.raw_skin = Some(trimmed.to_owned());
+                }
+                "offset" => {
+                    let off = v.parse::<i32>().map_err(|_| {
+                        "Invalid `offset`: integer milliseconds expected (e.g. `offset=-15`)."
+                            .to_owned()
+                    })?;
+                    parsed.offset_ms = Some(off.clamp(-5000, 5000));
+                }
+                "skip" | "skip_intro" => {
+                    if v.eq_ignore_ascii_case("true") || v == "1" {
+                        parsed.skip_intro = true;
+                    } else if v.eq_ignore_ascii_case("false") || v == "0" {
+                        parsed.skip_intro = false;
+                    } else {
+                        return Err("Invalid `skip`: expected `true` or `false`.".to_owned());
+                    }
+                }
+                "force" | "rerender" => {
+                    if v.eq_ignore_ascii_case("true") || v == "1" {
+                        parsed.force_rerender = true;
+                    } else if v.eq_ignore_ascii_case("false") || v == "0" {
+                        parsed.force_rerender = false;
+                    } else {
+                        return Err("Invalid `force`: expected `true` or `false`.".to_owned());
+                    }
+                }
+                _ => {
+                    if let Some(score_ref) = parse_osu_score_ref(&token) {
+                        match score_ref {
+                            ParsedScoreUrl::Id(id) | ParsedScoreUrl::Osu(id) => {
+                                parsed.score_id = Some(id);
+                                parsed.score_ref = Some(score_ref);
+                            }
+                            ParsedScoreUrl::UnsupportedMode => {
+                                return Err("Only osu!standard scores can be rendered.".to_owned());
+                            }
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+
         let lower = token.to_ascii_lowercase();
-        if let Some(v) = token.strip_prefix("start=").or_else(|| token.strip_prefix("START=")) {
-            parsed.start = TimePoints::parse_single(v).map_err(|e| format!("Invalid `start`: {e}"))?;
-        } else if let Some(v) = token.strip_prefix("end=").or_else(|| token.strip_prefix("END=")) {
-            parsed.end = TimePoints::parse_single(v).map_err(|e| format!("Invalid `end`: {e}"))?;
-        } else if let Some(v) = token.strip_prefix("pitch=").or_else(|| token.strip_prefix("PITCH=")) {
-            let p = v
-                .parse::<f64>()
-                .map_err(|_| "Invalid `pitch`: must be a positive number (e.g. `pitch=1.5`).".to_owned())?;
-            if !p.is_finite() || p <= 0.0 {
-                return Err("Invalid `pitch`: must be a positive number (e.g. `pitch=1.5`).".to_owned());
-            }
-            parsed.pitch = Some(p.clamp(0.5, 5.0));
-        } else if let Some(v) = token.strip_prefix("skin=").or_else(|| token.strip_prefix("SKIN=")) {
-            let trimmed = v.trim();
-            if trimmed.is_empty() {
-                return Err("`skin=` cannot be empty.".to_owned());
-            }
-            parsed.raw_skin = Some(trimmed.to_owned());
-        } else if let Some(v) = token.strip_prefix("offset=").or_else(|| token.strip_prefix("OFFSET=")) {
-            let off = v
-                .parse::<i32>()
-                .map_err(|_| "Invalid `offset`: integer milliseconds expected (e.g. `offset=-15`).".to_owned())?;
-            parsed.offset_ms = Some(off.clamp(-5000, 5000));
-        } else if matches!(lower.as_str(), "skip" | "skip_intro" | "skip=true" | "skip_intro=true") {
+        if matches!(lower.as_str(), "skip" | "skip_intro") {
             parsed.skip_intro = true;
-        } else if matches!(lower.as_str(), "force" | "rerender" | "force=true" | "rerender=true") {
+        } else if matches!(lower.as_str(), "force" | "rerender") {
             parsed.force_rerender = true;
-        } else if let Some(score_id) = parse_osu_score_url(&token) {
-            parsed.score_id = Some(score_id);
+        } else if let Some(score_ref) = parse_osu_score_ref(&token) {
+            match score_ref {
+                ParsedScoreUrl::Id(id) | ParsedScoreUrl::Osu(id) => {
+                    parsed.score_id = Some(id);
+                    parsed.score_ref = Some(score_ref);
+                }
+                ParsedScoreUrl::UnsupportedMode => {
+                    return Err("Only osu!standard scores can be rendered.".to_owned());
+                }
+            }
         }
     }
 
@@ -249,7 +340,7 @@ pub fn parse_raw_prefix_args(args: &str) -> std::result::Result<RawPrefixRenderA
 pub fn parse_prefix_render_args(
     ctx: &Context,
     args: &str,
-) -> std::result::Result<(RenderOptions, Option<u64>), String> {
+) -> std::result::Result<(RenderOptions, Option<ParsedScoreUrl>), String> {
     let raw = parse_raw_prefix_args(args)?;
     let skin = match raw.raw_skin {
         Some(ref name) => {
@@ -271,7 +362,7 @@ pub fn parse_prefix_render_args(
             offset_ms: raw.offset_ms,
             force_rerender: raw.force_rerender,
         },
-        raw.score_id,
+        raw.score_ref,
     ))
 }
 
@@ -304,13 +395,35 @@ pub async fn finalize_enqueue(
     queue_msg: Option<Message>,
 ) {
     let output_channel = replay_data.output_channel;
-    replay_data.queue_message = queue_msg.map(|m| (m.id, m.channel_id));
-    let (was_empty, _) = ctx.replay_queue.push(replay_data).await;
-    if was_empty {
-        let ctx_clone = Arc::clone(&ctx);
-        tokio::spawn(async move {
-            let _ = send_queue_status(ctx_clone, output_channel).await;
-        });
+    let input_channel = replay_data.input_channel;
+    let user = replay_data.user;
+    let osr_path = replay_data.path.clone();
+    let queue_msg_id = queue_msg.map(|m| (m.id, m.channel_id));
+    replay_data.queue_message = queue_msg_id;
+
+    let max_per_user =
+        (!BotConfig::get().owners.contains(&user)).then_some(MAX_ACTIVE_RENDERS_PER_USER);
+    match ctx.replay_queue.push(replay_data, max_per_user).await {
+        Ok((was_empty, _)) => {
+            if was_empty {
+                let ctx_clone = Arc::clone(&ctx);
+                tokio::spawn(async move {
+                    let _ = send_queue_status(ctx_clone, output_channel).await;
+                });
+            }
+        }
+        Err(active) => {
+            let _ = tokio::fs::remove_file(&osr_path).await;
+            let err_msg = format!(
+                "You already have {active} renders queued or running (limit: {MAX_ACTIVE_RENDERS_PER_USER}). Please wait or cancel one first."
+            );
+            if let Some((msg_id, ch_id)) = queue_msg_id {
+                let builder = MessageBuilder::new().embed(err_msg).components(vec![]);
+                let _ = (msg_id, ch_id).update(&ctx, &builder).await;
+            } else {
+                let _ = input_channel.error(&ctx, err_msg).await;
+            }
+        }
     }
 }
 
@@ -323,50 +436,82 @@ async fn find_score_to_render(
     if let Some(timestamp) = timestamp {
         let ts_unix = timestamp.as_secs();
 
-        // check recents
-        let recent_scores = ctx
+        // check recents (osu!standard only)
+        let mut recent_res = ctx
             .osu()
             .user_scores(user_id)
             .recent()
+            .mode(GameMode::Osu)
             .include_fails(false)
             .limit(100)
-            .await
-            .context("failed to get recent scores")?;
+            .await;
+        if let Err(ref err) = recent_res {
+            if Context::is_osu_auth_error(err) {
+                if let Ok(fresh) = ctx.refresh_osu_client().await {
+                    recent_res = fresh
+                        .user_scores(user_id)
+                        .recent()
+                        .mode(GameMode::Osu)
+                        .include_fails(false)
+                        .limit(100)
+                        .await;
+                }
+            }
+        }
+        let recent_scores = recent_res.context("failed to get recent scores")?;
 
-        if let Some(score) = recent_scores
-            .into_iter()
-            .find(|score| (score.ended_at.unix_timestamp() - ts_unix).abs() <= 3)
-        {
+        if let Some(score) = recent_scores.into_iter().find(|score| {
+            score.map_id == beatmap_id && (score.ended_at.unix_timestamp() - ts_unix).abs() <= 3
+        }) {
             return Ok((Some(score), false));
         }
 
-        // check tops
-        let top_scores = ctx
+        // check tops (osu!standard only)
+        let mut top_res = ctx
             .osu()
             .user_scores(user_id)
             .best()
+            .mode(GameMode::Osu)
             .limit(100)
-            .await
-            .context("failed to get top scores")?;
+            .await;
+        if let Err(ref err) = top_res {
+            if Context::is_osu_auth_error(err) {
+                if let Ok(fresh) = ctx.refresh_osu_client().await {
+                    top_res = fresh
+                        .user_scores(user_id)
+                        .best()
+                        .mode(GameMode::Osu)
+                        .limit(100)
+                        .await;
+                }
+            }
+        }
+        let top_scores = top_res.context("failed to get top scores")?;
 
-        if let Some(score) = top_scores
-            .into_iter()
-            .find(|score| (score.ended_at.unix_timestamp() - ts_unix).abs() <= 3)
-        {
+        if let Some(score) = top_scores.into_iter().find(|score| {
+            score.map_id == beatmap_id && (score.ended_at.unix_timestamp() - ts_unix).abs() <= 3
+        }) {
             return Ok((Some(score), false));
         }
 
-        tracing::warn!(
-            "Fetching map scores for user {} on beatmap {}",
-            user_id,
-            beatmap_id
-        );
-        let map_scores = ctx
+        tracing::debug!("Fetching map scores for user {user_id} on beatmap {beatmap_id}");
+        let mut map_res = ctx
             .osu()
             .beatmap_user_scores(beatmap_id, user_id)
-            .await
-            .context("failed to get map scores")?;
-        tracing::warn!("Got {} map scores", map_scores.len());
+            .mode(GameMode::Osu)
+            .await;
+        if let Err(ref err) = map_res {
+            if Context::is_osu_auth_error(err) {
+                if let Ok(fresh) = ctx.refresh_osu_client().await {
+                    map_res = fresh
+                        .beatmap_user_scores(beatmap_id, user_id)
+                        .mode(GameMode::Osu)
+                        .await;
+                }
+            }
+        }
+        let map_scores = map_res.context("failed to get map scores")?;
+        tracing::debug!("Got {} map scores", map_scores.len());
         if let Some(exact) = map_scores
             .iter()
             .find(|score| (score.ended_at.unix_timestamp() - ts_unix).abs() <= 3)
@@ -380,17 +525,28 @@ async fn find_score_to_render(
         Ok((fallback, used_fallback))
     } else {
         // No timestamp (<current embed) — pick best score on this map
-        tracing::warn!(
+        tracing::debug!(
             user_id,
             beatmap_id,
             "no timestamp, fetching beatmap user scores"
         );
 
-        let map_scores = ctx
+        let mut map_res = ctx
             .osu()
             .beatmap_user_scores(beatmap_id, user_id)
-            .await
-            .context("failed to get user scores on beatmap")?;
+            .mode(GameMode::Osu)
+            .await;
+        if let Err(ref err) = map_res {
+            if Context::is_osu_auth_error(err) {
+                if let Ok(fresh) = ctx.refresh_osu_client().await {
+                    map_res = fresh
+                        .beatmap_user_scores(beatmap_id, user_id)
+                        .mode(GameMode::Osu)
+                        .await;
+                }
+            }
+        }
+        let map_scores = map_res.context("failed to get user scores on beatmap")?;
 
         Ok((map_scores.into_iter().next(), false))
     }
@@ -417,9 +573,30 @@ async fn prepare_score_replay_data(
 
     let score_id = score_to_render.id;
     let mut replay_bytes_res = ctx.osu().replay_raw(score_id).await;
+    if let Err(ref err) = replay_bytes_res {
+        if Context::is_osu_auth_error(err) {
+            if let Ok(fresh) = ctx.refresh_osu_client().await {
+                replay_bytes_res = fresh.replay_raw(score_id).await;
+            }
+        }
+    }
     if replay_bytes_res.is_err() {
         if let Some(legacy_id) = score_to_render.legacy_score_id {
-            replay_bytes_res = ctx.osu().replay_raw(legacy_id).mode(score_to_render.mode).await;
+            replay_bytes_res = ctx
+                .osu()
+                .replay_raw(legacy_id)
+                .mode(score_to_render.mode)
+                .await;
+            if let Err(ref err) = replay_bytes_res {
+                if Context::is_osu_auth_error(err) {
+                    if let Ok(fresh) = ctx.refresh_osu_client().await {
+                        replay_bytes_res = fresh
+                            .replay_raw(legacy_id)
+                            .mode(score_to_render.mode)
+                            .await;
+                    }
+                }
+            }
         }
     }
 
@@ -438,6 +615,27 @@ async fn prepare_score_replay_data(
         Err(err) => return Err(Report::new(err).wrap_err("failed to parse replay")),
     };
     replay.grade = score_to_render.grade;
+    if score_to_render.set_on_lazer {
+        replay.accuracy_override = Some((score_to_render.accuracy * 100.0).round() / 100.0);
+        if replay.score == 0 {
+            replay.score = score_to_render.score;
+        }
+        if score_to_render.maximum_statistics.large_tick_hit > 0
+            || score_to_render.statistics.large_tick_hit > 0
+        {
+            replay.large_tick_hits = Some(score_to_render.statistics.large_tick_hit);
+        }
+        if score_to_render.maximum_statistics.small_tick_hit > 0
+            || score_to_render.statistics.small_tick_hit > 0
+        {
+            replay.small_tick_hits = Some(score_to_render.statistics.small_tick_hit);
+        }
+        if score_to_render.maximum_statistics.slider_tail_hit > 0
+            || score_to_render.statistics.slider_tail_hit > 0
+        {
+            replay.slider_end_hits = Some(score_to_render.statistics.slider_tail_hit);
+        }
+    }
 
     let fetched_user = if score_to_render.user.is_none() {
         ctx.osu().user(score_to_render.user_id).await.ok()
@@ -475,10 +673,15 @@ async fn prepare_score_replay_data(
     let safe_user = sanitize_filename(osu_user);
     let safe_title = sanitize_filename(map_title);
     let safe_diff = sanitize_filename(diff_name);
-    path.push(format!(
-        "{}_{}_{safe_user} - {safe_title} [{safe_diff}].osr",
-        user, score_id
-    ));
+    let seq = OSR_FILE_SEQ.fetch_add(1, Ordering::Relaxed);
+    let desc = format!("{safe_user} - {safe_title} [{safe_diff}]");
+    let clamped_desc = crate::core::replay_queue::process::clamp_utf8_bytes(&desc, 80);
+    let safe_desc = if clamped_desc.is_empty() {
+        "replay"
+    } else {
+        clamped_desc
+    };
+    path.push(format!("{seq}_{user}_{score_id}_{safe_desc}.osr"));
 
     tokio::fs::write(&path, replay_bytes)
         .await
@@ -536,7 +739,17 @@ pub async fn prepare_attachment_replay_data(
 
     let mut replay_file = BotConfig::get().paths.downloads();
     let safe_filename = sanitize_filename(&att.filename);
-    replay_file.push(format!("{tx_id}_{safe_filename}"));
+    let raw_stem = safe_filename
+        .rsplit_once('.')
+        .map(|(stem, _)| stem)
+        .unwrap_or(&safe_filename);
+    let clamped_stem = crate::core::replay_queue::process::clamp_utf8_bytes(raw_stem, 80);
+    let final_stem = if clamped_stem.is_empty() {
+        "replay"
+    } else {
+        clamped_stem
+    };
+    replay_file.push(format!("{tx_id}_{final_stem}.osr"));
 
     let mut file = File::create(&replay_file).await.map_err(|err| {
         tracing::error!(?err, ?replay_file, "failed to create replay file");
@@ -600,7 +813,14 @@ async fn render_from_msg(ctx: Arc<Context>, mut command: InteractionCommand) -> 
         }
     };
 
-    let (score_opt, used_fallback) = find_score_to_render(&ctx, user_id, beatmap_id, timestamp).await?;
+    let (score_opt, used_fallback) =
+        match find_score_to_render(&ctx, user_id, beatmap_id, timestamp).await {
+            Ok(res) => res,
+            Err(err) => {
+                let _ = command.error(&ctx, GENERAL_ISSUE).await;
+                return Err(err);
+            }
+        };
     let score_to_render = match score_opt {
         Some(score) => score,
         None => {
@@ -618,12 +838,16 @@ async fn render_from_msg(ctx: Arc<Context>, mut command: InteractionCommand) -> 
         user,
         RenderOptions::default(),
     )
-    .await?
+    .await
     {
-        ScorePrepareOutcome::Ready(data) => *data,
-        ScorePrepareOutcome::Unavailable(reason) => {
+        Ok(ScorePrepareOutcome::Ready(data)) => *data,
+        Ok(ScorePrepareOutcome::Unavailable(reason)) => {
             command.error(&ctx, reason).await?;
             return Ok(());
+        }
+        Err(err) => {
+            let _ = command.error(&ctx, GENERAL_ISSUE).await;
+            return Err(err);
         }
     };
 
@@ -714,21 +938,53 @@ pub async fn render_score_from_embed(
     Ok(EmbedRenderOutcome::Enqueued { data, warning })
 }
 
-/// Fetch a score by osu! score ID and prepare a `ReplayData` entry for rendering.
+/// Fetch a score by osu! score reference and prepare a `ReplayData` entry for rendering.
 pub async fn prepare_score_by_id(
     ctx: &Context,
-    score_id: u64,
+    score_ref: ParsedScoreUrl,
     input_channel: Id<ChannelMarker>,
     output_channel: Id<ChannelMarker>,
     user: Id<UserMarker>,
     opts: RenderOptions,
 ) -> Result<ScorePrepareOutcome> {
-    let score = ctx
-        .osu()
-        .score(score_id)
-        .await
-        .with_context(|| format!("failed to fetch osu! score {score_id}"))?;
+    let (score_id, prefer_osu_mode) = match score_ref {
+        ParsedScoreUrl::Osu(id) => (id, true),
+        ParsedScoreUrl::Id(id) => (id, false),
+        ParsedScoreUrl::UnsupportedMode => {
+            return Ok(ScorePrepareOutcome::Unavailable(
+                "danser only accepts osu!standard plays, sorry :(",
+            ));
+        }
+    };
 
+    let fetch = |osu: Arc<rosu_v2::Osu>, use_osu_mode: bool| async move {
+        if use_osu_mode {
+            osu.score(score_id).mode(GameMode::Osu).await
+        } else {
+            osu.score(score_id).await
+        }
+    };
+
+    let mut res = fetch(ctx.osu(), prefer_osu_mode).await;
+    if let Err(ref err) = res {
+        if Context::is_osu_auth_error(err) {
+            if let Ok(fresh) = ctx.refresh_osu_client().await {
+                res = fetch(fresh, prefer_osu_mode).await;
+            }
+        }
+    }
+    if matches!(res, Err(OsuError::NotFound)) {
+        res = fetch(ctx.osu(), !prefer_osu_mode).await;
+        if let Err(ref err) = res {
+            if Context::is_osu_auth_error(err) {
+                if let Ok(fresh) = ctx.refresh_osu_client().await {
+                    res = fetch(fresh, !prefer_osu_mode).await;
+                }
+            }
+        }
+    }
+
+    let score = res.with_context(|| format!("failed to fetch osu! score {score_id}"))?;
     prepare_score_replay_data(ctx, score, input_channel, output_channel, user, opts).await
 }
 
@@ -740,31 +996,31 @@ struct ParsedEmbed {
 
 fn parse_embed(embed: &Embed) -> Option<ParsedEmbed> {
     let user_url = embed.author.as_ref().and_then(|a| a.url.as_ref())?;
-    let user_id = user_url
-        .split('/')
-        .nth(4)
-        .and_then(|id| id.parse::<u32>().ok())?;
+    let user_clean = user_url.split(['?', '#']).next()?.trim_end_matches('/');
+    let mut segs = user_clean.split('/').filter(|s| !s.is_empty());
+    let mut user_id: Option<u32> = None;
+    while let Some(seg) = segs.next() {
+        if seg == "users" || seg == "u" {
+            user_id = segs.next().and_then(|id| id.parse::<u32>().ok());
+            break;
+        }
+    }
+    let user_id = user_id?;
 
     let beatmap_url = embed.url.as_ref()?;
-    let beatmap_id = if beatmap_url.contains("/b/") {
-        beatmap_url
-            .split("/b/")
-            .nth(1)
-            .and_then(|id| id.parse::<u32>().ok())?
+    let beatmap_id = if let Some((_, after_b)) = beatmap_url.split_once("/b/") {
+        let id_str = after_b.split(['?', '#', '/']).next()?;
+        id_str.parse::<u32>().ok()?
     } else if beatmap_url.contains("/beatmaps/") {
-        beatmap_url
+        let clean = beatmap_url.split(['?', '#']).next()?.trim_end_matches('/');
+        clean.split('/').next_back().and_then(|id| id.parse::<u32>().ok())?
+    } else if beatmap_url.contains("/beatmapsets/") {
+        let (_, fragment) = beatmap_url.split_once('#')?;
+        let clean_frag = fragment.split('?').next()?.trim_end_matches('/');
+        clean_frag
             .split('/')
             .next_back()
             .and_then(|id| id.parse::<u32>().ok())?
-    } else if beatmap_url.contains("/beatmapsets/") {
-        if let Some(fragment) = beatmap_url.split('#').nth(1) {
-            fragment
-                .split('/')
-                .next_back()
-                .and_then(|id| id.parse::<u32>().ok())?
-        } else {
-            return None;
-        }
     } else {
         return None;
     };
@@ -783,11 +1039,12 @@ fn parse_embed(embed: &Embed) -> Option<ParsedEmbed> {
 fn get_timestamp_from_minimized_embed(embed: &Embed) -> Option<Timestamp> {
     let field = embed.fields.first()?;
 
-    let discord_timestamp = field.name.rsplit('\t').next()?;
+    let discord_timestamp = field.name.rsplit('\t').next()?.trim();
 
-    let actual_timestamp_value = discord_timestamp
-        .trim_start_matches("<t:")
-        .trim_end_matches(":R>");
+    let inner = discord_timestamp.strip_prefix("<t:")?;
+    let actual_timestamp_value = inner
+        .strip_suffix(":R>")
+        .or_else(|| inner.split(':').next())?;
 
     let timestamp_value_as_int = actual_timestamp_value.parse().ok()?;
 
@@ -816,6 +1073,19 @@ mod tests {
         assert_eq!(parse_osu_score_url("1234567"), Some(1234567));
         assert_eq!(parse_osu_score_url("https://osu.ppy.sh/beatmaps/123456"), None);
         assert_eq!(parse_osu_score_url("12345"), None);
+
+        assert_eq!(
+            parse_osu_score_ref("https://osu.ppy.sh/scores/osu/987654321?foo=bar"),
+            Some(ParsedScoreUrl::Osu(987654321))
+        );
+        assert_eq!(
+            parse_osu_score_ref("https://osu.ppy.sh/scores/taiko/123456"),
+            Some(ParsedScoreUrl::UnsupportedMode)
+        );
+        assert_eq!(
+            parse_osu_score_ref("https://osu.ppy.sh/scores/mania/123456"),
+            Some(ParsedScoreUrl::UnsupportedMode)
+        );
     }
 
     #[test]
@@ -834,7 +1104,55 @@ mod tests {
         assert!(parsed.skip_intro);
         assert!(parsed.force_rerender);
 
+        let mixed = parse_raw_prefix_args(
+            "START=0:10 PITCH=1.2 SKIN=\"My Skin\" OFFSET=10 https://osu.ppy.sh/scores/osu/11223344",
+        )
+        .expect("mixed case args");
+        assert_eq!(mixed.start, 10);
+        assert_eq!(mixed.pitch, Some(1.2));
+        assert_eq!(mixed.raw_skin.as_deref(), Some("My Skin"));
+        assert_eq!(mixed.offset_ms, Some(10));
+        assert_eq!(mixed.score_ref, Some(ParsedScoreUrl::Osu(11223344)));
+
+        assert!(parse_raw_prefix_args("https://osu.ppy.sh/scores/fruits/123456").is_err());
         assert!(parse_raw_prefix_args("start=2:00 end=1:00").is_err());
         assert!(parse_raw_prefix_args("skin=\"unclosed").is_err());
+    }
+
+    #[test]
+    fn test_parse_embed_handles_queries_and_trailing_slashes() {
+        use twilight_model::channel::message::embed::{EmbedAuthor, EmbedField};
+        let mut embed = Embed {
+            author: Some(EmbedAuthor {
+                icon_url: None,
+                name: "Player".to_owned(),
+                proxy_icon_url: None,
+                url: Some("https://osu.ppy.sh/users/124493/osu?mode=osu".to_owned()),
+            }),
+            color: None,
+            description: None,
+            fields: vec![EmbedField {
+                inline: false,
+                name: "Map\t<t:1700000000:R>".to_owned(),
+                value: String::new(),
+            }],
+            footer: None,
+            image: None,
+            kind: "rich".to_owned(),
+            provider: None,
+            thumbnail: None,
+            timestamp: None,
+            title: None,
+            url: Some("https://osu.ppy.sh/beatmapsets/999?mode=osu#osu/88888/".to_owned()),
+            video: None,
+        };
+        let parsed = parse_embed(&embed).expect("valid embed");
+        assert_eq!(parsed.user_id, 124493);
+        assert_eq!(parsed.beatmap_id, 88888);
+        assert_eq!(parsed.timestamp.unwrap().as_secs(), 1_700_000_000);
+
+        embed.url = Some("https://osu.ppy.sh/beatmaps/77777?foo=bar/".to_owned());
+        let parsed2 = parse_embed(&embed).expect("beatmaps query");
+        assert_eq!(parsed2.beatmap_id, 77777);
     }
 }

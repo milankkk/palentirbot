@@ -178,7 +178,7 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
                         return;
                     }
                     Err(err) => {
-                        tracing::warn!(?err, score_id, "failed to fetch score by URL/ID");
+                        tracing::warn!(?err, ?score_id, "failed to fetch score by URL/ID");
                         let _ = msg
                             .error(&ctx, "Could not fetch that score from the osu! API.")
                             .await;
@@ -287,16 +287,11 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
 
         // ── invite ────────────────────────────────────────────────────────────
         "invite" => {
-            use crate::util::{
-                builder::{EmbedBuilder, MessageBuilder},
-                constants::INVITE_LINK,
-            };
-            let invite_url = ctx
-                .cache
-                .current_user(|u| {
-                    format!("https://discord.com/oauth2/authorize?client_id={}&permissions=4503599627388928&integration_type=0&scope=bot+applications.commands", u.id)
-                })
-                .unwrap_or_else(|_| INVITE_LINK.to_string());
+            use crate::util::builder::{EmbedBuilder, MessageBuilder};
+            let invite_url = format!(
+                "https://discord.com/oauth2/authorize?client_id={}&permissions=274878286848&integration_type=0&scope=bot+applications.commands",
+                ctx.bot_user_id()
+            );
             let embed = EmbedBuilder::new()
                 .description(invite_url)
                 .title("Invite me to your server!")

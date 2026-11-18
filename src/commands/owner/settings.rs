@@ -1,6 +1,13 @@
-use std::{path::Path, sync::Arc};
+use std::{
+    path::Path,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+};
 
 use eyre::{Context as _, Result};
+use tokio::{io::AsyncWriteExt as _, sync::Mutex};
 use twilight_model::channel::message::component::{
     ActionRow, Button, ButtonStyle, Component, SelectMenu, SelectMenuOption, SelectMenuType,
 };
@@ -100,8 +107,13 @@ fn build_object_select_rows(
             format!("Select a property in {label}")
         };
 
+        let custom_id = format!("owner_settings_prop_{chunk_idx}:{parent_pointer}");
+        if custom_id.len() > 100 {
+            return Vec::new();
+        }
+
         let menu = SelectMenu {
-            custom_id: format!("owner_settings_prop_{chunk_idx}:{parent_pointer}"),
+            custom_id,
             disabled: false,
             max_values: Some(1),
             min_values: Some(1),
@@ -120,15 +132,41 @@ fn build_object_select_rows(
     rows
 }
 
+static WRITE_SETTINGS_LOCK: Mutex<()> = Mutex::const_new(());
+static WRITE_TMP_SEQ: AtomicU64 = AtomicU64::new(1);
+
 async fn write_json_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
-    let tmp = path.with_extension("json.tmp");
-    tokio::fs::write(&tmp, bytes)
-        .await
-        .with_context(|| format!("failed to write temp settings file {tmp:?}"))?;
-    tokio::fs::rename(&tmp, path)
-        .await
-        .with_context(|| format!("failed to replace settings file {path:?}"))?;
-    Ok(())
+    let _guard = WRITE_SETTINGS_LOCK.lock().await;
+    let seq = WRITE_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("settings.json");
+    let tmp = path.with_file_name(format!(".{file_name}.{pid}_{seq}.tmp"));
+
+    let write_res: Result<()> = async {
+        let mut file = tokio::fs::File::create(&tmp)
+            .await
+            .with_context(|| format!("failed to create temp settings file {tmp:?}"))?;
+        file.write_all(bytes)
+            .await
+            .with_context(|| format!("failed to write temp settings file {tmp:?}"))?;
+        file.sync_all()
+            .await
+            .with_context(|| format!("failed to sync temp settings file {tmp:?}"))?;
+        drop(file);
+        tokio::fs::rename(&tmp, path)
+            .await
+            .with_context(|| format!("failed to replace settings file {path:?}"))?;
+        Ok(())
+    }
+    .await;
+
+    if write_res.is_err() {
+        let _ = tokio::fs::remove_file(&tmp).await;
+    }
+    write_res
 }
 
 pub async fn settings(ctx: Arc<Context>, command: InteractionCommand) -> Result<()> {
@@ -290,9 +328,13 @@ pub async fn handle_owner_settings_prop(
     if let serde_json::Value::Object(map) = val {
         let components = build_object_select_rows(map, &target_pointer);
         if components.is_empty() {
-            let builder = MessageBuilder::new()
-                .content(format!("Block `{display_path}` has no properties."))
-                .components(vec![]);
+            let too_long = format!("owner_settings_prop_0:{target_pointer}").len() > 100;
+            let msg = if too_long {
+                format!("Setting path `{display_path}` is too long for Discord component custom IDs.")
+            } else {
+                format!("Block `{display_path}` has no properties.")
+            };
+            let builder = MessageBuilder::new().content(msg).components(vec![]);
             component.callback(&ctx, builder).await?;
             return Ok(());
         }
@@ -400,24 +442,23 @@ pub async fn handle_owner_settings_modal(
                 Err("expected a boolean (`true`/`false` or `1`/`0`)".to_owned())
             }
         }
-        serde_json::Value::Number(num) => {
+        serde_json::Value::Number(_) => {
             let trimmed = new_value_str.trim();
-            if num.is_i64() || num.is_u64() {
-                if let Ok(i) = trimmed.parse::<i64>() {
-                    Ok(serde_json::Value::Number(i.into()))
-                } else if let Ok(u) = trimmed.parse::<u64>() {
-                    Ok(serde_json::Value::Number(u.into()))
-                } else {
-                    Err("expected an integer number".to_owned())
-                }
-            } else {
-                match trimmed.parse::<f64>() {
-                    Ok(f) if f.is_finite() => match serde_json::Number::from_f64(f) {
+            if let Ok(i) = trimmed.parse::<i64>() {
+                Ok(serde_json::Value::Number(i.into()))
+            } else if let Ok(u) = trimmed.parse::<u64>() {
+                Ok(serde_json::Value::Number(u.into()))
+            } else if let Ok(f) = trimmed.parse::<f64>() {
+                if f.is_finite() {
+                    match serde_json::Number::from_f64(f) {
                         Some(n) => Ok(serde_json::Value::Number(n)),
                         None => Err("number cannot be represented in JSON".to_owned()),
-                    },
-                    _ => Err("expected a finite floating-point number".to_owned()),
+                    }
+                } else {
+                    Err("expected a finite floating-point number".to_owned())
                 }
+            } else {
+                Err("expected a valid number".to_owned())
             }
         }
         serde_json::Value::Array(_) => match serde_json::from_str::<serde_json::Value>(&new_value_str)
@@ -443,6 +484,17 @@ pub async fn handle_owner_settings_modal(
             modal.update_response(&ctx, &builder).await?;
             return Ok(());
         }
+    }
+
+    if let Err(err) = serde_json::from_value::<crate::core::settings::DanserSettings>(json.clone()) {
+        tracing::warn!("Schema validation failed for {display_path}={new_value_str}: {err}");
+        let builder = MessageBuilder::new()
+            .content(format!(
+                "Value `{new_value_str}` does not match the expected type for `{display_path}` ({err}). Nothing was saved."
+            ))
+            .components(vec![]);
+        modal.update_response(&ctx, &builder).await?;
+        return Ok(());
     }
 
     let serialized = serde_json::to_vec_pretty(&json).context("failed to serialize default.json")?;
@@ -552,11 +604,10 @@ pub async fn handle_owner_settings_applyall(
             continue;
         }
 
-        let filename = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or_default();
-        if filename == "default.json" || filename == "credentials.json" {
+        let Some(stem) = path.file_stem().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if stem.parse::<u64>().is_err() {
             continue;
         }
 

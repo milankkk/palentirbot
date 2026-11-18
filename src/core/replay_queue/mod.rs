@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc,
 };
 use tokio::sync::{Mutex, Notify};
@@ -29,6 +29,7 @@ pub struct ReplayQueue {
     pub cache: RenderCache,
     work_notify: Notify,
     next_job_id: AtomicU64,
+    updater_running: AtomicBool,
 }
 
 impl ReplayQueue {
@@ -40,26 +41,48 @@ impl ReplayQueue {
             cache: RenderCache::load().await,
             work_notify: Notify::new(),
             next_job_id: AtomicU64::new(0),
+            updater_running: AtomicBool::new(false),
         }
+    }
+
+    pub fn try_start_updater(&self) -> bool {
+        self.updater_running
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    pub fn finish_updater(&self) {
+        self.updater_running.store(false, Ordering::Release);
     }
 
     pub fn allocate_job_id(&self) -> u64 {
         self.next_job_id.fetch_add(1, Ordering::Relaxed) + 1
     }
 
-    pub async fn push(&self, mut entry: ReplayData) -> (bool, u64) {
+    pub async fn push(
+        &self,
+        mut entry: ReplayData,
+        max_per_user: Option<usize>,
+    ) -> std::result::Result<(bool, u64), usize> {
         if entry.job_id == 0 {
             entry.job_id = self.allocate_job_id();
         }
         let job_id = entry.job_id;
+        let user = entry.user;
         let was_empty = {
             let mut guard = self.queue.lock().await;
+            if let Some(limit) = max_per_user {
+                let active = guard.iter().filter(|item| item.user == user).count();
+                if active >= limit {
+                    return Err(active);
+                }
+            }
             let was_empty = guard.is_empty();
             guard.push_back(entry);
             was_empty
         };
         self.work_notify.notify_one();
-        (was_empty, job_id)
+        Ok((was_empty, job_id))
     }
 
     pub async fn count_user_jobs(&self, user: Id<UserMarker>) -> usize {
@@ -126,8 +149,8 @@ impl ReplayQueue {
     }
 
     pub async fn reset_peek(&self) {
-        *self.status.lock().await = ReplayStatus::Waiting;
         let _ = self.pop().await;
+        *self.status.lock().await = ReplayStatus::Waiting;
         self.notify.notify_waiters();
     }
 }

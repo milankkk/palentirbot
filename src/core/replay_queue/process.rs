@@ -1517,6 +1517,9 @@ async fn create_title(
     let max_combo = replay.max_combo as u32;
     let total_300_nochoke = count_300 + count_miss;
     let score_val = replay.score;
+    let large_tick_hits = replay.large_tick_hits;
+    let small_tick_hits = replay.small_tick_hits;
+    let slider_end_hits = replay.slider_end_hits;
 
     let (pp_v4, stars, max_possible_combo) = tokio::task::spawn_blocking(move || -> Result<_> {
         let map = Beatmap::from_bytes(&osu_bytes_v4)
@@ -1539,7 +1542,17 @@ async fn create_title(
             .combo(max_combo)
             .lazer(is_lazer);
 
-        if !is_lazer && score_val > 0 {
+        if is_lazer {
+            if let Some(v) = large_tick_hits {
+                perf = perf.large_tick_hits(v);
+            }
+            if let Some(v) = small_tick_hits {
+                perf = perf.small_tick_hits(v);
+            }
+            if let Some(v) = slider_end_hits {
+                perf = perf.slider_end_hits(v);
+            }
+        } else if score_val > 0 {
             perf = perf.legacy_total_score(score_val);
         }
         let actual_attrs = perf.calculate();

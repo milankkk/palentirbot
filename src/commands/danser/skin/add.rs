@@ -2,14 +2,18 @@ use eyre::{Context, Report, Result};
 use std::{
     ffi::OsString,
     fs,
-    io::Cursor,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
 };
-use zip::ZipArchive;
 
 use crate::{
-    core::{ai::search::validate_and_resolve_url, BotConfig, Context as TwilightContext},
+    core::{
+        ai::search::validate_and_resolve_url, replay_queue::process::extract_zip_safely,
+        BotConfig, Context as TwilightContext,
+    },
     util::{
         builder::MessageBuilder,
         constants::GENERAL_ISSUE,
@@ -19,6 +23,71 @@ use crate::{
 };
 
 use super::SkinAdd;
+
+static FLATTEN_SEQ: AtomicU64 = AtomicU64::new(1);
+
+fn percent_decode_segment(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(hex) = std::str::from_utf8(&bytes[i + 1..i + 3]) {
+                if let Ok(val) = u8::from_str_radix(hex, 16) {
+                    out.push(val);
+                    i += 3;
+                    continue;
+                }
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+pub(crate) fn sanitize_skin_dir_name(raw: &str) -> String {
+    let decoded = percent_decode_segment(raw.trim());
+    let lower = decoded.to_ascii_lowercase();
+    let stripped = if lower.ends_with(".osk") || lower.ends_with(".zip") {
+        &decoded[..decoded.len() - 4]
+    } else {
+        decoded.as_str()
+    };
+
+    let mut cleaned: String = stripped
+        .chars()
+        .map(|c| {
+            if c.is_control()
+                || matches!(
+                    c,
+                    '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '\0'
+                )
+            {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+
+    while cleaned.contains("..") {
+        cleaned = cleaned.replace("..", "_");
+    }
+
+    let trimmed = cleaned.trim_matches(|c: char| c.is_whitespace() || c == '.' || c == '_');
+    if trimmed.is_empty() || trimmed == "." || trimmed == ".." {
+        return "skin".to_owned();
+    }
+
+    let clamped: String = trimmed.chars().take(80).collect();
+    let final_trimmed = clamped.trim_matches(|c: char| c.is_whitespace() || c == '.' || c == '_');
+    if final_trimmed.is_empty() || final_trimmed == "." || final_trimmed == ".." {
+        "skin".to_owned()
+    } else {
+        final_trimmed.to_owned()
+    }
+}
 
 pub async fn add(
     ctx: Arc<TwilightContext>,
@@ -46,18 +115,12 @@ pub async fn add(
 
     let (bytes, filename) = match (skin, url) {
         (Some(skin), None) => {
-            let filename = match skin.filename.rsplit_once('.') {
-                Some((filename, ext)) if ext.eq_ignore_ascii_case("osk") => filename.to_string(),
-                _ => {
-                    let content = "The attachment must be a .osk file!";
-                    command.error_callback(&ctx, content, true).await?;
-                    return Ok(());
-                }
-            };
-            let mut filename = crate::commands::danser::render_score::sanitize_filename(&filename);
-            if filename.is_empty() {
-                filename = "skin".to_string();
+            if !matches!(skin.filename.rsplit('.').next(), Some(ext) if ext.eq_ignore_ascii_case("osk")) {
+                let content = "The attachment must be a .osk file!";
+                command.error_callback(&ctx, content, true).await?;
+                return Ok(());
             }
+            let filename = sanitize_skin_dir_name(&skin.filename);
             let builder = MessageBuilder::new().embed("Downloading...");
             command.callback(&ctx, builder, false).await?;
             let bytes = match ctx.client().get_discord_attachment(&skin).await {
@@ -103,14 +166,7 @@ pub async fn add(
                 .path_segments()
                 .and_then(|mut segs| segs.next_back())
                 .unwrap_or("skin");
-            let trimmed_filename = raw_filename
-                .strip_suffix(".osk")
-                .or_else(|| raw_filename.strip_suffix(".OSK"))
-                .unwrap_or(raw_filename);
-            let mut filename = crate::commands::danser::render_score::sanitize_filename(trimmed_filename);
-            if filename.is_empty() {
-                filename = "skin".to_string();
-            }
+            let filename = sanitize_skin_dir_name(raw_filename);
 
             (bytes, filename)
         }
@@ -128,26 +184,11 @@ pub async fn add(
         }
     };
 
-    let mut builder = MessageBuilder::new().embed("Zipping...");
+    let mut builder = MessageBuilder::new().embed("Generating skin name...");
     command.update(&ctx, &builder).await?;
 
-    let cursor = Cursor::new(bytes);
-
-    let mut archive = match ZipArchive::new(cursor) {
-        Ok(archive) => archive,
-        Err(err) => {
-            let _ = command.error(&ctx, GENERAL_ISSUE).await;
-            let err = Report::from(err).wrap_err("failed to create zip archive");
-
-            return Err(err);
-        }
-    };
-
-    // Slight optimization by re-using the builder and overwriting the previous embed
-    builder = builder.embed("Generating skin name...");
-    command.update(&ctx, &builder).await?;
-
-    let mut skin_file = BotConfig::get().paths.skins();
+    let skins_root = BotConfig::get().paths.skins();
+    let mut skin_file = skins_root.clone();
 
     let skin_list: Vec<_> = ctx
         .skin_list()
@@ -175,46 +216,45 @@ pub async fn add(
             }
         }
         Err(idx) => {
-            skin_file.push(filename);
+            skin_file.push(&filename);
 
             idx + 1
         }
     };
 
+    if skin_file.parent() != Some(skins_root.as_path()) {
+        let _ = command.error(&ctx, "Invalid target skin directory.").await;
+        eyre::bail!("resolved skin path {:?} escapes {:?}", skin_file, skins_root);
+    }
+
     builder = builder.embed("Extracting...");
     command.update(&ctx, &builder).await?;
 
-    const MAX_UNCOMPRESSED_SKIN_BYTES: u64 = 400 * 1024 * 1024; // 400 MB
+    const MAX_UNCOMPRESSED_SKIN_BYTES: u64 = 512 * 1024 * 1024; // 512 MB
+    const MAX_SKIN_ENTRIES: usize = 5_000;
     let skin_file_clone = skin_file.clone();
+    let skins_root_clone = skins_root.clone();
     let extract_res = tokio::task::spawn_blocking(move || -> Result<bool, Report> {
-        let mut total_size: u64 = 0;
-        for i in 0..archive.len() {
-            let file = archive
-                .by_index(i)
-                .map_err(|e| Report::from(e).wrap_err("corrupt zip entry in skin archive"))?;
-            if file.enclosed_name().is_none() {
-                eyre::bail!("Skin archive contains unsafe path traversal entry!");
-            }
-            total_size = total_size
-                .checked_add(file.size())
-                .ok_or_else(|| eyre::eyre!("Skin archive size overflow!"))?;
-            if total_size > MAX_UNCOMPRESSED_SKIN_BYTES {
-                eyre::bail!("Skin archive exceeds 400MB uncompressed limit!");
-            }
-        }
-        archive
-            .extract(&skin_file_clone)
-            .map_err(|e| Report::from(e).wrap_err("failed to extract zip archive"))?;
+        extract_zip_safely(
+            &bytes,
+            &skin_file_clone,
+            MAX_UNCOMPRESSED_SKIN_BYTES,
+            MAX_SKIN_ENTRIES,
+        )?;
 
         let mut skin_ini_path = skin_file_clone.clone();
         skin_ini_path.push("skin.ini");
 
-        if !(case_insensitive_exists(skin_ini_path)? || move_directory(&skin_file_clone)?) {
-            fs::remove_dir_all(&skin_file_clone).with_context(|| {
-                format!(
-                    "failed to remove directory after failing to assure skin.ini for {skin_file_clone:?}"
-                )
-            })?;
+        if !(case_insensitive_exists(&skin_ini_path)?
+            || move_directory(&skins_root_clone, &skin_file_clone)?)
+        {
+            if skin_file_clone.parent() == Some(skins_root_clone.as_path()) {
+                fs::remove_dir_all(&skin_file_clone).with_context(|| {
+                    format!(
+                        "failed to remove directory after failing to assure skin.ini for {skin_file_clone:?}"
+                    )
+                })?;
+            }
             return Ok(false);
         }
 
@@ -231,13 +271,17 @@ pub async fn add(
             return Ok(());
         }
         Ok(Err(err)) => {
-            let _ = tokio::fs::remove_dir_all(&skin_file).await;
+            if skin_file.parent() == Some(skins_root.as_path()) {
+                let _ = tokio::fs::remove_dir_all(&skin_file).await;
+            }
             let msg = err.to_string();
             let _ = command.error(&ctx, msg).await;
             return Err(err);
         }
         Err(err) => {
-            let _ = tokio::fs::remove_dir_all(&skin_file).await;
+            if skin_file.parent() == Some(skins_root.as_path()) {
+                let _ = tokio::fs::remove_dir_all(&skin_file).await;
+            }
             let _ = command.error(&ctx, GENERAL_ISSUE).await;
             return Err(Report::from(err).wrap_err("extraction task panicked"));
         }
@@ -253,72 +297,44 @@ pub async fn add(
     Ok(())
 }
 
-fn move_directory(to: &PathBuf) -> Result<bool> {
-    let mut skin_folder =
-        fs::read_dir(to).with_context(|| format!("failed to read directory at {to:?}"))?;
+fn move_directory(skins_root: &Path, to: &Path) -> Result<bool> {
+    let entries = fs::read_dir(to).with_context(|| format!("failed to read directory at {to:?}"))?;
 
-    let inner_folder = match skin_folder.next() {
-        Some(res) => res.with_context(|| format!("failed to read entry of directory at {to:?}"))?,
-        None => return Ok(false),
+    let mut inner_dir: Option<PathBuf> = None;
+    for res in entries {
+        let entry = res.with_context(|| format!("failed to read entry of directory at {to:?}"))?;
+        let name = entry.file_name();
+        let lossy = name.to_string_lossy();
+        if lossy == "__MACOSX" || lossy.starts_with('.') {
+            continue;
+        }
+        let path = entry.path();
+        if path.is_dir() && case_insensitive_exists(path.join("skin.ini"))? {
+            inner_dir = Some(path);
+            break;
+        }
+    }
+
+    let Some(from) = inner_dir else {
+        return Ok(false);
     };
 
-    let from = inner_folder.path();
+    let seq = FLATTEN_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp_dir = skins_root.join(format!(".flatten_tmp_{seq}"));
+    fs::rename(&from, &tmp_dir)
+        .with_context(|| format!("failed to move {from:?} to temp flatten path {tmp_dir:?}"))?;
 
-    let mut skin_ini = to.to_owned();
-    skin_ini.push("skin.ini");
-
-    if copy_all(from, to).is_ok() && case_insensitive_exists(&skin_ini)? {
-        fs::remove_dir_all(inner_folder.path())
-            .with_context(|| format!("failed to remove directory at {:?}", inner_folder.path()))?;
-        Ok(true)
-    } else {
-        Ok(false)
-    }
-}
-
-#[allow(clippy::ptr_arg)]
-fn copy_all(from: PathBuf, to: &PathBuf) -> Result<()> {
-    let output_root = to;
-    let input_root = from.components().count();
-
-    let mut stack = vec![from];
-
-    while let Some(working_path) = stack.pop() {
-        // Generate a relative path
-        let src: PathBuf = working_path.components().skip(input_root).collect();
-
-        // Create a destination if missing
-        let dest = if src.components().count() == 0 {
-            output_root.clone()
-        } else {
-            output_root.join(&src)
-        };
-
-        if !dest.exists() {
-            fs::create_dir_all(&dest)
-                .with_context(|| format!("failed to create directory {dest:?}"))?;
-        }
-
-        let folder = fs::read_dir(&working_path)
-            .with_context(|| format!("failed to read directory at {working_path:?}"))?;
-
-        for entry in folder {
-            let path = entry
-                .with_context(|| format!("failed to read entry of directory at {working_path:?}"))?
-                .path();
-
-            if path.is_dir() {
-                stack.push(path);
-            } else if let Some(filename) = path.file_name() {
-                let dest_path = dest.join(filename);
-
-                fs::copy(&path, &dest_path)
-                    .with_context(|| format!("failed to copy {path:?} to {dest_path:?}"))?;
-            }
-        }
+    if let Err(err) = fs::remove_dir_all(to) {
+        let _ = fs::rename(&tmp_dir, &from);
+        return Err(err).with_context(|| format!("failed to remove outer directory at {to:?}"));
     }
 
-    Ok(())
+    if let Err(err) = fs::rename(&tmp_dir, to) {
+        let _ = fs::remove_dir_all(&tmp_dir);
+        return Err(err).with_context(|| format!("failed to rename {tmp_dir:?} into {to:?}"));
+    }
+
+    case_insensitive_exists(to.join("skin.ini"))
 }
 
 fn case_insensitive_exists(path_with_file: impl AsRef<Path>) -> Result<bool> {
@@ -351,4 +367,24 @@ fn case_insensitive_exists(path_with_file: impl AsRef<Path>) -> Result<bool> {
     }
 
     Ok(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_skin_dir_name;
+
+    #[test]
+    fn test_sanitize_skin_dir_name() {
+        assert_eq!(sanitize_skin_dir_name("...osk"), "skin");
+        assert_eq!(sanitize_skin_dir_name("..osk"), "skin");
+        assert_eq!(
+            sanitize_skin_dir_name("My%20Custom%20Skin.osk"),
+            "My Custom Skin"
+        );
+        assert_eq!(
+            sanitize_skin_dir_name("../../etc/passwd.osk"),
+            "etc_passwd"
+        );
+        assert_eq!(sanitize_skin_dir_name("clean_skin.ZIP"), "clean_skin");
+    }
 }

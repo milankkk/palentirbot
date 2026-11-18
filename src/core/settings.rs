@@ -157,6 +157,62 @@ pub struct DanserSettings {
     pub extra: BTreeMap<String, Value>,
 }
 
+fn clamp_finite(val: &mut f64, min: f64, max: f64) {
+    if !val.is_finite() {
+        *val = min;
+    } else {
+        *val = val.clamp(min, max);
+    }
+}
+
+impl DanserSettings {
+    /// Sanitize user-uploaded JSON settings before saving to disk.
+    pub fn sanitize_user_upload(&mut self) {
+        self.extra.clear();
+        self.general.extra.clear();
+        self.graphics.extra.clear();
+        self.audio.extra.clear();
+        self.input.extra.clear();
+        self.gameplay.extra.clear();
+        self.skin.extra.clear();
+        self.cursor.extra.clear();
+        self.objects.extra.clear();
+        self.playfield.extra.clear();
+        self.cursor_dance.extra.clear();
+        self.knockout.extra.clear();
+        self.recording.extra.clear();
+
+        self.gameplay.underlay.path.clear();
+        if self.gameplay.hud_font.contains(['/', '\\']) || self.gameplay.hud_font.contains("..") {
+            self.gameplay.hud_font.clear();
+        }
+        self.gameplay.results_screen_time = self.gameplay.results_screen_time.clamp(0, 15);
+
+        clamp_finite(&mut self.playfield.lead_in_time, 0.0, 10.0);
+        clamp_finite(&mut self.playfield.lead_in_hold, 0.0, 10.0);
+        clamp_finite(&mut self.playfield.fade_out_time, 0.0, 10.0);
+        clamp_finite(&mut self.playfield.seizure_warning.duration, 0.0, 10.0);
+
+        self.objects.sliders.distortions.viewport_size =
+            self.objects.sliders.distortions.viewport_size.min(3840);
+        self.objects.sliders.distortions.custom_resolution_x = self
+            .objects
+            .sliders
+            .distortions
+            .custom_resolution_x
+            .min(3840);
+        self.objects.sliders.distortions.custom_resolution_y = self
+            .objects
+            .sliders
+            .distortions
+            .custom_resolution_y
+            .min(3840);
+
+        self.skin.cursor.long_trail_length = self.skin.cursor.long_trail_length.clamp(0, 10_000);
+        self.cursor.trail_max_length = self.cursor.trail_max_length.clamp(0, 10_000);
+    }
+}
+
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
 pub struct General {

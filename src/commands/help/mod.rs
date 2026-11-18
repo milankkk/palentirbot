@@ -1,4 +1,7 @@
-use crate::core::{commands::slash::Commands, BotConfig};
+use crate::core::{
+    commands::slash::{Command, Commands},
+    BotConfig,
+};
 use twilight_interactions::command::CommandOptionExtended;
 use twilight_model::channel::message::component::{
     ActionRow, Component, SelectMenu, SelectMenuOption,
@@ -15,12 +18,17 @@ mod components;
 mod interaction;
 
 fn generate_menus(user: Id<UserMarker>, options: &[CommandOptionExtended]) -> Vec<Component> {
+    let is_owner = BotConfig::get().owners.contains(&user);
     let base_options: Vec<_> = Commands::get().filter_collect(|c| {
+        let only_owner = match c {
+            Command::Slash(slash) => slash.flags.only_owner(),
+            Command::Message(_) => false,
+        };
         let cmd = c.create();
         let name = cmd.name;
         let description = cmd.description;
 
-        if description.is_empty() || (name == "owner" && !BotConfig::get().owners.contains(&user)) {
+        if description.is_empty() || ((only_owner || name == "owner") && !is_owner) {
             None
         } else {
             Some(SelectMenuOption {

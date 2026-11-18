@@ -118,7 +118,19 @@ pub async fn build_queue_embed(ctx: &Context) -> EmbedBuilder {
     embed
 }
 
+struct UpdaterGuard(Arc<Context>);
+
+impl Drop for UpdaterGuard {
+    fn drop(&mut self) {
+        self.0.replay_queue.finish_updater();
+    }
+}
+
 pub async fn send_queue_status(ctx: Arc<Context>, channel_id: Id<ChannelMarker>) -> Result<()> {
+    if !ctx.replay_queue.try_start_updater() {
+        return Ok(());
+    }
+    let guard = UpdaterGuard(Arc::clone(&ctx));
     let embed = build_queue_embed(&ctx).await.build();
 
     let msg: Message = ctx
@@ -130,7 +142,7 @@ pub async fn send_queue_status(ctx: Arc<Context>, channel_id: Id<ChannelMarker>)
         .await?;
 
     let message_id = msg.id;
-    spawn_queue_updater(ctx, channel_id, message_id);
+    spawn_queue_updater_with_guard(ctx, channel_id, message_id, guard);
     Ok(())
 }
 
@@ -139,7 +151,21 @@ pub fn spawn_queue_updater(
     channel_id: Id<ChannelMarker>,
     message_id: Id<MessageMarker>,
 ) {
+    if !ctx.replay_queue.try_start_updater() {
+        return;
+    }
+    let guard = UpdaterGuard(Arc::clone(&ctx));
+    spawn_queue_updater_with_guard(ctx, channel_id, message_id, guard);
+}
+
+fn spawn_queue_updater_with_guard(
+    ctx: Arc<Context>,
+    channel_id: Id<ChannelMarker>,
+    message_id: Id<MessageMarker>,
+    guard: UpdaterGuard,
+) {
     tokio::spawn(async move {
+        let _guard = guard;
         const MIN_EDIT_INTERVAL: Duration = Duration::from_millis(1500);
         let notify = Arc::clone(&ctx.replay_queue.notify);
         let mut last_edit = tokio::time::Instant::now() - MIN_EDIT_INTERVAL;

@@ -6,10 +6,11 @@ use twilight_interactions::command::{ApplicationCommandData, CommandOptionExtend
 use crate::{
     core::{
         commands::slash::{Command, Commands, SlashCommand},
-        Context,
+        BotConfig, Context,
     },
     util::{
         builder::{EmbedBuilder, FooterBuilder, MessageBuilder},
+        constants::NOT_OWNER,
         interaction::InteractionComponent,
         Authored, ComponentExt,
     },
@@ -150,6 +151,13 @@ pub async fn handle_help_basecommand(ctx: &Context, component: InteractionCompon
             Command::Message(_) => None,
         })
         .with_context(|| format!("missing slash command `{name}`"))?;
+
+    let user_id = component.user_id()?;
+    if cmd.flags.only_owner() && !BotConfig::get().owners.contains(&user_id) {
+        let builder = MessageBuilder::new().embed(NOT_OWNER);
+        component.callback(ctx, builder).await?;
+        return Ok(());
+    }
 
     let ApplicationCommandData {
         name,

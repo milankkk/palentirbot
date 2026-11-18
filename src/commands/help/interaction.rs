@@ -26,10 +26,7 @@ use super::generate_menus;
 pub struct Help;
 
 pub async fn slash_help(ctx: Arc<Context>, command: InteractionCommand) -> Result<()> {
-    let id = ctx
-        .cache
-        .current_user(|user| user.id)
-        .expect("missing CurrentUser in cache");
+    let id = ctx.bot_user_id();
 
     let description = format!(
         "<@{id}> is a shishabot rewrite by [milan.be(claude)](https://osu.ppy.sh/u/Milan) \
@@ -39,7 +36,7 @@ pub async fn slash_help(ctx: Arc<Context>, command: InteractionCommand) -> Resul
     let view_replays = EmbedField {
         inline: false,
         name: "Do you want to view your replays?".to_owned(),
-        value: "find link for it, website is 💩".to_string(),
+        value: "Rendered replays are uploaded and linked directly in your configured output channel.".to_owned(),
     };
 
     let join_server = EmbedField {
@@ -48,7 +45,9 @@ pub async fn slash_help(ctx: Arc<Context>, command: InteractionCommand) -> Resul
         value: format!("Feel free to join the [discord server]({SHISHABOT_DISCORD})"),
     };
 
-    let invite_url = format!("https://discord.com/oauth2/authorize?client_id={id}&permissions=4503599627388928&integration_type=0&scope=bot+applications.commands");
+    let invite_url = format!(
+        "https://discord.com/oauth2/authorize?client_id={id}&permissions=274878286848&integration_type=0&scope=bot+applications.commands"
+    );
 
     let invite = EmbedField {
         inline: false,

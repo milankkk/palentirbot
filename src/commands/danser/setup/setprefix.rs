@@ -47,9 +47,22 @@ pub async fn set_prefix(
             .await?;
         return Ok(());
     }
-    if new_prefix.len() > 16 {
+    if new_prefix.chars().count() > 16 {
         command
             .error_callback(&ctx, "Prefix must be 16 characters or fewer.", true)
+            .await?;
+        return Ok(());
+    }
+    if new_prefix
+        .chars()
+        .any(|c| c.is_whitespace() || c == '`' || c == '\n' || c == '\r')
+    {
+        command
+            .error_callback(
+                &ctx,
+                "Prefix cannot contain whitespace, newlines, or backticks.",
+                true,
+            )
             .await?;
         return Ok(());
     }
