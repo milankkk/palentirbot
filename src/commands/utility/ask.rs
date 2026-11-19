@@ -1759,6 +1759,7 @@ pub fn is_non_ai_command_with_prefix(content: &str, guild_prefix: Option<&str>) 
                     | "rtop"
                     | "rrn"
                     | "link"
+                    | "kys"
                     | "queue"
                     | "q"
                     | "skin"

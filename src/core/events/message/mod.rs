@@ -110,6 +110,16 @@ pub async fn handle_message(ctx: Arc<Context>, msg: Message) {
             }
         }
 
+        // ── kys ───────────────────────────────────────────────────────────────
+        "kys" => {
+            use crate::util::builder::MessageBuilder;
+            let builder =
+                MessageBuilder::new().content("https://klipy.com/gifs/finnish-hospital");
+            if let Err(err) = msg.channel_id.create_message(&ctx, &builder).await {
+                tracing::error!(?err, "prefix kys failed");
+            }
+        }
+
         // ── render ────────────────────────────────────────────────────────────
         "render" => {
             use crate::commands::danser::render_score::{
