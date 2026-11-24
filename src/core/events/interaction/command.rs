@@ -5,27 +5,20 @@ use eyre::{Context as _, Result};
 use crate::{
     core::{
         commands::{
-            checks::check_authority,
+            checks::check_authority_with_perms,
             slash::{Command, Commands, SlashCommand},
         },
-        events::{EventLocation, ProcessResult},
+        events::ProcessResult,
         BotConfig, Context,
     },
-    util::{interaction::InteractionCommand, Authored, InteractionCommandExt},
+    util::{
+        constants::NOT_OWNER, interaction::InteractionCommand, Authored, InteractionCommandExt,
+    },
 };
 
 pub async fn handle_command(ctx: Arc<Context>, mut command: InteractionCommand) {
     let name = mem::take(&mut command.data.name);
-
-    {
-        let username = command
-            .user()
-            .map(|u| u.name.as_str())
-            .unwrap_or("<unknown user>");
-
-        let location = EventLocation::new(&ctx, &command);
-        info!("[{location}] {username} used command `{name}`");
-    }
+    super::log_interaction(&ctx, &command, "used command", &name);
 
     let slash = match Commands::get().command(&name) {
         Some(slash) => slash,
@@ -79,15 +72,21 @@ async fn pre_process_command(
 
     // Only for owners?
     if slash.flags.only_owner() && !BotConfig::get().owners.contains(&user_id) {
-        let content = "That command can only be used by the bot owner";
-        command.error_callback(ctx, content, false).await?;
+        command.error_callback(ctx, NOT_OWNER, false).await?;
 
         return Ok(Some(ProcessResult::NoOwner));
     }
 
     // Only for authorities?
     if slash.flags.authority() {
-        match check_authority(ctx, user_id, command.channel_id, command.guild_id).await {
+        let member_perms = command.member.as_ref().and_then(|m| m.permissions);
+        match check_authority_with_perms(
+            ctx,
+            user_id,
+            command.channel_id,
+            command.guild_id,
+            member_perms,
+        ) {
             None => {}
             Some(content) => {
                 command.error_callback(ctx, content, false).await?;

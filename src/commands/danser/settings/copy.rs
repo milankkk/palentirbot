@@ -1,15 +1,17 @@
-use std::{fs, sync::Arc};
+use std::sync::Arc;
 
-use eyre::{Report, Result};
+use eyre::Result;
+use tokio::fs;
 
 use crate::{
-    core::{BotConfig, Context},
+    core::Context,
     util::{
-        builder::MessageBuilder, interaction::InteractionCommand, Authored, InteractionCommandExt,
+        builder::MessageBuilder, fs::copy_atomic, interaction::InteractionCommand, Authored,
+        InteractionCommandExt,
     },
 };
 
-use super::SettingsCopy;
+use super::{user_settings_path, SettingsCopy};
 
 pub async fn copy(
     ctx: Arc<Context>,
@@ -25,34 +27,26 @@ pub async fn copy(
         return Ok(());
     }
 
-    let danser_path = BotConfig::get().paths.danser();
-
-    let mut from = danser_path.to_owned();
-    from.push(format!("settings/{user}.json"));
-
-    if !from.exists() {
-        let content = "That user has not configured their settings yet";
-        command.error_callback(&ctx, content, false).await?;
+    let from = user_settings_path(user);
+    if !fs::try_exists(&from).await.unwrap_or(false) {
+        command
+            .error_callback(&ctx, "That user has not configured their settings yet", false)
+            .await?;
 
         return Ok(());
     }
 
-    let mut to = danser_path.to_owned();
-    to.push(format!("settings/{author}.json"));
+    let to = user_settings_path(author);
+    if let Err(err) = copy_atomic(&from, &to).await {
+        let _ = command
+            .error_callback(&ctx, "Failed to copy the settings file", false)
+            .await;
 
-    if let Err(err) = fs::copy(from, to) {
-        let content = "Failed to copy the settings file";
-        let _ = command.error_callback(&ctx, content, false).await;
-
-        let err =
-            Report::from(err).wrap_err(format!("failed to copy settings from {user} for {author}"));
-
-        Err(err)
-    } else {
-        let content = "Successfully copied settings!";
-        let builder = MessageBuilder::new().embed(content);
-        command.callback(&ctx, builder, false).await?;
-
-        Ok(())
+        return Err(err.wrap_err(format!("failed to copy settings from {user} for {author}")));
     }
+
+    let builder = MessageBuilder::new().embed("Successfully copied settings!");
+    command.callback(&ctx, builder, false).await?;
+
+    Ok(())
 }

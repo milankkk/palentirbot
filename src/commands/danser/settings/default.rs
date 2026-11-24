@@ -1,15 +1,17 @@
-use std::{fs, sync::Arc};
+use std::sync::Arc;
 
-use eyre::{Report, Result};
+use eyre::Result;
+use tokio::fs;
 
 use crate::{
-    core::{BotConfig, Context},
+    core::Context,
     util::{
-        builder::MessageBuilder, interaction::InteractionCommand, Authored, InteractionCommandExt,
+        builder::MessageBuilder, fs::copy_atomic, interaction::InteractionCommand, Authored,
+        InteractionCommandExt,
     },
 };
 
-use super::{SettingsConfirm, SettingsDefault};
+use super::{default_settings_path, user_settings_path, SettingsConfirm, SettingsDefault};
 
 pub async fn default(
     ctx: Arc<Context>,
@@ -27,34 +29,27 @@ pub async fn default(
     }
 
     let author = command.user_id()?;
-    let danser_path = BotConfig::get().paths.danser();
+    let from = default_settings_path();
 
-    let mut from = danser_path.to_owned();
-    from.push("settings/default.json");
-
-    if !from.exists() {
-        let content = "Could not find default settings";
-        let _ = command.error_callback(&ctx, content, false).await;
+    if !fs::try_exists(&from).await.unwrap_or(false) {
+        let _ = command
+            .error_callback(&ctx, "Could not find default settings", false)
+            .await;
 
         bail!("No default settings found at {from:?}");
     }
 
-    let mut to = danser_path.to_owned();
-    to.push(format!("settings/{author}.json"));
+    let to = user_settings_path(author);
+    if let Err(err) = copy_atomic(&from, &to).await {
+        let _ = command
+            .error_callback(&ctx, "Failed to set default values", false)
+            .await;
 
-    if let Err(err) = fs::copy(from, to) {
-        let content = "Failed to set default values";
-        let _ = command.error_callback(&ctx, content, false).await;
-
-        let err =
-            Report::from(err).wrap_err(format!("failed to copy default settings for {author}"));
-
-        Err(err)
-    } else {
-        let content = "Successfully restored default settings!";
-        let builder = MessageBuilder::new().embed(content);
-        command.callback(&ctx, builder, false).await?;
-
-        Ok(())
+        return Err(err.wrap_err(format!("failed to copy default settings for {author}")));
     }
+
+    let builder = MessageBuilder::new().embed("Successfully restored default settings!");
+    command.callback(&ctx, builder, false).await?;
+
+    Ok(())
 }

@@ -1,9 +1,8 @@
 use std::sync::Arc;
 
 use eyre::Result;
-use twilight_model::guild::Permissions;
 
-use super::SetupSetPrefix;
+use super::{require_guild_admin, SetupSetPrefix};
 use crate::util::InteractionCommandExt;
 use crate::{
     core::Context,
@@ -15,25 +14,15 @@ pub async fn set_prefix(
     command: InteractionCommand,
     args: SetupSetPrefix,
 ) -> Result<()> {
-    // Require Administrator.
-    let permissions = command
-        .member
-        .as_ref()
-        .and_then(|m| m.permissions)
-        .unwrap_or_else(Permissions::empty);
-
-    if !permissions.contains(Permissions::ADMINISTRATOR) {
-        command
-            .error_callback(
-                &ctx,
-                "You need **Administrator** permission to change the prefix.",
-                true,
-            )
-            .await?;
+    let Some(guild_id) = require_guild_admin(
+        &ctx,
+        &command,
+        "You need **Administrator** permission to change the prefix.",
+    )
+    .await?
+    else {
         return Ok(());
-    }
-
-    let guild_id = command.guild_id.unwrap();
+    };
     let new_prefix = args.prefix.trim().to_owned();
 
     if new_prefix.is_empty() {
@@ -42,9 +31,19 @@ pub async fn set_prefix(
             .await?;
         return Ok(());
     }
-    if new_prefix.len() > 16 {
+    if new_prefix.chars().count() > 16 {
         command
             .error_callback(&ctx, "Prefix must be 16 characters or fewer.", true)
+            .await?;
+        return Ok(());
+    }
+    if new_prefix.chars().any(|c| c.is_whitespace() || c == '`') {
+        command
+            .error_callback(
+                &ctx,
+                "Prefix cannot contain whitespace, newlines, or backticks.",
+                true,
+            )
             .await?;
         return Ok(());
     }

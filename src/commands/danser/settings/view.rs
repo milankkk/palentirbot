@@ -1,56 +1,100 @@
-use std::{fs::File, io::ErrorKind, sync::Arc};
+use std::{io::ErrorKind, sync::Arc};
 
-use eyre::{Report, Result};
+use eyre::{Context as _, Report, Result};
+use tokio::fs;
+use twilight_model::channel::message::component::ButtonStyle;
 
 use crate::{
-    core::{BotConfig, Context},
-    util::{builder::MessageBuilder, interaction::InteractionCommand, InteractionCommandExt},
+    core::{settings::DanserSettings, Context},
+    util::{
+        builder::{action_row, button, MessageBuilder},
+        interaction::InteractionCommand,
+        Authored, InteractionCommandExt,
+    },
 };
 
-use super::{create_settings_embed, SettingsView};
+use super::{create_settings_embed, default_settings_path, user_settings_path, SettingsView};
 
 pub async fn view(
     ctx: Arc<Context>,
     command: InteractionCommand,
     args: SettingsView,
 ) -> Result<()> {
-    let user = args.user.resolved;
+    let caller_id = command.user_id()?;
+    let target_user = match args.user {
+        Some(resolved) => resolved.resolved,
+        None => command.user()?.clone(),
+    };
+    let is_self = target_user.id == caller_id;
 
-    let mut user_path = BotConfig::get().paths.danser().to_owned();
-    user_path.push(format!("settings/{}.json", user.id));
+    let user_path = user_settings_path(target_user.id);
 
-    let settings = match File::open(&user_path) {
-        Ok(file) => match serde_json::from_reader(std::io::BufReader::new(file)) {
-            Ok(settings) => settings,
+    let (settings, using_default): (DanserSettings, bool) = match fs::read(&user_path).await {
+        Ok(bytes) => match serde_json::from_slice(&bytes) {
+            Ok(settings) => (settings, false),
             Err(err) => {
-                let content = "Failed to read settings file";
-                let _ = command.error_callback(&ctx, content, false).await;
+                let _ = command
+                    .error_callback(&ctx, "Failed to read settings file", false)
+                    .await;
 
-                let err = Report::from(err)
-                    .wrap_err(format!("Failed to deserialize file at {user_path:?}"));
-
-                return Err(err);
+                return Err(
+                    Report::from(err).wrap_err(format!("Failed to deserialize file at {user_path:?}"))
+                );
             }
         },
         Err(err) if err.kind() == ErrorKind::NotFound => {
-            let content = format!("User <@{}> has no specified settings yet", user.id);
-            let builder = MessageBuilder::new().embed(content);
-            command.callback(&ctx, builder, false).await?;
+            if !is_self {
+                let content = format!("User <@{}> has no specified settings yet", target_user.id);
+                command
+                    .callback(&ctx, MessageBuilder::new().embed(content), false)
+                    .await?;
 
-            return Ok(());
+                return Ok(());
+            }
+
+            let default_path = default_settings_path();
+            let bytes = fs::read(&default_path)
+                .await
+                .context("failed to read default.json")?;
+            let settings: DanserSettings = serde_json::from_slice(&bytes)
+                .context("failed to deserialize default.json")?;
+            (settings, true)
         }
         Err(err) => {
-            let content = "Failed to open settings file";
-            let _ = command.error_callback(&ctx, content, false).await;
-            let err = Report::from(err).wrap_err("failed to open settings file");
+            let _ = command
+                .error_callback(&ctx, "Failed to open settings file", false)
+                .await;
 
-            return Err(err);
+            return Err(Report::from(err).wrap_err("failed to open settings file"));
         }
     };
 
-    let embed = create_settings_embed(&user, &settings);
-    let builder = MessageBuilder::new().embed(embed);
+    let is_linked = ctx
+        .psql()
+        .get_linked_osu_user(target_user.id)
+        .await
+        .ok()
+        .flatten()
+        .is_some();
+    let embed = create_settings_embed(&target_user, &settings, is_linked);
+    let mut builder = MessageBuilder::new().embed(embed);
+    if using_default {
+        builder = builder.content("Showing default settings (no custom changes yet).");
+    }
+    if is_self {
+        builder = builder.components(vec![action_row(vec![button(
+            format!("uset_open:{caller_id}"),
+            "⚙️ Open Settings Menu",
+            ButtonStyle::Primary,
+        )])]);
+    }
     command.callback(&ctx, builder, false).await?;
+    if is_self {
+        crate::core::events::interaction::spawn_interaction_component_expiry(
+            Arc::clone(&ctx),
+            command.token,
+        );
+    }
 
     Ok(())
 }

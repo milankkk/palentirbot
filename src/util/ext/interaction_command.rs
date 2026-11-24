@@ -1,60 +1,52 @@
-use std::{borrow::Cow, mem, slice};
+use std::{borrow::Cow, mem};
 
 use eyre::Result;
 use twilight_interactions::command::CommandInputData;
 use twilight_model::{
     application::command::CommandOptionChoice,
-    channel::{message::MessageFlags, Message},
+    channel::Message,
     http::interaction::{InteractionResponse, InteractionResponseData, InteractionResponseType},
 };
 
-use crate::util::builder::EmbedBuilder;
-
 use crate::{
     core::Context,
-    util::{builder::MessageBuilder, constants::RED, interaction::InteractionCommand},
+    util::{
+        builder::{EmbedBuilder, MessageBuilder},
+        constants::RED,
+        interaction::InteractionCommand,
+    },
 };
+
+use super::{build_response_data, send_update_response};
 
 pub trait InteractionCommandExt {
     fn input_data(&mut self) -> CommandInputData<'static>;
 
-    fn callback<'a>(
-        &'a self,
-        ctx: &'a Context,
-        builder: MessageBuilder<'a>,
+    async fn callback(
+        &self,
+        ctx: &Context,
+        builder: MessageBuilder<'_>,
         ephemeral: bool,
-    ) -> impl std::future::Future<Output = Result<()>> + 'a;
+    ) -> Result<()>;
 
-    fn defer<'a>(
-        &'a self,
-        ctx: &'a Context,
+    async fn defer(&self, ctx: &Context, ephemeral: bool) -> Result<()>;
+
+    async fn update(&self, ctx: &Context, builder: &MessageBuilder<'_>) -> Result<Message>;
+
+    async fn error(&self, ctx: &Context, content: impl Into<String>) -> Result<Message>;
+
+    async fn error_callback(
+        &self,
+        ctx: &Context,
+        content: impl Into<String>,
         ephemeral: bool,
-    ) -> impl std::future::Future<Output = Result<()>> + 'a;
+    ) -> Result<()>;
 
-    fn update<'a>(
-        &'a self,
-        ctx: &'a Context,
-        builder: &'a MessageBuilder<'a>,
-    ) -> impl std::future::Future<Output = Result<Message>> + 'a;
-
-    fn error<'a>(
-        &'a self,
-        ctx: &'a Context,
-        content: impl Into<String> + 'a,
-    ) -> impl std::future::Future<Output = Result<Message>> + 'a;
-
-    fn error_callback<'a>(
-        &'a self,
-        ctx: &'a Context,
-        content: impl Into<String> + 'a,
-        ephemeral: bool,
-    ) -> impl std::future::Future<Output = Result<()>> + 'a;
-
-    fn autocomplete<'a>(
-        &'a self,
-        ctx: &'a Context,
+    async fn autocomplete(
+        &self,
+        ctx: &Context,
         choices: Vec<CommandOptionChoice>,
-    ) -> impl std::future::Future<Output = Result<()>> + 'a;
+    ) -> Result<()>;
 }
 
 impl InteractionCommandExt for InteractionCommand {
@@ -65,23 +57,15 @@ impl InteractionCommandExt for InteractionCommand {
         }
     }
 
-    async fn callback<'a>(
-        &'a self,
-        ctx: &'a Context,
-        builder: MessageBuilder<'a>,
+    async fn callback(
+        &self,
+        ctx: &Context,
+        builder: MessageBuilder<'_>,
         ephemeral: bool,
     ) -> Result<()> {
-        let data = InteractionResponseData {
-            components: builder.components,
-            content: builder.content.map(|c| c.into_owned()),
-            embeds: builder.embed.map(|e| vec![e]),
-            flags: ephemeral.then_some(MessageFlags::EPHEMERAL),
-            ..Default::default()
-        };
-
         let response = InteractionResponse {
             kind: InteractionResponseType::ChannelMessageWithSource,
-            data: Some(data),
+            data: Some(build_response_data(builder, ephemeral)),
         };
 
         ctx.interaction()
@@ -91,15 +75,10 @@ impl InteractionCommandExt for InteractionCommand {
         Ok(())
     }
 
-    async fn defer<'a>(&'a self, ctx: &'a Context, ephemeral: bool) -> Result<()> {
-        let data = InteractionResponseData {
-            flags: ephemeral.then_some(MessageFlags::EPHEMERAL),
-            ..Default::default()
-        };
-
+    async fn defer(&self, ctx: &Context, ephemeral: bool) -> Result<()> {
         let response = InteractionResponse {
             kind: InteractionResponseType::DeferredChannelMessageWithSource,
-            data: Some(data),
+            data: Some(build_response_data(MessageBuilder::new(), ephemeral)),
         };
 
         ctx.interaction()
@@ -109,54 +88,28 @@ impl InteractionCommandExt for InteractionCommand {
         Ok(())
     }
 
-    async fn update<'a>(
-        &'a self,
-        ctx: &'a Context,
-        builder: &'a MessageBuilder<'a>,
-    ) -> Result<Message> {
-        let token = self.token.as_str();
-        let client = ctx.interaction();
-        let mut req = client.update_response(token);
-
-        if let Some(ref content) = builder.content {
-            req = req.content(Some(content.as_ref()));
-        }
-
-        if let Some(ref embed) = builder.embed {
-            req = req.embeds(Some(slice::from_ref(embed)));
-        }
-
-        if let Some(ref components) = builder.components {
-            req = req.components(Some(components));
-        }
-
-        if let Some(ref attachment) = builder.attachment {
-            req = req.attachments(slice::from_ref(attachment));
-        }
-
-        Ok(req.await?.model().await? as twilight_model::channel::Message)
+    async fn update(&self, ctx: &Context, builder: &MessageBuilder<'_>) -> Result<Message> {
+        send_update_response(ctx, &self.token, builder).await
     }
 
-    async fn error<'a>(
-        &'a self,
-        ctx: &'a Context,
-        content: impl Into<String> + 'a,
-    ) -> Result<Message> {
+    async fn error(&self, ctx: &Context, content: impl Into<String>) -> Result<Message> {
         let embed = EmbedBuilder::new().description(content).color(RED).build();
 
         Ok(ctx
             .interaction()
             .update_response(&self.token)
+            .content(None)
             .embeds(Some(&[embed]))
+            .components(Some(&[]))
             .await?
             .model()
             .await?)
     }
 
-    async fn error_callback<'a>(
-        &'a self,
-        ctx: &'a Context,
-        content: impl Into<String> + 'a,
+    async fn error_callback(
+        &self,
+        ctx: &Context,
+        content: impl Into<String>,
         ephemeral: bool,
     ) -> Result<()> {
         let embed = EmbedBuilder::new().description(content).color(RED);
@@ -165,9 +118,9 @@ impl InteractionCommandExt for InteractionCommand {
         self.callback(ctx, builder, ephemeral).await
     }
 
-    async fn autocomplete<'a>(
-        &'a self,
-        ctx: &'a Context,
+    async fn autocomplete(
+        &self,
+        ctx: &Context,
         choices: Vec<CommandOptionChoice>,
     ) -> Result<()> {
         let data = InteractionResponseData {

@@ -1,0 +1,1114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Replays</title>
+  <meta name="description" content="Rendered osu! replay gallery.">
+  <meta name="theme-color" content="#2e3440">
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <script>(function(){try{var t=localStorage.getItem("osu_site_theme_v1");var ok=["nord-dark","nord-light","midnight","osu-pink","catppuccin-mocha","sakura-light","oled-pitch"];document.documentElement.dataset.theme=ok.indexOf(t)>=0?t:"nord-dark";}catch(_){document.documentElement.dataset.theme="nord-dark";}})();</script>
+  <style>
+    :root {
+      --bg: #2e3440;
+      --surface: #3b4252;
+      --surface-2: #434c5e;
+      --border: rgba(216, 222, 233, 0.13);
+      --border-hover: rgba(136, 192, 208, 0.56);
+      --text: #eceff4;
+      --text-dim: #d8dee9;
+      --text-muted: #9aa7bc;
+      --accent: #88c0d0;
+      --accent-2: #81a1c1;
+      --green: #a3be8c;
+      --amber: #ebcb8b;
+      --rose: #bf616a;
+      --radius: 15px;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      min-height: 100vh;
+      font-family: 'Segoe UI', system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+      background-color: var(--bg);
+      background-image:
+        radial-gradient(circle at 14% 8%, rgba(150, 223, 227, 0.13), transparent 34%),
+        radial-gradient(circle at 86% 84%, rgba(176, 102, 255, 0.12), transparent 34%);
+      background-attachment: fixed;
+      color: var(--text);
+      padding: 24px 20px 64px;
+    }
+    .wrap {
+      width: 100%;
+      max-width: 1360px;
+      margin: 0 auto;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    /* Clean Brand-Free Header */
+    .header {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 12px 16px;
+      padding-bottom: 14px;
+      border-bottom: 1px solid var(--border);
+    }
+    .title-area { display: flex; flex-direction: column; gap: 6px; }
+    h1.page-title {
+      font-size: 1.65rem;
+      font-weight: 800;
+      letter-spacing: -0.025em;
+      line-height: 1.1;
+      background: linear-gradient(135deg, var(--accent), var(--accent-2));
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+    }
+    .kpi-pills {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 6px 14px;
+      font-size: 0.81rem;
+      color: var(--text-dim);
+    }
+    .kpi-item strong { color: var(--text); font-weight: 700; }
+
+    .nav-actions { display: flex; flex-wrap: wrap; gap: 7px; align-items: center; }
+    .nav-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      text-decoration: none;
+      color: var(--text-dim);
+      font-size: 0.84rem;
+      font-weight: 600;
+      padding: 7px 13px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.035);
+      cursor: pointer;
+      transition: all 0.14s;
+    }
+    .nav-btn:hover, .nav-btn.active {
+      color: var(--text);
+      border-color: var(--border-hover);
+      background: rgba(150, 223, 227, 0.1);
+    }
+
+    /* Controls Panel */
+    .controls {
+      background: rgba(18, 23, 37, 0.86);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 13px 15px;
+      display: flex;
+      flex-direction: column;
+      gap: 11px;
+    }
+    .controls-top {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 9px;
+      align-items: center;
+    }
+    .search-wrap { position: relative; flex: 1 1 280px; min-width: 200px; }
+    .search-icon {
+      position: absolute;
+      left: 12px;
+      top: 50%;
+      transform: translateY(-50%);
+      width: 15px;
+      height: 15px;
+      color: var(--text-muted);
+      pointer-events: none;
+    }
+    .search-input {
+      width: 100%;
+      padding: 8px 60px 8px 34px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: rgba(10, 14, 23, 0.78);
+      color: var(--text);
+      font-size: 0.88rem;
+      outline: none;
+      transition: border-color 0.14s;
+    }
+    .search-input:focus { border-color: var(--accent); }
+    .search-input::placeholder { color: var(--text-muted); }
+    .kbd-hint {
+      position: absolute;
+      right: 9px;
+      top: 50%;
+      transform: translateY(-50%);
+      font-size: 0.71rem;
+      font-weight: 700;
+      padding: 2px 6px;
+      border-radius: 5px;
+      color: var(--text-muted);
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid var(--border);
+      pointer-events: none;
+    }
+    .search-clear {
+      position: absolute;
+      right: 33px;
+      top: 50%;
+      transform: translateY(-50%);
+      background: none;
+      border: none;
+      color: var(--text-muted);
+      font-size: 1rem;
+      cursor: pointer;
+      padding: 2px 5px;
+      display: none;
+    }
+    .search-clear.show { display: inline-flex; }
+    .search-clear:hover { color: var(--text); }
+
+    .seg-control {
+      display: inline-flex;
+      align-items: center;
+      border-radius: 10px;
+      overflow: hidden;
+      border: 1px solid var(--border);
+      background: rgba(10, 14, 23, 0.65);
+    }
+    .seg-control select {
+      height: 34px;
+      padding: 0 11px;
+      border: none;
+      background: transparent;
+      color: var(--text);
+      font-size: 0.83rem;
+      font-weight: 600;
+      outline: none;
+      cursor: pointer;
+    }
+    .seg-control select option { background: #121725; color: var(--text); }
+    .seg-control button {
+      height: 34px;
+      padding: 0 11px;
+      border: none;
+      border-left: 1px solid var(--border);
+      background: transparent;
+      color: var(--text-dim);
+      font-size: 0.81rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.13s, color 0.13s;
+    }
+    .seg-control button:first-child { border-left: none; }
+    .seg-control button:hover { color: var(--text); background: rgba(255, 255, 255, 0.06); }
+    .seg-control button.active { background: rgba(150, 223, 227, 0.16); color: var(--accent); }
+
+    /* Filter Strips */
+    .filter-rows {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      padding-top: 9px;
+      border-top: 1px solid rgba(255, 255, 255, 0.06);
+    }
+    .filter-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+    .filter-label {
+      font-size: 0.7rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--text-muted);
+      min-width: 56px;
+    }
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 0.76rem;
+      font-weight: 600;
+      color: var(--text-dim);
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid var(--border);
+      cursor: pointer;
+      transition: all 0.13s;
+      user-select: none;
+    }
+    .chip:hover { color: var(--text); border-color: rgba(255, 255, 255, 0.22); }
+    .chip.active { color: #071419; background: var(--accent); border-color: var(--accent); }
+    .chip.player-chip.active { color: #160826; background: var(--accent-2); border-color: var(--accent-2); }
+    .chip .cnt { font-size: 0.69rem; opacity: 0.72; }
+
+    .status-bar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      font-size: 0.81rem;
+      color: var(--text-dim);
+      padding: 0 2px;
+    }
+    .reset-btn {
+      background: rgba(251, 113, 133, 0.12);
+      border: 1px solid rgba(251, 113, 133, 0.35);
+      color: #fda4af;
+      padding: 4px 10px;
+      border-radius: 8px;
+      font-size: 0.76rem;
+      font-weight: 600;
+      cursor: pointer;
+      display: none;
+    }
+    .reset-btn.show { display: inline-flex; align-items: center; gap: 5px; }
+    .reset-btn:hover { background: rgba(251, 113, 133, 0.22); }
+
+    /* Grid View */
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(295px, 1fr));
+      gap: 16px;
+    }
+    .card {
+      display: flex;
+      flex-direction: column;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+      transition: transform 0.16s, border-color 0.16s, box-shadow 0.16s;
+    }
+    .card:hover {
+      transform: translateY(-2px);
+      border-color: var(--border-hover);
+      box-shadow: 0 14px 36px rgba(0, 0, 0, 0.38);
+    }
+    .card[hidden] { display: none !important; }
+
+    .thumb-wrap {
+      position: relative;
+      display: block;
+      aspect-ratio: 16 / 9;
+      background: #0c101b;
+      overflow: hidden;
+      text-decoration: none;
+    }
+    .thumb-wrap picture, .thumb-wrap img { width: 100%; height: 100%; object-fit: cover; display: block; }
+    .sprite-layer {
+      position: absolute;
+      inset: 0;
+      background-repeat: no-repeat;
+      background-size: 600% 100%;
+      background-position: 0% 50%;
+      opacity: 0;
+      transition: opacity 0.12s ease;
+      pointer-events: none;
+    }
+    .thumb-wrap.scrubbing .sprite-layer { opacity: 1; }
+    .scrub-bar {
+      position: absolute;
+      left: 0; right: 0; bottom: 0;
+      height: 3px;
+      background: rgba(255, 255, 255, 0.16);
+      opacity: 0;
+      transition: opacity 0.12s;
+      pointer-events: none;
+      z-index: 4;
+    }
+    .scrub-fill { height: 100%; width: 0%; background: var(--accent); }
+    .thumb-wrap.scrubbing .scrub-bar { opacity: 1; }
+
+    .thumb-grad {
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(180deg, rgba(6,8,14,0.52) 0%, transparent 38%, transparent 62%, rgba(6,8,14,0.72) 100%);
+      pointer-events: none;
+      z-index: 2;
+    }
+    .badge-tl { position: absolute; top: 8px; left: 8px; display: flex; flex-wrap: wrap; gap: 5px; z-index: 3; max-width: calc(100% - 16px); }
+    .badge-bl { position: absolute; bottom: 8px; left: 8px; display: flex; gap: 5px; z-index: 3; }
+    .badge-br { position: absolute; bottom: 8px; right: 8px; display: flex; gap: 5px; z-index: 3; }
+    .b-pill {
+      font-size: 0.72rem;
+      font-weight: 800;
+      padding: 2px 7px;
+      border-radius: 6px;
+      background: rgba(10, 14, 23, 0.85);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      color: var(--text);
+      backdrop-filter: blur(4px);
+      line-height: 1.35;
+    }
+    .b-star-low { color: #6ee7b7; border-color: rgba(52, 211, 153, 0.35); }
+    .b-star-mid { color: var(--accent); border-color: rgba(150, 223, 227, 0.35); }
+    .b-star-high { color: #f9a8d4; border-color: rgba(244, 114, 182, 0.4); }
+    .b-star-insane { color: #d8b4fe; border-color: rgba(176, 102, 255, 0.5); background: rgba(24, 12, 46, 0.88); }
+    .b-mod { color: #fde68a; border-color: rgba(251, 191, 36, 0.35); }
+    .b-pp { color: #071419; background: rgba(150, 223, 227, 0.94); border-color: var(--accent); }
+    .meta-stats { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+    .meta-pp { color: var(--accent); font-weight: 800; }
+    .b-grade-SSH, .b-grade-SH { color: #e2e8f0; border-color: rgba(226, 232, 240, 0.5); }
+    .b-grade-SS, .b-grade-S { color: #fde047; border-color: rgba(250, 204, 21, 0.45); }
+    .b-grade-A { color: #4ade80; border-color: rgba(74, 222, 128, 0.4); }
+    .b-grade-B { color: #60a5fa; border-color: rgba(96, 165, 250, 0.4); }
+    .b-grade-C { color: #d8b4fe; border-color: rgba(216, 180, 254, 0.4); }
+    .b-grade-D, .b-grade-F { color: #fb7185; border-color: rgba(251, 113, 133, 0.4); }
+    .b-exp { font-weight: 700; color: #cbd5e1; }
+    .b-exp.warn { color: #fde68a; border-color: rgba(251, 191, 36, 0.45); }
+    .b-exp.urgent { color: #fda4af; border-color: rgba(251, 113, 133, 0.55); background: rgba(48, 12, 20, 0.88); }
+
+    .card-body { padding: 12px 14px 13px; display: flex; flex-direction: column; gap: 8px; flex: 1; }
+    .card-title {
+      color: var(--text);
+      text-decoration: none;
+      font-size: 0.9rem;
+      font-weight: 700;
+      line-height: 1.35;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+    .card-title:hover { color: var(--accent); }
+    .card-meta {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      font-size: 0.78rem;
+      color: var(--text-dim);
+      margin-top: auto;
+    }
+    .player-link {
+      background: none;
+      border: none;
+      padding: 0;
+      color: #d6deeb;
+      font-weight: 700;
+      font-size: 0.8rem;
+      cursor: pointer;
+      text-align: left;
+      max-width: 58%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .player-link:hover { color: var(--accent); text-decoration: underline; }
+    .card-foot {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding-top: 8px;
+      border-top: 1px solid rgba(255, 255, 255, 0.06);
+      font-size: 0.75rem;
+      color: var(--text-muted);
+    }
+    .card-actions { display: flex; gap: 5px; }
+    .mini-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 28px;
+      height: 26px;
+      border-radius: 7px;
+      border: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.03);
+      color: var(--text-dim);
+      text-decoration: none;
+      cursor: pointer;
+      transition: all 0.14s;
+    }
+    .mini-btn:hover { color: var(--text); border-color: var(--border-hover); background: rgba(150, 223, 227, 0.12); }
+
+    /* Compact List View */
+    .grid.list-view { display: flex; flex-direction: column; gap: 8px; }
+    .grid.list-view .card { flex-direction: row; align-items: center; padding: 8px 12px; gap: 14px; }
+    .grid.list-view .thumb-wrap { width: 148px; flex-shrink: 0; border-radius: 9px; }
+    .grid.list-view .badge-tl, .grid.list-view .badge-bl { display: none; }
+    .grid.list-view .card-body { padding: 0; flex-direction: row; align-items: center; gap: 14px; min-width: 0; }
+    .grid.list-view .card-title { flex: 1 1 260px; -webkit-line-clamp: 1; font-size: 0.88rem; }
+    .grid.list-view .card-meta { margin-top: 0; flex-shrink: 0; gap: 14px; }
+    .grid.list-view .player-link { max-width: 140px; }
+    .grid.list-view .card-foot { border-top: none; padding-top: 0; flex-shrink: 0; gap: 12px; }
+    .list-badges { display: none; gap: 5px; align-items: center; flex-shrink: 0; }
+    .grid.list-view .list-badges { display: inline-flex; }
+
+    @media (max-width: 820px) {
+      .grid.list-view .card { flex-wrap: wrap; }
+      .grid.list-view .thumb-wrap { width: 112px; }
+      .grid.list-view .card-body { flex-wrap: wrap; gap: 6px 12px; }
+    }
+
+    .empty {
+      display: none;
+      text-align: center;
+      padding: 56px 20px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      color: var(--text-dim);
+    }
+    .empty.show { display: block; }
+    .empty h2 { font-size: 1.08rem; color: var(--text); margin-bottom: 8px; }
+
+    .toast {
+      position: fixed;
+      bottom: 22px;
+      left: 50%;
+      transform: translateX(-50%) translateY(18px);
+      background: rgba(16, 21, 34, 0.96);
+      border: 1px solid rgba(150, 223, 227, 0.45);
+      color: var(--text);
+      padding: 9px 16px;
+      border-radius: 10px;
+      font-size: 0.84rem;
+      font-weight: 600;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.18s, transform 0.18s;
+      z-index: 100;
+      box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+    }
+    .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  </style>
+  <link rel="stylesheet" href="/themes.css?v=2">
+</head>
+<body>
+  <div class="wrap">
+    <header class="header">
+      <div class="title-area">
+        <h1 class="page-title">Replays</h1>
+        <div class="kpi-pills" id="kpi-pills"></div>
+      </div>
+      <div class="nav-actions">
+        <a class="nav-btn active" href="/">Gallery</a>
+        <a class="nav-btn" href="/render">Render</a>
+        <a class="nav-btn" href="/config">Config</a>
+        <a class="nav-btn" href="/stats">Stats</a>
+        <button class="nav-btn" id="random-btn" type="button" title="Jump to a random replay">Random</button>
+      </div>
+    </header>
+
+    <section class="controls">
+      <div class="controls-top">
+        <div class="search-wrap">
+          <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          <input class="search-input" id="search" type="search" placeholder="Search player, map, difficulty, mod, grade..." autocomplete="off">
+          <button class="search-clear" id="search-clear" type="button" title="Clear search">&times;</button>
+          <span class="kbd-hint">/</span>
+        </div>
+
+        <div class="seg-control">
+          <select id="sort-select" aria-label="Sort replays">
+            <option value="newest">Newest</option>
+            <option value="pp">Highest PP</option>
+            <option value="stars">Star Rating</option>
+            <option value="acc">Accuracy</option>
+            <option value="duration">Duration</option>
+            <option value="size">File Size</option>
+            <option value="expiry">Expiring Soonest</option>
+          </select>
+          <button id="dir-btn" type="button" title="Toggle ascending / descending">&#8595;</button>
+        </div>
+
+        <div class="seg-control" role="group" aria-label="Layout view">
+          <button id="view-grid" type="button" class="active">Grid</button>
+          <button id="view-list" type="button">List</button>
+        </div>
+      </div>
+
+      <div class="filter-rows">
+        <div class="filter-row" id="mod-strip">
+          <span class="filter-label">Mods</span>
+        </div>
+        <div class="filter-row" id="player-strip" style="display:none;">
+          <span class="filter-label">Players</span>
+        </div>
+      </div>
+    </section>
+
+    <div class="status-bar">
+      <span id="result-count">Loading replays…</span>
+      <button class="reset-btn" id="reset-btn" type="button">&times; Reset Filters</button>
+    </div>
+
+    <main class="grid" id="grid"></main>
+
+    <div class="empty" id="empty-state">
+      <h2>No matching replays</h2>
+      <p id="empty-msg">Try clearing your search or mod filters.</p>
+    </div>
+  </div>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <script id="ssr-index" type="application/json">[[ if fileExists "/index.json" ]][[ readFile "/index.json" | replace "<" "\\u003c" ]][[ else ]]null[[ end ]]</script>
+  <script id="ssr-browse" type="application/json">[{{range .Items}}{{if not .IsDir}}{{if hasSuffix .Name ".mp4"}}{"name":"{{.Name}}","size":{{.Size}},"mod":{{.ModTime.Unix}}},{{end}}{{end}}{{end}}null]</script>
+
+  <script>
+    (function () {
+      const RETENTION_SECS_DEFAULT = 7 * 86400;
+      const PREF_KEY = "osu_gallery_prefs_v1";
+
+      const grid = document.getElementById("grid");
+      const searchInput = document.getElementById("search");
+      const searchClear = document.getElementById("search-clear");
+      const sortSelect = document.getElementById("sort-select");
+      const dirBtn = document.getElementById("dir-btn");
+      const viewGridBtn = document.getElementById("view-grid");
+      const viewListBtn = document.getElementById("view-list");
+      const modStrip = document.getElementById("mod-strip");
+      const playerStrip = document.getElementById("player-strip");
+      const resultCount = document.getElementById("result-count");
+      const resetBtn = document.getElementById("reset-btn");
+      const emptyState = document.getElementById("empty-state");
+      const emptyMsg = document.getElementById("empty-msg");
+      const kpiPills = document.getElementById("kpi-pills");
+      const randomBtn = document.getElementById("random-btn");
+      const toastEl = document.getElementById("toast");
+
+      let toastTimer = null;
+      function showToast(msg) {
+        toastEl.textContent = msg;
+        toastEl.classList.add("show");
+        clearTimeout(toastTimer);
+        toastTimer = setTimeout(() => toastEl.classList.remove("show"), 2000);
+      }
+
+      function fmtBytes(b) {
+        if (!b || b <= 0) return "0 B";
+        const u = ["B", "KB", "MB", "GB"];
+        const i = Math.min(u.length - 1, Math.floor(Math.log(b) / Math.log(1024)));
+        return (b / Math.pow(1024, i)).toFixed(i >= 2 ? 1 : 0) + " " + u[i];
+      }
+      function fmtDur(sec) {
+        if (!sec || !isFinite(sec) || sec <= 0) return "";
+        const h = Math.floor(sec / 3600);
+        const m = Math.floor((sec % 3600) / 60);
+        const s = Math.floor(sec % 60);
+        if (h > 0) return h + ":" + String(m).padStart(2, "0") + ":" + String(s).padStart(2, "0");
+        return m + ":" + String(s).padStart(2, "0");
+      }
+      function fmtRuntimeTotal(sec) {
+        if (!sec || sec <= 0) return "0m";
+        const h = Math.floor(sec / 3600);
+        const m = Math.round((sec % 3600) / 60);
+        return h > 0 ? h + "h " + m + "m" : m + "m";
+      }
+      function fmtRelTime(ts) {
+        if (!ts) return "";
+        const diff = Math.max(0, Math.floor(Date.now() / 1000) - ts);
+        if (diff < 60) return "just now";
+        if (diff < 3600) return Math.floor(diff / 60) + "m ago";
+        if (diff < 86400) return Math.floor(diff / 3600) + "h ago";
+        return Math.floor(diff / 86400) + "d ago";
+      }
+      function fmtExpiryInfo(expTs) {
+        const left = Math.max(0, expTs - Math.floor(Date.now() / 1000));
+        if (left <= 0) return { text: "Expiring", cls: "urgent", left: 0 };
+        const d = Math.floor(left / 86400);
+        const h = Math.floor((left % 86400) / 3600);
+        if (left < 86400) return { text: (h > 0 ? h + "h" : "<1h") + " left", cls: "urgent", left };
+        if (left < 2 * 86400) return { text: d + "d " + h + "h left", cls: "warn", left };
+        return { text: d + "d left", cls: "", left };
+      }
+      function splitMods(m) {
+        if (!m || m === "NM") return ["NM"];
+        const out = [];
+        for (let i = 0; i < m.length; i += 2) {
+          const tok = m.slice(i, i + 2);
+          if (tok) out.push(tok);
+        }
+        return out.length ? out : ["NM"];
+      }
+      function starClass(s) {
+        if (!s || s < 4.5) return "b-star-low";
+        if (s < 6.5) return "b-star-mid";
+        if (s < 8.5) return "b-star-high";
+        return "b-star-insane";
+      }
+      function parseSlugFallback(item) {
+        const slug = item.name.replace(/\.mp4$/i, "");
+        const m = slug.match(/^(\d+_\d+)-([^-]+)-(.+)-([A-Z0-9]{2,16})-(\d+_\d+)_[0-9a-f]{4,}_(\d+)$/);
+        return {
+          slug,
+          title: m ? m[3].replace(/_-_/g, " - ").replace(/_/g, " ") : slug,
+          map_title: m ? m[3].replace(/_-_/g, " - ").replace(/_/g, " ") : slug,
+          player: m ? m[2].replace(/_/g, " ") : "Unknown",
+          stars: m ? parseFloat(m[1].replace("_", ".")) : null,
+          mods: m ? m[4] : "NM",
+          accuracy: m ? parseFloat(m[5].replace("_", ".")) : null,
+          size_bytes: item.size || 0,
+          uploaded_at: item.mod || 0,
+          expires_at: (item.mod || 0) + RETENTION_SECS_DEFAULT,
+          has_thumb: true,
+          has_webp: false,
+          has_sprite: false,
+        };
+      }
+
+      let indexData = null;
+      try {
+        const raw = document.getElementById("ssr-index").textContent.trim();
+        if (raw && raw !== "null") indexData = JSON.parse(raw);
+      } catch (_) {}
+
+      let browseItems = [];
+      try {
+        browseItems = JSON.parse(document.getElementById("ssr-browse").textContent).filter(Boolean);
+      } catch (_) {}
+
+      const retentionDays = (indexData && indexData.retention_days) || 7;
+      const retentionSecs = retentionDays * 86400;
+      const bySlug = new Map();
+
+      if (indexData && Array.isArray(indexData.replays)) {
+        indexData.replays.forEach((r) => { if (r && r.slug) bySlug.set(r.slug, r); });
+      }
+      browseItems.forEach((b) => {
+        const slug = b.name.replace(/\.mp4$/i, "");
+        if (!bySlug.has(slug)) {
+          const fb = parseSlugFallback(b);
+          fb.expires_at = (b.mod || 0) + retentionSecs;
+          bySlug.set(slug, fb);
+        }
+      });
+
+      const replays = [...bySlug.values()].map((r) => {
+        const modTokens = splitMods(r.mods);
+        const expTs = r.expires_at || ((r.uploaded_at || 0) + retentionSecs);
+        let decodedSkin = r.skin || "";
+        if (decodedSkin) {
+          try { decodedSkin = decodeURIComponent(decodedSkin); } catch (_) {}
+          decodedSkin = decodedSkin.replace(/_/g, " ");
+        }
+        const searchBlob = [r.title, r.map_title, r.player, r.mods, modTokens.join(" "), r.grade, r.skin, decodedSkin, r.short_id, r.slug]
+          .filter(Boolean).join(" ").toLowerCase();
+        return { ...r, modTokens, expires_at: expTs, searchBlob };
+      });
+
+      // Header summary bar (including Latest upload timestamp)
+      const totalBytes = replays.reduce((s, r) => s + (r.size_bytes || 0), 0);
+      const totalDur = replays.reduce((s, r) => s + (r.duration || 0), 0);
+      const latestTs = replays.reduce((m, r) => Math.max(m, r.uploaded_at || 0), 0);
+      const kpiDefs = [
+        [String(replays.length), replays.length === 1 ? "replay" : "replays"],
+        totalDur > 0 ? [fmtRuntimeTotal(totalDur), "runtime"] : null,
+        totalBytes > 0 ? [fmtBytes(totalBytes), "stored"] : null,
+        latestTs > 0 ? ["Latest", fmtRelTime(latestTs)] : null,
+        [retentionDays + "d", "retention"],
+      ].filter(Boolean);
+      kpiDefs.forEach(([strongTxt, restTxt]) => {
+        const sp = document.createElement("span");
+        sp.className = "kpi-item";
+        const st = document.createElement("strong");
+        st.textContent = strongTxt;
+        sp.append(st, " " + restTxt);
+        kpiPills.appendChild(sp);
+      });
+
+      let savedPrefs = {};
+      try { savedPrefs = JSON.parse(localStorage.getItem(PREF_KEY) || "{}"); } catch (_) {}
+
+      const params = new URLSearchParams(location.search);
+      const state = {
+        q: params.get("q") || "",
+        mods: new Set((params.get("mods") || "").split(",").map((s) => s.trim().toUpperCase()).filter(Boolean)),
+        player: params.get("player") || "",
+        sort: params.get("sort") || "newest",
+        dir: params.get("dir") || (params.get("sort") === "expiry" ? "asc" : "desc"),
+        view: params.get("view") || savedPrefs.view || "grid",
+      };
+
+      let lastSortKey = null, lastSortDir = null;
+
+      function syncURL() {
+        const sp = new URLSearchParams();
+        if (state.q) sp.set("q", state.q);
+        if (state.mods.size) sp.set("mods", [...state.mods].join(","));
+        if (state.player) sp.set("player", state.player);
+        if (state.sort !== "newest") sp.set("sort", state.sort);
+        const defaultDir = state.sort === "expiry" ? "asc" : "desc";
+        if (state.dir !== defaultDir) sp.set("dir", state.dir);
+        if (state.view === "list") sp.set("view", "list");
+        const qs = sp.toString();
+        history.replaceState(null, "", qs ? "?" + qs : location.pathname);
+      }
+
+      // Mod chips
+      const modCounts = new Map();
+      replays.forEach((r) => r.modTokens.forEach((t) => modCounts.set(t, (modCounts.get(t) || 0) + 1)));
+      const modOrder = ["NM", "HD", "DT", "NC", "HR", "HT", "EZ", "FL", "SD", "PF", "V2", "CL", "NF", "SO"];
+      const activeModsList = [...modCounts.keys()].sort((a, b) => {
+        const ia = modOrder.indexOf(a), ib = modOrder.indexOf(b);
+        if (ia !== -1 && ib !== -1) return ia - ib;
+        if (ia !== -1) return -1;
+        if (ib !== -1) return 1;
+        return (modCounts.get(b) || 0) - (modCounts.get(a) || 0);
+      });
+
+      const modChipEls = new Map();
+      const allModChip = document.createElement("button");
+      allModChip.type = "button";
+      allModChip.className = "chip";
+      allModChip.textContent = "All";
+      allModChip.onclick = () => { state.mods.clear(); applyFilters(); };
+      modStrip.appendChild(allModChip);
+
+      activeModsList.forEach((tok) => {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "chip";
+        btn.innerHTML = '<span></span><span class="cnt"></span>';
+        btn.children[0].textContent = tok === "NM" ? "NM" : "+" + tok;
+        btn.children[1].textContent = String(modCounts.get(tok));
+        btn.onclick = () => {
+          if (state.mods.has(tok)) state.mods.delete(tok);
+          else state.mods.add(tok);
+          applyFilters();
+        };
+        modChipEls.set(tok, btn);
+        modStrip.appendChild(btn);
+      });
+
+      // Player chips
+      const playerCounts = new Map();
+      replays.forEach((r) => { if (r.player) playerCounts.set(r.player, (playerCounts.get(r.player) || 0) + 1); });
+      const topPlayers = [...playerCounts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, 10);
+
+      const playerChipEls = new Map();
+      if (topPlayers.length > 1) {
+        playerStrip.style.display = "flex";
+        const allPChip = document.createElement("button");
+        allPChip.type = "button";
+        allPChip.className = "chip player-chip";
+        allPChip.textContent = "All";
+        allPChip.onclick = () => { state.player = ""; applyFilters(); };
+        playerChipEls.set("", allPChip);
+        playerStrip.appendChild(allPChip);
+
+        topPlayers.forEach(([name, cnt]) => {
+          const btn = document.createElement("button");
+          btn.type = "button";
+          btn.className = "chip player-chip";
+          btn.innerHTML = '<span></span><span class="cnt"></span>';
+          btn.children[0].textContent = name;
+          btn.children[1].textContent = String(cnt);
+          btn.onclick = () => {
+            state.player = state.player.toLowerCase() === name.toLowerCase() ? "" : name;
+            applyFilters();
+          };
+          playerChipEls.set(name.toLowerCase(), btn);
+          playerStrip.appendChild(btn);
+        });
+      }
+
+      // Build cards once
+      const cards = replays.map((r) => {
+        const slugEnc = encodeURIComponent(r.slug);
+        const watchKey = encodeURIComponent(r.short_id || r.slug);
+        const watchHref = "/watch/" + watchKey;
+        const mp4Href = "/" + slugEnc + ".mp4";
+        const absWatch = location.origin + watchHref;
+        const expInfo = fmtExpiryInfo(r.expires_at);
+
+        const card = document.createElement("article");
+        card.className = "card";
+
+        const thumbA = document.createElement("a");
+        thumbA.className = "thumb-wrap";
+        thumbA.href = watchHref;
+
+        const pic = document.createElement("picture");
+        if (r.has_webp) {
+          const srcWebp = document.createElement("source");
+          srcWebp.type = "image/webp";
+          srcWebp.srcset = "/" + slugEnc + ".webp";
+          pic.appendChild(srcWebp);
+        }
+        const img = document.createElement("img");
+        img.loading = "lazy";
+        img.decoding = "async";
+        img.src = r.has_thumb ? "/" + slugEnc + ".jpg" : "/fallback-thumb.jpg";
+        img.alt = r.map_title || r.title || r.slug;
+        img.onerror = function () { this.onerror = null; this.src = "/fallback-thumb.jpg"; };
+        pic.appendChild(img);
+        thumbA.appendChild(pic);
+
+        if (r.has_sprite && (r.sprite_frames || 6) > 1) {
+          const spriteLayer = document.createElement("div");
+          spriteLayer.className = "sprite-layer";
+          const frames = r.sprite_frames || 6;
+          spriteLayer.style.backgroundSize = (frames * 100) + "% 100%";
+
+          const scrubBar = document.createElement("div");
+          scrubBar.className = "scrub-bar";
+          const scrubFill = document.createElement("div");
+          scrubFill.className = "scrub-fill";
+          scrubBar.appendChild(scrubFill);
+
+          thumbA.append(spriteLayer, scrubBar);
+          let spriteLoaded = false;
+
+          thumbA.addEventListener("mousemove", (ev) => {
+            if (!spriteLoaded) {
+              spriteLoaded = true;
+              spriteLayer.style.backgroundImage = 'url("/sprites/' + slugEnc + '.webp")';
+            }
+            const rect = thumbA.getBoundingClientRect();
+            const ratio = Math.max(0, Math.min(0.999, (ev.clientX - rect.left) / Math.max(1, rect.width)));
+            const idx = Math.floor(ratio * frames);
+            const posPct = frames > 1 ? (idx / (frames - 1)) * 100 : 0;
+            spriteLayer.style.backgroundPosition = posPct.toFixed(2) + "% 50%";
+            scrubFill.style.width = ((idx + 1) / frames * 100).toFixed(1) + "%";
+            thumbA.classList.add("scrubbing");
+          });
+          thumbA.addEventListener("mouseleave", () => thumbA.classList.remove("scrubbing"));
+        }
+
+        const grad = document.createElement("div");
+        grad.className = "thumb-grad";
+        thumbA.appendChild(grad);
+
+        const makePill = (txt, cls) => {
+          const sp = document.createElement("span");
+          sp.className = "b-pill" + (cls ? " " + cls : "");
+          sp.textContent = txt;
+          return sp;
+        };
+        const tl = document.createElement("div");
+        tl.className = "badge-tl";
+        if (r.stars != null) tl.appendChild(makePill(Number(r.stars).toFixed(2) + "★", starClass(r.stars)));
+        if (r.mods && r.mods !== "NM") tl.appendChild(makePill("+" + r.mods, "b-mod"));
+        if (r.grade) tl.appendChild(makePill(r.grade, "b-grade-" + r.grade));
+        if (r.pp != null && r.pp > 0) tl.appendChild(makePill(Math.round(r.pp) + "pp", "b-pp"));
+
+        const bl = document.createElement("div");
+        bl.className = "badge-bl";
+        bl.appendChild(makePill(expInfo.text, "b-exp" + (expInfo.cls ? " " + expInfo.cls : "")));
+
+        const br = document.createElement("div");
+        br.className = "badge-br";
+        if (r.duration) br.appendChild(makePill(fmtDur(r.duration)));
+        if (r.height && r.fps) br.appendChild(makePill(r.height + "p" + Math.round(r.fps)));
+
+        thumbA.append(tl, bl, br);
+
+        const body = document.createElement("div");
+        body.className = "card-body";
+
+        const titleA = document.createElement("a");
+        titleA.className = "card-title";
+        titleA.href = watchHref;
+        titleA.textContent = r.map_title || r.title || r.slug;
+        titleA.title = r.title || r.slug;
+
+        const listBadges = document.createElement("div");
+        listBadges.className = "list-badges";
+        if (r.stars != null) listBadges.appendChild(makePill(Number(r.stars).toFixed(2) + "★", starClass(r.stars)));
+        if (r.mods && r.mods !== "NM") listBadges.appendChild(makePill("+" + r.mods, "b-mod"));
+        if (r.grade) listBadges.appendChild(makePill(r.grade, "b-grade-" + r.grade));
+        if (r.pp != null && r.pp > 0) listBadges.appendChild(makePill(Math.round(r.pp) + "pp", "b-pp"));
+
+        const metaRow = document.createElement("div");
+        metaRow.className = "card-meta";
+
+        const pBtn = document.createElement("button");
+        pBtn.type = "button";
+        pBtn.className = "player-link";
+        pBtn.textContent = r.player || "Unknown";
+        pBtn.title = "Filter by " + (r.player || "Unknown");
+        pBtn.onclick = () => {
+          state.player = state.player.toLowerCase() === (r.player || "").toLowerCase() ? "" : (r.player || "");
+          applyFilters();
+        };
+
+        const statsWrap = document.createElement("span");
+        statsWrap.className = "meta-stats";
+        if (r.accuracy != null) {
+          const accSpan = document.createElement("span");
+          accSpan.textContent = Number(r.accuracy).toFixed(2) + "%";
+          statsWrap.appendChild(accSpan);
+        }
+        if (r.pp != null && r.pp > 0) {
+          if (statsWrap.childNodes.length) statsWrap.appendChild(document.createTextNode(" · "));
+          const ppSpan = document.createElement("span");
+          ppSpan.className = "meta-pp";
+          ppSpan.textContent = Math.round(r.pp) + "pp";
+          statsWrap.appendChild(ppSpan);
+        }
+        metaRow.append(pBtn, statsWrap);
+
+        const foot = document.createElement("div");
+        foot.className = "card-foot";
+
+        const infoTxt = document.createElement("span");
+        infoTxt.textContent = [fmtBytes(r.size_bytes), fmtRelTime(r.uploaded_at)].filter(Boolean).join(" · ");
+
+        const acts = document.createElement("div");
+        acts.className = "card-actions";
+
+        const copyBtn = document.createElement("button");
+        copyBtn.type = "button";
+        copyBtn.className = "mini-btn";
+        copyBtn.title = "Copy watch link";
+        copyBtn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>';
+        copyBtn.onclick = () => {
+          navigator.clipboard?.writeText(absWatch).then(() => showToast("Watch link copied!")).catch(() => showToast(absWatch));
+        };
+
+        const dlA = document.createElement("a");
+        dlA.className = "mini-btn";
+        dlA.href = mp4Href;
+        dlA.download = r.slug + ".mp4";
+        dlA.title = "Download MP4";
+        dlA.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>';
+
+        acts.append(copyBtn, dlA);
+
+        if (r.beatmap && /^https?:\/\//i.test(r.beatmap)) {
+          const mapA = document.createElement("a");
+          mapA.className = "mini-btn";
+          mapA.href = r.beatmap;
+          mapA.target = "_blank";
+          mapA.rel = "noopener noreferrer";
+          mapA.title = "Open beatmap on osu!";
+          mapA.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>';
+          acts.appendChild(mapA);
+        }
+
+        foot.append(infoTxt, acts);
+        body.append(titleA, listBadges, metaRow, foot);
+        card.append(thumbA, body);
+        grid.appendChild(card);
+
+        return { data: r, el: card };
+      });
+
+      function compareCards(a, b, key, dir) {
+        const mult = dir === "asc" ? 1 : -1;
+        const val = (r) => {
+          switch (key) {
+            case "pp": return r.pp != null ? r.pp : -1;
+            case "stars": return r.stars != null ? r.stars : -1;
+            case "acc": return r.accuracy != null ? r.accuracy : -1;
+            case "duration": return r.duration != null ? r.duration : -1;
+            case "size": return r.size_bytes || 0;
+            case "expiry": return r.expires_at || 0;
+            case "newest":
+            default: return r.uploaded_at || 0;
+          }
+        };
+        const diff = val(a.data) - val(b.data);
+        if (diff !== 0) return diff * mult;
+        return a.data.slug.localeCompare(b.data.slug);
+      }
+
+      function applySortIfNeeded() {
+        if (lastSortKey === state.sort && lastSortDir === state.dir) return;
+        lastSortKey = state.sort;
+        lastSortDir = state.dir;
+        cards.sort((a, b) => compareCards(a, b, state.sort, state.dir));
+        const frag = document.createDocumentFragment();
+        cards.forEach((c) => frag.appendChild(c.el));
+        grid.appendChild(frag);
+      }
+
+      function applyView() {
+        const isList = state.view === "list";
+        grid.classList.toggle("list-view", isList);
+        viewGridBtn.classList.toggle("active", !isList);
+        viewListBtn.classList.toggle("active", isList);
+        try { localStorage.setItem(PREF_KEY, JSON.stringify({ view: state.view })); } catch (_) {}
+      }
+
+      function applyFilters() {
+        applySortIfNeeded();
+        applyView();
+
+        const qTerms = state.q.trim().toLowerCase().split(/\s+/).filter(Boolean);
+        const activePlayerLow = state.player.trim().toLowerCase();
+        let shown = 0;
+
+        for (let i = 0; i < cards.length; i++) {
+          const { data, el } = cards[i];
+          let ok = true;
+          if (activePlayerLow && (data.player || "").toLowerCase() !== activePlayerLow) ok = false;
+          if (ok && state.mods.size > 0) {
+            for (const m of state.mods) { if (!data.modTokens.includes(m)) { ok = false; break; } }
+          }
+          if (ok && qTerms.length > 0) {
+            for (let t = 0; t < qTerms.length; t++) { if (!data.searchBlob.includes(qTerms[t])) { ok = false; break; } }
+          }
+          el.hidden = !ok;
+          if (ok) shown++;
+        }
+
+        allModChip.classList.toggle("active", state.mods.size === 0);
+        modChipEls.forEach((el, tok) => el.classList.toggle("active", state.mods.has(tok)));
+        playerChipEls.forEach((el, pLow) => el.classList.toggle("active", pLow === activePlayerLow));
+
+        searchClear.classList.toggle("show", state.q.length > 0);
+        dirBtn.innerHTML = state.dir === "asc" ? "&#8593;" : "&#8595;";
+        dirBtn.title = state.dir === "asc" ? "Ascending (click to reverse)" : "Descending (click to reverse)";
+
+        const hasActiveFilter = Boolean(state.q || state.mods.size || state.player);
+        resetBtn.classList.toggle("show", hasActiveFilter);
+
+        if (replays.length === 0) {
+          resultCount.textContent = "0 replays stored";
+          emptyMsg.textContent = "No active replays are currently stored.";
+          emptyState.classList.add("show");
+        } else if (shown === 0) {
+          resultCount.textContent = "0 of " + replays.length + " replays match";
+          emptyMsg.textContent = "Try clearing your search, player, or mod filters.";
+          emptyState.classList.add("show");
+        } else {
+          const parts = ["Showing " + shown + " of " + replays.length + " replays"];
+          if (state.player) parts.push("player: " + state.player);
+          if (state.mods.size) parts.push("mods: +" + [...state.mods].join(""));
+          resultCount.textContent = parts.join(" · ");
+          emptyState.classList.remove("show");
+        }
+
+        syncURL();
+      }
+
+      searchInput.value = state.q;
+      sortSelect.value = state.sort;
+
+      searchInput.addEventListener("input", () => { state.q = searchInput.value; applyFilters(); });
+      searchClear.addEventListener("click", () => { state.q = ""; searchInput.value = ""; applyFilters(); searchInput.focus(); });
+      sortSelect.addEventListener("change", () => { state.sort = sortSelect.value; state.dir = state.sort === "expiry" ? "asc" : "desc"; applyFilters(); });
+      dirBtn.addEventListener("click", () => { state.dir = state.dir === "asc" ? "desc" : "asc"; applyFilters(); });
+      viewGridBtn.addEventListener("click", () => { state.view = "grid"; applyFilters(); });
+      viewListBtn.addEventListener("click", () => { state.view = "list"; applyFilters(); });
+      resetBtn.addEventListener("click", () => { state.q = ""; state.mods.clear(); state.player = ""; searchInput.value = ""; applyFilters(); });
+      randomBtn.addEventListener("click", () => {
+        const visible = cards.filter((c) => !c.el.hidden);
+        const pool = visible.length ? visible : cards;
+        if (!pool.length) return;
+        const pick = pool[Math.floor(Math.random() * pool.length)].data;
+        location.href = "/watch/" + encodeURIComponent(pick.short_id || pick.slug);
+      });
+
+      document.addEventListener("keydown", (e) => {
+        const tag = (e.target && e.target.tagName) || "";
+        if (e.key === "/" && tag !== "INPUT" && tag !== "TEXTAREA" && tag !== "SELECT") {
+          e.preventDefault(); searchInput.focus(); searchInput.select();
+        } else if (e.key === "Escape" && document.activeElement === searchInput) {
+          if (searchInput.value) { state.q = ""; searchInput.value = ""; applyFilters(); }
+          searchInput.blur();
+        }
+      });
+
+      applyFilters();
+    })();
+  </script>
+  <script src="/render-shared.js?v=6"></script>
+</body>
+</html>

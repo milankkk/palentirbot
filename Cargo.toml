@@ -1,3 +1,6 @@
+[workspace]
+members = [".", "command-macros"]
+
 [package]
 name = "palentirbot"
 version = "420.69.67"
@@ -10,61 +13,34 @@ bytes = { version = "1.0" }
 command-macros = { path = "./command-macros" }
 dotenvy = { version = "0.15" }
 eyre = { version = "0.6" }
-flexmap = { git = "https://github.com/MaxOhn/flexmap" }
-flurry = { version = "0.4" }
+flexmap = { git = "https://github.com/MaxOhn/flexmap", rev = "46f163d3f5c22de5ba2ccfe755c2fd9dbfc55f59" }
+flurry = { version = "0.5" }
 futures = { version = "0.3", default-features = false }
 leaky-bucket-lite = { version = "0.5" }
-once_cell = { version = "1.0" }
 osu-db = { version = "0.3", default-features = false }
-radix_trie = { version = "0.2" }
-#rosu-v2 = { git = "https://github.com/MaxOhn/rosu-v2", rev = "996ec7c1db07e8bbcfaad07d555c9d56b763d414", default-features = false }
-#rosu-v2 = { git = "https://github.com/MaxOhn/rosu-v2", rev = "e3852e27285f8cec610417ba6f93e6f29915ee3b", default-features = false }
-rosu-v2 = { git = "https://github.com/MaxOhn/rosu-v2", branch = "main", default-features = false }
-rosu-pp = { git = "https://github.com/MaxOhn/rosu-pp", branch = "main" }
+rosu-v2 = { git = "https://github.com/MaxOhn/rosu-v2", rev = "669c5971e4f6b337e5b2b7a6c9405ef9945785e1", default-features = false }
+rosu-pp = { git = "https://github.com/MaxOhn/rosu-pp", rev = "27a67242cad155a2767f5a25a423ca4ec3e3c274" }
 rosu-pp-2021 = { package = "rosu-pp", version = "1.1.0" }
 rosu-pp-2022 = { package = "rosu-pp", version = "0.9.5" }
 rosu-pp-2024 = { package = "rosu-pp", version = "2.0.0" }
 rosu-pp-2025 = { package = "rosu-pp", version = "3.0.0" }
-reqwest = { version = "0.12", features = ["json", "multipart", "stream"] }
+reqwest = { version = "0.13", default-features = false, features = ["charset", "form", "http2", "json", "multipart", "native-tls", "query", "stream", "system-proxy"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
 sqlx = { version = "0.8",  features = ["macros", "postgres", "runtime-tokio", "tls-rustls"]}
 time = { version = "0.3.14", features = ["macros", "parsing", "formatting"] }
-tokio = { version = "1.20", default-features = false, features = ["fs", "io-util", "macros", "process", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = { version = "1.20", default-features = false, features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["io"] }
 tracing = { version = "0.1" }
 tracing-appender = { version = "0.2" }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt", "smallvec", "std", "time", "tracing-log"] }
-zip = { version = "0.6", default-features = false, features = ["deflate"] }
+zip = { version = "9.7", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
-#twilight-gateway = { git = "https://github.com/MaxOhn/twilight", branch = "with-help-16" }
-#twilight-cache-inmemory = { git = "https://github.com/MaxOhn/twilight", branch = "with-help-16", default-features = false }
-#twilight-http = { git = "https://github.com/MaxOhn/twilight", branch = "with-help-16", default-features = false, features = ["rustls-webpki-roots"] }
-#twilight-interactions = { git = "https://github.com/MaxOhn/twilight-interactions", branch = "with-help-16", default-features = false, features = ["derive"] }
-#twilight-model = { git = "https://github.com/MaxOhn/twilight", branch = "with-help-16", default-features = false }
-#twilight-standby = { git = "https://github.com/MaxOhn/twilight", branch = "with-help-16", default-features = false }
-#twilight-validate = { git = "https://github.com/MaxOhn/twilight", branch = "with-help-16" }
-#twilight-validate = "0.15"
-
-#test fix up
-#twilight-cache-inmemory = { version = "0.15.0", default-features = false }
-#twilight-interactions = { git = "https://github.com/MaxOhn/twilight-interactions", branch = "with-help-16", default-features = false, features = ["derive"] }
-#twilight-validate = "0.15"
-
-#twilight-gateway = { version = "0.15.0", default-features = false, features = ["rustls-webpki-roots", "twilight-http", "zlib-stock"] }
-#twilight-http = { version = "0.15.0", default-features = false, features = ["rustls-webpki-roots"] }
-#twilight-interactions = { path = "../twilight-interactions/twilight-interactions", default-features = false, features = ["derive"] }
-#twilight-model = { version = "0.15.4", default-features = false }
-#twilight-standby = { version = "0.15.0", default-features = false }
-
-#REAL FIX
 twilight-gateway = "0.16"
 twilight-cache-inmemory = { version = "0.16", default-features = false }
 twilight-http = { version = "0.16", default-features = false, features = ["rustls-webpki-roots", "rustls-ring"] }
-twilight-interactions = { git = "https://github.com/MaxOhn/twilight-interactions", branch = "with-help-16", default-features = false, features = ["derive"] }
+twilight-interactions = { git = "https://github.com/MaxOhn/twilight-interactions", rev = "f24136c6d3912a4a2499e81adab1db853fec355d", default-features = false, features = ["derive"] }
 twilight-model = { version = "0.16", default-features = false }
-twilight-standby = { version = "0.16", default-features = false }
-twilight-validate = "0.16"
 
 
 [profile.release]

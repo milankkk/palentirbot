@@ -1,54 +1,37 @@
-use std::borrow::Cow;
-
 use eyre::Result;
-use twilight_model::{
-    channel::Message,
-    http::interaction::{InteractionResponse, InteractionResponseData, InteractionResponseType},
-};
-
-use crate::util::builder::ModalBuilder;
+use twilight_model::http::interaction::{InteractionResponse, InteractionResponseType};
 
 use crate::{
     core::Context,
-    util::{builder::MessageBuilder, interaction::InteractionComponent},
+    util::{
+        builder::{MessageBuilder, ModalBuilder},
+        interaction::InteractionComponent,
+    },
 };
 
-use super::MessageExt;
+use super::{build_response_data, send_update_response};
 
 pub trait ComponentExt {
-    fn callback<'a>(
-        &'a self,
-        ctx: &'a Context,
-        builder: MessageBuilder<'a>,
-    ) -> impl std::future::Future<Output = Result<()>> + 'a;
+    async fn callback(&self, ctx: &Context, builder: MessageBuilder<'_>) -> Result<()>;
 
-    fn defer<'a>(&'a self, ctx: &'a Context) -> impl std::future::Future<Output = Result<()>> + 'a;
+    async fn ephemeral_callback(&self, ctx: &Context, builder: MessageBuilder<'_>) -> Result<()>;
 
-    fn update<'a>(
-        &'a self,
-        ctx: &'a Context,
-        builder: &'a MessageBuilder<'a>,
-    ) -> impl std::future::Future<Output = Result<Message>> + 'a;
+    async fn ephemeral_text(&self, ctx: &Context, content: impl Into<String>) -> Result<()>;
 
-    fn modal<'a>(
-        &'a self,
-        ctx: &'a Context,
-        modal: ModalBuilder,
-    ) -> impl std::future::Future<Output = Result<()>> + 'a;
+    async fn defer(&self, ctx: &Context) -> Result<()>;
+
+    async fn defer_ephemeral(&self, ctx: &Context) -> Result<()>;
+
+    async fn update_response(&self, ctx: &Context, builder: &MessageBuilder<'_>) -> Result<()>;
+
+    async fn modal(&self, ctx: &Context, modal: ModalBuilder) -> Result<()>;
 }
 
 impl ComponentExt for InteractionComponent {
-    async fn callback<'a>(&'a self, ctx: &'a Context, builder: MessageBuilder<'a>) -> Result<()> {
-        let data = InteractionResponseData {
-            components: builder.components,
-            embeds: builder.embed.map(|e| vec![e]),
-            content: builder.content.map(Cow::into_owned),
-            ..Default::default()
-        };
-
+    async fn callback(&self, ctx: &Context, builder: MessageBuilder<'_>) -> Result<()> {
         let response = InteractionResponse {
             kind: InteractionResponseType::UpdateMessage,
-            data: Some(data),
+            data: Some(build_response_data(builder, false)),
         };
 
         ctx.interaction()
@@ -58,7 +41,25 @@ impl ComponentExt for InteractionComponent {
         Ok(())
     }
 
-    async fn defer<'a>(&'a self, ctx: &'a Context) -> Result<()> {
+    async fn ephemeral_callback(&self, ctx: &Context, builder: MessageBuilder<'_>) -> Result<()> {
+        let response = InteractionResponse {
+            kind: InteractionResponseType::ChannelMessageWithSource,
+            data: Some(build_response_data(builder, true)),
+        };
+
+        ctx.interaction()
+            .create_response(self.id, &self.token, &response)
+            .await?;
+
+        Ok(())
+    }
+
+    async fn ephemeral_text(&self, ctx: &Context, content: impl Into<String>) -> Result<()> {
+        self.ephemeral_callback(ctx, MessageBuilder::new().content(content.into()))
+            .await
+    }
+
+    async fn defer(&self, ctx: &Context) -> Result<()> {
         let response = InteractionResponse {
             kind: InteractionResponseType::DeferredUpdateMessage,
             data: None,
@@ -71,15 +72,25 @@ impl ComponentExt for InteractionComponent {
         Ok(())
     }
 
-    async fn update<'a>(
-        &'a self,
-        ctx: &'a Context,
-        builder: &'a MessageBuilder<'a>,
-    ) -> Result<Message> {
-        self.message.update(ctx, builder).await
+    async fn defer_ephemeral(&self, ctx: &Context) -> Result<()> {
+        let response = InteractionResponse {
+            kind: InteractionResponseType::DeferredChannelMessageWithSource,
+            data: Some(build_response_data(MessageBuilder::new(), true)),
+        };
+
+        ctx.interaction()
+            .create_response(self.id, &self.token, &response)
+            .await?;
+
+        Ok(())
     }
 
-    async fn modal<'a>(&'a self, ctx: &'a Context, modal: ModalBuilder) -> Result<()> {
+    async fn update_response(&self, ctx: &Context, builder: &MessageBuilder<'_>) -> Result<()> {
+        send_update_response(ctx, &self.token, builder).await?;
+        Ok(())
+    }
+
+    async fn modal(&self, ctx: &Context, modal: ModalBuilder) -> Result<()> {
         let response = InteractionResponse {
             kind: InteractionResponseType::Modal,
             data: Some(modal.build()),

@@ -7,7 +7,7 @@ mod cache;
 mod cluster;
 mod config;
 mod context;
-mod events;
+pub(crate) mod events;
 
 pub mod commands;
 pub mod logging;
@@ -16,3 +16,5 @@ pub use self::replay_queue::{ReplayData, ReplayStatus, TimePoints};
 pub mod ai;
 pub mod settings;
 pub mod stats;
+pub mod web_auth;
+pub mod web_render;

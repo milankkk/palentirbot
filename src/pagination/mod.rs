@@ -7,7 +7,7 @@ use tokio::{
 };
 use twilight_model::{
     channel::message::{
-        component::{ActionRow, Button, ButtonStyle, Component},
+        component::{ButtonStyle, Component},
         embed::Embed,
         EmojiReactionType,
     },
@@ -20,8 +20,10 @@ use twilight_model::{
 use crate::{
     core::Context,
     util::{
-        builder::MessageBuilder, interaction::InteractionCommand, numbers::last_multiple, Authored,
-        InteractionCommandExt, MessageExt,
+        builder::{action_row, emoji_button, MessageBuilder},
+        interaction::InteractionCommand,
+        numbers::last_multiple,
+        Authored, InteractionCommandExt, MessageExt,
     },
 };
 
@@ -36,19 +38,17 @@ pub enum PaginationKind {
 }
 
 impl PaginationKind {
-    async fn build_page(&mut self, _ctx: &Context, pages: &Pages) -> Result<Embed> {
+    fn build_page(&mut self, pages: &Pages) -> Embed {
         match self {
-            Self::SkinList(kind) => Ok(kind.build_page(pages)),
+            Self::SkinList(kind) => kind.build_page(pages),
         }
     }
 }
 
 pub struct Pagination {
-    pub defer_components: bool,
     pub pages: Pages,
     author: Id<UserMarker>,
     kind: PaginationKind,
-    component_kind: ComponentKind,
     tx: Sender<()>,
 }
 
@@ -58,39 +58,14 @@ impl Pagination {
         command: InteractionCommand,
         builder: PaginationBuilder,
     ) -> Result<()> {
-        let PaginationBuilder {
-            mut kind,
-            pages,
-            attachment,
-            content,
-            start_by_callback,
-            defer_components,
-            component_kind,
-        } = builder;
+        let PaginationBuilder { mut kind, pages } = builder;
 
-        let embed = kind.build_page(&ctx, &pages).await?;
-        let components = pages.components(component_kind);
+        let embed = kind.build_page(&pages);
+        let components = pages.components();
+        let msg_builder = MessageBuilder::new().embed(embed).components(components);
 
-        let mut builder = MessageBuilder::new().embed(embed).components(components);
-
-        if let Some((name, bytes)) = attachment {
-            builder = builder.attachment(name, bytes);
-        }
-
-        if let Some(content) = content {
-            builder = builder.content(content);
-        }
-
-        let response = if start_by_callback {
-            command.callback(&ctx, builder, false).await?;
-            ctx.interaction()
-                .response(&command.token)
-                .await?
-                .model()
-                .await?
-        } else {
-            command.update(&ctx, &builder).await?
-        };
+        command.callback(&ctx, msg_builder, false).await?;
+        let response = ctx.interaction().response(&command.token).await?.model().await?;
 
         if pages.last_index == 0 {
             return Ok(());
@@ -104,8 +79,6 @@ impl Pagination {
 
         let pagination = Pagination {
             author: command.user_id()?,
-            component_kind,
-            defer_components,
             kind,
             pages,
             tx,
@@ -124,15 +97,11 @@ impl Pagination {
         let _ = self.tx.send(());
     }
 
-    async fn build(&mut self, ctx: &Context) -> Result<MessageBuilder<'static>> {
-        let embed = self.build_page(ctx).await?;
-        let components = self.pages.components(self.component_kind);
+    fn build(&mut self) -> MessageBuilder<'static> {
+        let embed = self.kind.build_page(&self.pages);
+        let components = self.pages.components();
 
-        Ok(MessageBuilder::new().embed(embed).components(components))
-    }
-
-    async fn build_page(&mut self, ctx: &Context) -> Result<Embed> {
-        self.kind.build_page(ctx, &self.pages).await
+        MessageBuilder::new().embed(embed).components(components)
     }
 
     fn spawn_timeout(
@@ -141,16 +110,17 @@ impl Pagination {
         msg: Id<MessageMarker>,
         channel: Id<ChannelMarker>,
     ) {
-        static MINUTE: Duration = Duration::from_secs(60);
+        static IDLE_TIMEOUT: Duration =
+            Duration::from_secs(crate::core::events::interaction::COMPONENT_IDLE_TIMEOUT_SECS);
 
         tokio::spawn(async move {
             loop {
                 tokio::select! {
                     res = rx.changed() => if res.is_ok() { continue } else { return },
-                    _ = sleep(MINUTE) => {
+                    _ = sleep(IDLE_TIMEOUT) => {
                         let pagination_active = ctx.paginations.lock(&msg).await.remove().is_some();
 
-                        if pagination_active  {
+                        if pagination_active {
                             let builder = MessageBuilder::new().components(Vec::new());
 
                             if let Err(err) = (msg, channel).update(&ctx, &builder).await {
@@ -169,73 +139,16 @@ impl Pagination {
 pub struct PaginationBuilder {
     kind: PaginationKind,
     pages: Pages,
-    attachment: Option<(String, Vec<u8>)>,
-    content: Option<String>,
-    start_by_callback: bool,
-    defer_components: bool,
-    component_kind: ComponentKind,
 }
 
 impl PaginationBuilder {
-    fn new(kind: PaginationKind, pages: Pages) -> Self {
-        Self {
-            kind,
-            pages,
-            attachment: None,
-            content: None,
-            start_by_callback: true,
-            defer_components: false,
-            component_kind: ComponentKind::Default,
-        }
+    pub(crate) fn new(kind: PaginationKind, pages: Pages) -> Self {
+        Self { kind, pages }
     }
 
     /// Start the pagination
     pub async fn start(self, ctx: Arc<Context>, command: InteractionCommand) -> Result<()> {
         Pagination::start(ctx, command, self).await
-    }
-
-    #[allow(unused)]
-    /// Add an attachment to the initial message which
-    /// will stick throughout all pages.
-    pub fn attachment(mut self, name: impl Into<String>, bytes: Vec<u8>) -> Self {
-        self.attachment = Some((name.into(), bytes));
-
-        self
-    }
-
-    #[allow(unused)]
-    /// Add content to the initial message which
-    /// will stick throughout all pages.
-    pub fn content(mut self, content: impl Into<String>) -> Self {
-        self.content = Some(content.into());
-
-        self
-    }
-
-    #[allow(unused)]
-    /// By default, the initial message will be sent by callback.
-    /// This only works if the invoke originates either from a message,
-    /// or from an interaction that was **not** deferred.
-    ///
-    /// If this method is called, the initial message will be sent
-    /// through updating meaning it will work for interactions
-    /// that have been deferred already.
-    pub fn start_by_update(mut self) -> Self {
-        self.start_by_callback = false;
-
-        self
-    }
-
-    #[allow(unused)]
-    /// By default, the page-update message will be sent by callback.
-    /// This only works if the page generation is quick enough i.e. <300ms.
-    ///
-    /// If this method is called, pagination components will be deferred
-    /// and then after the page generation updated.
-    pub fn defer_components(mut self) -> Self {
-        self.defer_components = true;
-
-        self
     }
 }
 
@@ -266,90 +179,31 @@ impl Pages {
         self.last_index / self.per_page + 1
     }
 
-    fn components(&self, kind: ComponentKind) -> Vec<Component> {
-        match kind {
-            ComponentKind::Default => self.default_components(),
-        }
-    }
-
-    fn default_components(&self) -> Vec<Component> {
+    fn components(&self) -> Vec<Component> {
         if self.last_index == 0 {
             return Vec::new();
         }
 
-        let jump_start = Button {
-            sku_id: None,
-            custom_id: Some("pagination_start".to_owned()),
-            disabled: self.index == 0,
-            emoji: Some(EmojiReactionType::Unicode {
-                name: "⏮️".to_owned(),
-            }),
-            label: None,
-            style: ButtonStyle::Secondary,
-            url: None,
+        let nav = |id, emoji: &str, disabled| {
+            emoji_button(
+                id,
+                EmojiReactionType::Unicode {
+                    name: emoji.to_owned(),
+                },
+                ButtonStyle::Secondary,
+                disabled,
+            )
         };
 
-        let single_step_back = Button {
-            sku_id: None,
-            custom_id: Some("pagination_back".to_owned()),
-            disabled: self.index == 0,
-            emoji: Some(EmojiReactionType::Unicode {
-                name: "⏪".to_owned(),
-            }),
-            label: None,
-            style: ButtonStyle::Secondary,
-            url: None,
-        };
+        let at_start = self.index == 0;
+        let at_end = self.index == self.last_index;
 
-        let jump_custom = Button {
-            sku_id: None,
-            custom_id: Some("pagination_custom".to_owned()),
-            disabled: false,
-            emoji: Some(EmojiReactionType::Unicode {
-                name: "*️⃣".to_owned(),
-            }),
-            label: None,
-            style: ButtonStyle::Secondary,
-            url: None,
-        };
-
-        let single_step = Button {
-            sku_id: None,
-            custom_id: Some("pagination_step".to_owned()),
-            disabled: self.index == self.last_index,
-            emoji: Some(EmojiReactionType::Unicode {
-                name: "⏩".to_owned(),
-            }),
-            label: None,
-            style: ButtonStyle::Secondary,
-            url: None,
-        };
-
-        let jump_end = Button {
-            sku_id: None,
-            custom_id: Some("pagination_end".to_owned()),
-            disabled: self.index == self.last_index,
-            emoji: Some(EmojiReactionType::Unicode {
-                name: "⏭️".to_owned(),
-            }),
-            label: None,
-            style: ButtonStyle::Secondary,
-            url: None,
-        };
-
-        let components = vec![
-            Component::Button(jump_start),
-            Component::Button(single_step_back),
-            Component::Button(jump_custom),
-            Component::Button(single_step),
-            Component::Button(jump_end),
-        ];
-
-        vec![Component::ActionRow(ActionRow { components })]
+        vec![action_row(vec![
+            nav("pagination_start", "⏮️", at_start),
+            nav("pagination_back", "⏪", at_start),
+            nav("pagination_custom", "*️⃣", false),
+            nav("pagination_step", "⏩", at_end),
+            nav("pagination_end", "⏭️", at_end),
+        ])]
     }
-}
-
-#[derive(Copy, Clone)]
-enum ComponentKind {
-    Default,
 }

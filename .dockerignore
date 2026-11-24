@@ -1,6 +1,12 @@
 target
 data
 logs
+extra
+backups
+cache
+scratch
+prompt.txt
+__pycache__
 .git
 .env
 .env.*

@@ -1,5 +1,3 @@
-use std::{collections::HashMap, iter::FromIterator};
-
 use eyre::{ContextCompat, Result};
 use twilight_cache_inmemory::{
     model::{CachedGuild, CachedMember},
@@ -13,7 +11,6 @@ use twilight_model::{
         marker::{ChannelMarker, GuildMarker, RoleMarker, UserMarker},
         Id,
     },
-    user::{CurrentUser, User},
 };
 
 mod permissions;
@@ -23,7 +20,7 @@ pub struct Cache {
 }
 
 impl Cache {
-    pub async fn new() -> (Self, ResumeData) {
+    pub fn new() -> Self {
         let resource_types = ResourceType::CHANNEL
             | ResourceType::GUILD
             | ResourceType::MEMBER
@@ -35,9 +32,7 @@ impl Cache {
             .resource_types(resource_types)
             .build();
 
-        let cache = Self { inner };
-
-        (cache, ResumeData::default())
+        Self { inner }
     }
 
     pub fn update(&self, event: &Event) {
@@ -58,15 +53,6 @@ impl Cache {
             .with_context(|| format!("missing channel {channel}"))?;
 
         Ok(f(&channel))
-    }
-
-    pub fn current_user<F, T>(&self, f: F) -> Result<T>
-    where
-        F: FnOnce(&CurrentUser) -> T,
-    {
-        let user = self.inner.current_user().context("missing current user")?;
-
-        Ok(f(&user))
     }
 
     pub fn guild<F, T>(&self, guild: Id<GuildMarker>, f: F) -> Result<T>
@@ -93,17 +79,6 @@ impl Cache {
         Ok(f(&member))
     }
 
-    #[allow(unused)]
-    pub fn members<F, T, C>(&self, guild: Id<GuildMarker>, f: F) -> C
-    where
-        C: Default + FromIterator<T>,
-        F: Fn(&Id<UserMarker>) -> T,
-    {
-        self.inner
-            .guild_members(guild)
-            .map_or_else(C::default, |entry| entry.iter().map(f).collect())
-    }
-
     pub fn role<F, T>(&self, role: Id<RoleMarker>, f: F) -> Result<T>
     where
         F: FnOnce(&Role) -> T,
@@ -116,22 +91,7 @@ impl Cache {
         Ok(f(&role))
     }
 
-    #[allow(unused)]
-    pub fn user<F, T>(&self, user: Id<UserMarker>, f: F) -> Result<T>
-    where
-        F: FnOnce(&User) -> T,
-    {
-        let user = self
-            .inner
-            .user(user)
-            .with_context(|| format!("missing user {user}"))?;
-
-        Ok(f(&user))
-    }
-
     pub fn is_guild_owner(&self, guild: Id<GuildMarker>, user: Id<UserMarker>) -> Result<bool> {
         self.guild(guild, |g| g.owner_id() == user)
     }
 }
-
-type ResumeData = HashMap<u64, String>;

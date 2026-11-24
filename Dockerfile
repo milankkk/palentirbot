@@ -12,7 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy manifests and local workspace crates first to optimize layer caching
-COPY Cargo.toml Cargo.lock* ./
+COPY Cargo.toml Cargo.lock ./
 COPY command-macros ./command-macros
 
 # Copy source code and database migrations
@@ -23,7 +23,7 @@ COPY migrations ./migrations
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/usr/src/palentirbot/target \
-    cargo build --release && \
+    cargo build --release --locked && \
     cp /usr/src/palentirbot/target/release/palentirbot /usr/src/palentirbot-bin
 
 # =============================================================================
@@ -51,6 +51,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libzstd1 \
     unzip \
     xvfb \
+    tini \
+    jq \
     procps \
     && rm -rf /var/lib/apt/lists/*
 
@@ -67,16 +69,17 @@ RUN mkdir -p /app/data/Downloads \
              /app/data/settings \
              /app/logs
 
-# Copy startup entrypoint
+# Copy startup entrypoint and default prompt template
+COPY prompt.example.txt /app/prompt.example.txt
 COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 
 # Ensure danser shared libraries inside /app/data are discovered by dynamic linker
-ENV LD_LIBRARY_PATH="/app/data:${LD_LIBRARY_PATH}"
+ENV LD_LIBRARY_PATH="/app/data${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
 # Default paths
 ENV DANSER_PATH="/app/data" \
     FOLDERS_PATH="/app/data" \
     AI_SYSTEM_PROMPT="/app/data/prompt.txt"
 
-ENTRYPOINT ["/app/entrypoint.sh"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/app/entrypoint.sh"]

@@ -1,200 +1,233 @@
-use super::queue::send_queue_status;
+use std::{convert::TryFrom, sync::Arc};
+
 use command_macros::SlashCommand;
-use eyre::{Context as _, Result};
-use osu_db::{Mode, Replay};
-use std::fmt::Write;
-use std::sync::Arc;
-use tokio::{fs::File, io::AsyncWriteExt};
-use twilight_interactions::command::{CommandModel, CreateCommand};
+use eyre::Result;
+use twilight_interactions::command::{AutocompleteValue, CommandModel, CreateCommand};
 use twilight_model::channel::Attachment;
 
+use super::render_score::{
+    check_render_access, check_user_queue_limit, enqueue_replay_interaction, parse_slash_score_url,
+    resolve_optional_skin, resolve_slash_replay_input,
+};
+use super::settings::autocomplete_skins;
 use crate::{
-    core::{BotConfig, Context, ReplayData, TimePoints},
-    util::{
-        builder::MessageBuilder, interaction::InteractionCommand, Authored, InteractionCommandExt,
-    },
+    core::{replay_queue::RenderOptions, Context, TimePoints},
+    util::{interaction::InteractionCommand, Authored, InteractionCommandExt},
 };
 
-#[derive(CreateCommand, CommandModel, SlashCommand)]
+#[derive(CreateCommand, SlashCommand)]
 #[command(name = "render")]
 #[flags(SKIP_DEFER)]
-/// Render a replay file and upload it
+/// Render a replay file or osu! score URL and upload it
 pub struct Render {
     #[command(rename = "replay")]
     /// Specify the replay through a .osr file
-    attachment: Attachment,
-    #[command(min_value = 0, max_value = 65_535)]
-    /// Specify a start timestamp in minutes and seconds
+    attachment: Option<Attachment>,
+    /// Paste an osu! score URL (e.g. https://osu.ppy.sh/scores/...) or score ID
+    score_url: Option<String>,
+    /// Specify a start timestamp in seconds or MM:SS
     start: Option<String>,
-    #[command(min_value = 0, max_value = 65_535)]
-    /// Specify an end timestamp in minutes and seconds
+    /// Specify an end timestamp in seconds or MM:SS
     end: Option<String>,
-    #[command(min_value = 0, max_value = 5)]
+    #[command(min_value = 0.5, max_value = 5.0)]
     /// Specify the music pitch (Nightcore is 1.5)
     pitch: Option<f64>,
+    #[command(autocomplete = true)]
+    /// Temporarily override skin for this render
+    skin: Option<String>,
+    /// Skip straight to map drain time (intro skip)
+    skip_intro: Option<bool>,
+    #[command(min_value = -5000, max_value = 5000)]
+    /// Local audio offset override in ms
+    offset: Option<i64>,
+    /// Bypass the render cache and force a fresh render
+    force: Option<bool>,
+}
+
+#[derive(CommandModel)]
+#[command(autocomplete = true)]
+pub struct RenderAutocomplete {
+    #[command(rename = "replay")]
+    attachment: Option<Attachment>,
+    score_url: Option<String>,
+    start: Option<String>,
+    end: Option<String>,
+    pitch: Option<f64>,
+    skin: AutocompleteValue<String>,
+    skip_intro: Option<bool>,
+    offset: Option<i64>,
+    force: Option<bool>,
+}
+
+impl TryFrom<RenderAutocomplete> for Render {
+    type Error = String;
+
+    fn try_from(args: RenderAutocomplete) -> std::result::Result<Self, Self::Error> {
+        let skin = match args.skin {
+            AutocompleteValue::Focused(focused) => return Err(focused),
+            AutocompleteValue::None => None,
+            AutocompleteValue::Completed(val) => Some(val),
+        };
+
+        Ok(Self {
+            attachment: args.attachment,
+            score_url: args.score_url,
+            start: args.start,
+            end: args.end,
+            pitch: args.pitch,
+            skin,
+            skip_intro: args.skip_intro,
+            offset: args.offset,
+            force: args.force,
+        })
+    }
 }
 
 pub async fn slash_render(ctx: Arc<Context>, mut command: InteractionCommand) -> Result<()> {
+    let raw_args = RenderAutocomplete::from_interaction(command.input_data())?;
     let Render {
         attachment,
+        score_url,
         start,
         end,
         pitch,
-    } = Render::from_interaction(command.input_data())?;
+        skin,
+        skip_intro,
+        offset,
+        force,
+    } = match Render::try_from(raw_args) {
+        Ok(args) => args,
+        Err(focused) => {
+            let choices = autocomplete_skins(&ctx, &focused)?;
+            command.autocomplete(&ctx, choices).await?;
+            return Ok(());
+        }
+    };
 
-    if !matches!(attachment.filename.split('.').last(), Some("osr")) {
-        let content = "The attachment must be a .osr file!";
-        command.error_callback(&ctx, content, true).await?;
-
+    if attachment.is_none() && score_url.is_none() {
+        command
+            .error_callback(
+                &ctx,
+                "Please attach a `.osr` replay file or provide an osu! `score_url`.",
+                true,
+            )
+            .await?;
         return Ok(());
     }
 
-    let start_in_seconds = if let Some(start) = start {
-        match TimePoints::parse_single(&start) {
-            Ok(start) => start,
-            Err(err) => {
-                command.error_callback(&ctx, err, true).await?;
-                return Ok(());
-            }
+    if let Some(p) = pitch {
+        if !p.is_finite() || p <= 0.0 {
+            command
+                .error_callback(&ctx, "Pitch must be a positive number!", true)
+                .await?;
+            return Ok(());
         }
-    } else {
-        0
+    }
+
+    if let Some(ref att) = attachment {
+        if !matches!(att.filename.rsplit('.').next(), Some(ext) if ext.eq_ignore_ascii_case("osr")) {
+            command
+                .error_callback(&ctx, "The attachment must be a .osr file!", true)
+                .await?;
+            return Ok(());
+        }
+    }
+
+    let parsed_score_id = match parse_slash_score_url(score_url.as_deref(), attachment.is_some()) {
+        Ok(parsed) => parsed,
+        Err(msg) => {
+            command.error_callback(&ctx, msg, true).await?;
+            return Ok(());
+        }
     };
 
-    let end_in_seconds = if let Some(end) = end {
-        match TimePoints::parse_single(&end) {
-            Ok(end) => end,
+    let start_in_seconds = match start {
+        Some(ref s) => match TimePoints::parse_single(s) {
+            Ok(v) => v,
             Err(err) => {
                 command.error_callback(&ctx, err, true).await?;
                 return Ok(());
             }
+        },
+        None => 0,
+    };
+
+    let end_in_seconds = match end {
+        Some(ref s) => match TimePoints::parse_single(s) {
+            Ok(v) => v,
+            Err(err) => {
+                command.error_callback(&ctx, err, true).await?;
+                return Ok(());
+            }
+        },
+        None => 0,
+    };
+
+    if end_in_seconds > 0 && end_in_seconds <= start_in_seconds {
+        command
+            .error_callback(
+                &ctx,
+                "`end` timestamp must be greater than `start` timestamp.",
+                true,
+            )
+            .await?;
+        return Ok(());
+    }
+
+    let resolved_skin = match resolve_optional_skin(
+        &ctx,
+        skin.as_deref(),
+        "Use `/skin list` to browse skins.",
+    ) {
+        Ok(name) => name,
+        Err(msg) => {
+            command.error_callback(&ctx, msg, true).await?;
+            return Ok(());
         }
-    } else {
-        0
     };
 
     command.defer(&ctx, false).await?;
 
-    let output_channel = match command.guild_id {
-        Some(guild) => {
-            let (blacklisted, reason_opt) = match ctx.psql()._is_server_blacklisted(guild).await {
-                Ok(result) => result,
-                Err(err) => {
-                    warn!("{err:?}");
-                    command
-                        .error_callback(
-                            &ctx,
-                            "Failed to check server status, try again later.",
-                            false,
-                        )
-                        .await?;
-                    return Ok(());
-                }
-            };
-            if blacklisted {
-                let mut content = String::from("Seems like this server has been blacklisted.");
-                if let Some(reason) = reason_opt {
-                    let _ = write!(content, " {reason}");
-                }
-                command.error_callback(&ctx, content, false).await?;
-                return Ok(());
-            }
-
-            let is_allowed = ctx
-                .guild_settings(guild, |s| {
-                    s.input_channels.is_empty() || s.input_channels.contains(&command.channel_id)
-                })
-                .unwrap_or(true);
-
-            if !is_allowed {
-                let content = "This channel is not an allowed input channel for rendering.";
-                command.error_callback(&ctx, content, true).await?;
-                return Ok(());
-            }
-
-            ctx.guild_settings(guild, |server| server.output_channel)
-                .flatten()
-                .unwrap_or(command.channel_id)
-        }
-        None => command.channel_id,
-    };
-
-    let bytes = match ctx.client().get_discord_attachment(&attachment).await {
-        Ok(bytes) => bytes,
-        Err(err) => {
-            command.error(&ctx, "Failed to download attachment").await?;
-
-            return Err(err);
-        }
-    };
-
-    let replay = match Replay::from_bytes(&bytes) {
-        Ok(replay) => replay,
-        Err(err) => {
-            let content = "Failed to parse the .osr file. Did you give a valid replay file?";
-            command.error(&ctx, content).await?;
-
-            return Err(err).context("failed to parse .osr file");
-        }
-    };
-
-    if replay.mode != Mode::Standard {
-        let content = "danser only accepts osu!standard plays, sorry :(";
-        command.error(&ctx, content).await?;
-
+    let user = command.user_id()?;
+    if let Err(msg) = check_render_access(&ctx, user, command.guild_id, command.channel_id).await {
+        command.error(&ctx, msg).await?;
         return Ok(());
     }
 
-    let config = BotConfig::get();
-    let mut replay_file = config.paths.downloads();
-    let safe_filename = crate::commands::danser::render_score::sanitize_filename(&attachment.filename);
-    replay_file.push(format!("{}_{safe_filename}", command.id));
+    if let Err(msg) = check_user_queue_limit(&ctx, user).await {
+        command.error(&ctx, msg).await?;
+        return Ok(());
+    }
 
-    let mut file = match File::create(&replay_file).await {
-        Ok(file) => file,
-        Err(err) => {
-            command.error(&ctx, "Failed to store replay file").await?;
+    let opts = RenderOptions {
+        start: start_in_seconds,
+        end: end_in_seconds,
+        pitch,
+        skin: resolved_skin,
+        skip_intro: skip_intro.unwrap_or(false),
+        offset_ms: offset.map(|v| v.clamp(-5000, 5000) as i32),
+        force_rerender: force.unwrap_or(false),
+        skip_info_embed: false,
+    };
 
-            return Err(err).with_context(|| format!("failed to create file `{replay_file:?}`"));
+    let replay_data = match resolve_slash_replay_input(
+        &ctx,
+        attachment.as_ref(),
+        parsed_score_id,
+        command.id,
+        command.channel_id,
+        user,
+        opts,
+    )
+    .await
+    {
+        Ok(data) => data,
+        Err(err_msg) => {
+            command.error(&ctx, err_msg).await?;
+            return Ok(());
         }
     };
 
-    if let Err(err) = file.write_all(&bytes).await {
-        command.error(&ctx, "Failed to store replay file").await?;
-
-        return Err(err).with_context(|| format!("failed writing to file `{replay_file:?}`"));
-    };
-
-    let is_lazer = crate::core::replay_queue::is_lazer_replay(replay.version);
-    let replay_data = ReplayData {
-        input_channel: command.channel_id,
-        output_channel,
-        pitch,
-        path: replay_file,
-        replay: replay.into(),
-        time_points: TimePoints {
-            start: start_in_seconds,
-            end: end_in_seconds,
-        },
-        user: command.user_id()?,
-        title: None,
-        player_name: Some(command.username()?.to_string()),
-        map_title: None,
-        difficulty_name: None,
-        queue_message: None,
-        is_lazer,
-    };
-
-    let was_empty = ctx.replay_queue.queue.lock().await.is_empty();
-    ctx.replay_queue.push(replay_data).await;
-    let content = "Replay has been added to the queue!";
-    let builder = MessageBuilder::new().embed(content);
-    command.update(&ctx, &builder).await?;
-    if was_empty {
-        let ctx_clone = Arc::clone(&ctx);
-        tokio::spawn(async move {
-            let _ = send_queue_status(ctx_clone, output_channel).await;
-        });
-    }
+    enqueue_replay_interaction(ctx, &command, replay_data, None).await;
     Ok(())
 }

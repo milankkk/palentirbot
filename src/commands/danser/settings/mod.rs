@@ -1,6 +1,5 @@
 use std::{
     convert::TryFrom,
-    fmt::{Display, Formatter, Result as FmtResult},
     path::PathBuf,
     sync::Arc,
 };
@@ -18,16 +17,68 @@ use twilight_model::{
 };
 
 use crate::{
-    core::{settings::DanserSettings, Context},
+    core::{settings::DanserSettings, BotConfig, Context},
     util::{builder::EmbedBuilder, interaction::InteractionCommand, InteractionCommandExt},
 };
 
-use self::{copy::*, default::*, edit::*, view::*};
+pub use self::{copy::*, default::*, edit::*, menu::*, preset::*, view::*};
 
 mod copy;
 mod default;
 mod edit;
+pub mod menu;
+mod preset;
 mod view;
+
+pub(crate) fn user_settings_path(uid: Id<UserMarker>) -> PathBuf {
+    BotConfig::get()
+        .paths
+        .danser()
+        .join(format!("settings/{uid}.json"))
+}
+
+pub(crate) fn default_settings_path() -> PathBuf {
+    BotConfig::get()
+        .paths
+        .danser()
+        .join("settings/default.json")
+}
+
+pub(crate) async fn resolve_user_or_default_settings(uid: Id<UserMarker>) -> (String, PathBuf) {
+    let user_path = user_settings_path(uid);
+    if tokio::fs::try_exists(&user_path).await.unwrap_or(false) {
+        (uid.to_string(), user_path)
+    } else {
+        ("default".to_owned(), default_settings_path())
+    }
+}
+
+pub(crate) fn current_skin_basename(settings: &DanserSettings) -> String {
+    settings
+        .skin
+        .current_skin
+        .trim()
+        .rsplit(['/', '\\'])
+        .find(|seg| !seg.is_empty())
+        .unwrap_or_default()
+        .to_owned()
+}
+
+pub(crate) fn rewrite_current_skin_path(settings: &mut DanserSettings, skin_name: &str) {
+    // danser always joins General.OsuSkinsDir with Skin.CurrentSkin, so CurrentSkin MUST be
+    // the bare folder name (writing an absolute path makes danser fail lookup and fall back
+    // to its built-in "default" skin).
+    let bare = skin_name
+        .trim()
+        .rsplit(['/', '\\'])
+        .find(|seg| !seg.is_empty())
+        .unwrap_or("default");
+    settings.skin.current_skin = bare.to_owned();
+}
+
+pub(crate) fn format_skin_display_name(raw: &str) -> String {
+    crate::util::str::percent_decode_utf8(raw).replace('_', " ")
+}
 
 #[derive(CreateCommand, SlashCommand)]
 #[command(name = "settings")]
@@ -41,6 +92,12 @@ pub enum Settings {
     Default(SettingsDefault),
     #[command(name = "edit")]
     Edit(SettingsEdit),
+    #[command(name = "menu")]
+    Menu(SettingsMenu),
+    #[command(name = "preset")]
+    Preset(SettingsPreset),
+    #[command(name = "quality")]
+    Quality(SettingsQuality),
     #[command(name = "view")]
     View(SettingsView),
 }
@@ -53,9 +110,20 @@ pub enum SettingsParsable {
     Default(SettingsDefault),
     #[command(name = "edit")]
     Edit(SettingsEditAutocomplete),
+    #[command(name = "menu")]
+    Menu(SettingsMenu),
+    #[command(name = "preset")]
+    Preset(SettingsPreset),
+    #[command(name = "quality")]
+    Quality(SettingsQuality),
     #[command(name = "view")]
     View(SettingsView),
 }
+
+#[derive(CreateCommand, CommandModel)]
+#[command(name = "menu")]
+/// Open an interactive menu to easily adjust your render settings
+pub struct SettingsMenu;
 
 #[derive(CreateCommand, CommandModel)]
 #[command(name = "copy")]
@@ -137,6 +205,12 @@ pub struct SettingsEdit {
     strain_graph_outline: Option<Visibility>,
     /// whether the key overlay should be displayed
     key_overlay: Option<Visibility>,
+    /// Whether motion blur is enabled
+    motion_blur: Option<State>,
+    /// Whether the results screen is shown after a replay
+    results_screen: Option<State>,
+    /// Whether intros/breaks are automatically skipped
+    skip_intro: Option<State>,
 }
 
 impl TryFrom<SettingsEditAutocomplete> for SettingsEdit {
@@ -167,6 +241,9 @@ impl TryFrom<SettingsEditAutocomplete> for SettingsEdit {
             strain_graph,
             strain_graph_outline,
             key_overlay,
+            motion_blur,
+            results_screen,
+            skip_intro,
         } = edit;
 
         let skin = match skin {
@@ -198,6 +275,9 @@ impl TryFrom<SettingsEditAutocomplete> for SettingsEdit {
             strain_graph,
             strain_graph_outline,
             key_overlay,
+            motion_blur,
+            results_screen,
+            skip_intro,
         };
 
         Ok(edit)
@@ -229,6 +309,47 @@ pub struct SettingsEditAutocomplete {
     strain_graph: Option<Visibility>,
     strain_graph_outline: Option<Visibility>,
     key_overlay: Option<Visibility>,
+    motion_blur: Option<State>,
+    results_screen: Option<State>,
+    skip_intro: Option<State>,
+}
+
+#[derive(CreateCommand, CommandModel)]
+#[command(name = "quality")]
+/// Switch your render resolution (720p60, 900p60, or 1080p60 with /link)
+pub struct SettingsQuality {
+    /// Render quality profile
+    pub(crate) quality: QualityChoice,
+}
+
+#[derive(CreateOption, CommandOption, Copy, Clone)]
+pub enum QualityChoice {
+    #[option(name = "1080p60 (1920x1080 — slower render, requires /link)", value = "1080p")]
+    FullHd1080p,
+    #[option(name = "900p60 (1600x900 — requires /link)", value = "900p")]
+    HdPlus900p,
+    #[option(name = "720p60 (1280x720 — standard)", value = "720p")]
+    Hd720p,
+}
+
+#[derive(CreateCommand, CommandModel)]
+#[command(name = "preset")]
+/// Apply a curated render preset to your danser settings
+pub struct SettingsPreset {
+    /// Preset profile to apply
+    preset: PresetChoice,
+}
+
+#[derive(CreateOption, CommandOption)]
+pub enum PresetChoice {
+    #[option(name = "Default Profile (900p60 linked / 720p60 guest)", value = "standard")]
+    Standard,
+    #[option(name = "Clean Showcase (minimal HUD)", value = "clean")]
+    CleanRecord,
+    #[option(name = "Fast Render (720p60, no storyboard/video)", value = "fast720p")]
+    Performance720p,
+    #[option(name = "Cinematic Motion Blur", value = "blur")]
+    CinematicBlur,
 }
 
 #[derive(CreateOption, CommandOption)]
@@ -249,10 +370,10 @@ pub enum State {
 
 #[derive(CreateCommand, CommandModel)]
 #[command(name = "view")]
-/// View the settings of a user
+/// View your own or another user's render settings
 pub struct SettingsView {
-    /// The user to view the settings of
-    user: ResolvedUser,
+    /// User to view (defaults to yourself)
+    pub(crate) user: Option<ResolvedUser>,
 }
 
 pub async fn slash_settings(ctx: Arc<Context>, mut command: InteractionCommand) -> Result<()> {
@@ -260,134 +381,169 @@ pub async fn slash_settings(ctx: Arc<Context>, mut command: InteractionCommand) 
         SettingsParsable::Copy(args) => copy(ctx, command, args).await,
         SettingsParsable::Default(args) => default(ctx, command, args).await,
         SettingsParsable::Edit(args) => edit(ctx, command, args).await,
+        SettingsParsable::Menu(_) => menu(ctx, command).await,
+        SettingsParsable::Preset(args) => preset(ctx, command, args).await,
+        SettingsParsable::Quality(args) => quality(ctx, command, args).await,
         SettingsParsable::View(args) => view(ctx, command, args).await,
     }
 }
 
-fn create_settings_embed(user: &User, settings: &DanserSettings) -> Embed {
-    let skin_path = PathBuf::from(&settings.skin.current_skin);
-    let skin = skin_path
-        .file_name()
-        .expect("missing skin file name")
-        .to_string_lossy();
+pub(crate) fn create_settings_embed(
+    user: &User,
+    settings: &DanserSettings,
+    is_linked: bool,
+) -> Embed {
+    let raw_skin = current_skin_basename(settings);
+    let skin = if raw_skin.is_empty() {
+        "default".to_owned()
+    } else {
+        format_skin_display_name(&raw_skin)
+    };
 
-    let on_off = |b| if b { "on" } else { "off" };
-    let percent = |value| Percent { value };
+    let effective_quality = settings
+        .current_render_quality()
+        .cap_for_entitlement(is_linked);
+    let quality_line = if !is_linked {
+        format!(
+            "`{}` *(link with `/link` for 900p60 / 1080p60)*",
+            effective_quality.display_label()
+        )
+    } else if matches!(
+        effective_quality,
+        crate::core::settings::RenderQuality::FullHd1080p60
+    ) {
+        format!(
+            "`{}` *(slower render)*",
+            effective_quality.display_label()
+        )
+    } else {
+        format!("`{}`", effective_quality.display_label())
+    };
+
+    let flag = |b: bool| if b { "✅" } else { "❌" };
+    let pct = |value: f64| format!("{}%", (value * 100.0).round());
+
+    let pp_text = if settings.gameplay.pp_counter.show {
+        format!("✅ ({} dec)", settings.gameplay.pp_counter.decimals)
+    } else {
+        "❌".to_owned()
+    };
+    let hit_err_text = if settings.gameplay.hit_error_meter.show {
+        format!(
+            "✅ ({} dec)",
+            settings.gameplay.hit_error_meter.unstable_rate_decimals
+        )
+    } else {
+        "❌".to_owned()
+    };
+    let aim_err_text = if settings.gameplay.aim_error_meter.show {
+        format!(
+            "✅ ({} dec)",
+            settings.gameplay.aim_error_meter.unstable_rate_decimals
+        )
+    } else {
+        "❌".to_owned()
+    };
 
     let fields = vec![
         EmbedField {
-            inline: false,
-            name: "Skin".to_owned(),
-            value: format!("`skin`: {skin}"),
-        },
-        EmbedField {
             inline: true,
-            name: "Beatmap".to_owned(),
+            name: "🎨 Skin & Visuals".to_owned(),
             value: format!(
-                "`storyboard`: {}\n\
-                `video`: {}\n\
-                `dim`: {}",
-                on_off(settings.playfield.background.load_storyboards),
-                on_off(settings.playfield.background.load_videos),
-                percent(settings.playfield.background.dim.normal),
-            ),
-        },
-        EmbedField {
-            inline: true,
-            name: "Gameplay".to_owned(),
-            value: format!(
-                "`leaderboard`: {}\n\
-                `key overlay`: {}",
-                on_off(settings.gameplay.score_board.show),
-                on_off(settings.gameplay.key_overlay.show),
-            ),
-        },
-        EmbedField {
-            inline: false,
-            name: "Audio".to_owned(),
-            value: format!(
-                "`music volume`: {}\n\
-                `hitsound volume`: {}\n\
-                `beatmap hitsounds`: {}",
-                percent(settings.audio.music_volume),
-                percent(settings.audio.sample_volume),
-                on_off(!settings.audio.ignore_beatmap_samples),
-            ),
-        },
-        EmbedField {
-            inline: true,
-            name: "Cursor".to_owned(),
-            value: format!(
-                "`cursor scale`: {}\n\
-                `cursor ripples`: {}",
+                "**Skin:** `{skin}`\n\
+                **Quality:** {quality_line}\n\
+                **Cursor Scale:** `{:.2}x`\n\
+                **Cursor Ripples:** {}\n\
+                **Motion Blur:** {}",
                 settings.skin.cursor.scale,
-                on_off(settings.cursor.cursor_ripples),
+                flag(settings.cursor.cursor_ripples),
+                flag(settings.recording.motion_blur.enabled),
             ),
         },
         EmbedField {
             inline: true,
-            name: "PP Counter".to_owned(),
+            name: "🔊 Background & Audio".to_owned(),
             value: format!(
-                "`show pp counter`: {}\n\
-                `pp decimals`: {}",
-                on_off(settings.gameplay.pp_counter.show),
-                settings.gameplay.pp_counter.decimals,
+                "**BG Dim:** `{}`\n\
+                **Storyboard:** {} | **BG Video:** {}\n\
+                **Music:** `{}` | **Hitsounds:** `{}`\n\
+                **Map Hitsounds:** {}",
+                pct(settings.playfield.background.dim.normal),
+                flag(settings.playfield.background.load_storyboards),
+                flag(settings.playfield.background.load_videos),
+                pct(settings.audio.music_volume),
+                pct(settings.audio.sample_volume),
+                flag(!settings.audio.ignore_beatmap_samples),
             ),
         },
         EmbedField {
             inline: false,
-            name: "Hit Counter".to_owned(),
+            name: "📊 HUD & Overlays".to_owned(),
             value: format!(
-                "`show hit counter`: {}\n\
-                `show sliderbreaks`: {}",
-                on_off(settings.gameplay.hit_counter.show),
-                on_off(settings.gameplay.hit_counter.show_sliderbreaks),
-            ),
-        },
-        EmbedField {
-            inline: true,
-            name: "Strain Graph".to_owned(),
-            value: format!(
-                "`show strain graph`: {}\n\
-                `show strain graph outline`: {}",
-                on_off(settings.gameplay.strain_graph.show),
-                on_off(settings.gameplay.strain_graph.outline.show),
-            ),
-        },
-        EmbedField {
-            inline: true,
-            name: "Hit Error Meter".to_owned(),
-            value: format!(
-                "`show hit error meter`: {}\n\
-                `hit error decimals`: {}",
-                on_off(settings.gameplay.hit_error_meter.show),
-                settings.gameplay.hit_error_meter.unstable_rate_decimals,
+                "**PP:** {pp_text} • **Leaderboard:** {} • **Keys:** {}\n\
+                **Hit Counter:** {} *(SB: {})* • **Strain Graph:** {} *(Outline: {})*\n\
+                **Hit Error:** {hit_err_text} • **Aim Error:** {aim_err_text}",
+                flag(settings.gameplay.score_board.show),
+                flag(settings.gameplay.key_overlay.show),
+                flag(settings.gameplay.hit_counter.show),
+                flag(settings.gameplay.hit_counter.show_sliderbreaks),
+                flag(settings.gameplay.strain_graph.show),
+                flag(settings.gameplay.strain_graph.outline.show),
             ),
         },
         EmbedField {
             inline: false,
-            name: "Aim Error Meter".to_owned(),
+            name: "▶️ Playback".to_owned(),
             value: format!(
-                "`show aim error meter`: {}\n\
-                `aim error UR decimals`: {}",
-                on_off(settings.gameplay.aim_error_meter.show),
-                settings.gameplay.aim_error_meter.unstable_rate_decimals,
+                "**Skip Intro:** {} • **Results Screen:** {}",
+                flag(settings.gameplay.always_skip_intro),
+                flag(settings.gameplay.show_results_screen),
             ),
         },
     ];
 
     EmbedBuilder::new()
-        .title(format!("Settings for {}", user.name))
+        .color(0x96DFE3)
+        .title(format!("Render Settings — {}", user.name))
         .fields(fields)
+        .footer("Tip: Run /settings menu for one-click controls")
         .build()
 }
 
-struct Percent {
-    value: f64,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-impl Display for Percent {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        write!(f, "{}%", (self.value * 100.0).round())
+    #[test]
+    fn test_settings_command_options_within_discord_limits() {
+        let cmd = Settings::create_command();
+        assert!(cmd.options.len() <= 25, "too many /settings subcommands");
+        for opt in &cmd.options {
+            if let Some(ref sub_opts) = opt.options {
+                assert!(
+                    sub_opts.len() <= 25,
+                    "subcommand /settings {} has {} options (Discord max is 25)",
+                    opt.name,
+                    sub_opts.len()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_rewrite_current_skin_keeps_bare_folder_name() {
+        let mut settings = DanserSettings::default();
+        settings.skin.current_skin = "roundtable2026_lite".to_owned();
+        rewrite_current_skin_path(&mut settings, "kjmkyh");
+        assert_eq!(settings.skin.current_skin, "kjmkyh");
+
+        settings.skin.current_skin = "/home/user/danser/Skins/old_skin".to_owned();
+        rewrite_current_skin_path(
+            &mut settings,
+            "/home/user/danser/Skins/%E2%80%B9+Spodai",
+        );
+        assert_eq!(settings.skin.current_skin, "%E2%80%B9+Spodai");
+        assert_eq!(current_skin_basename(&settings), "%E2%80%B9+Spodai");
+        assert_eq!(format_skin_display_name("Andros%202020-07-08"), "Andros 2020-07-08");
     }
 }

@@ -6,8 +6,8 @@ use twilight_interactions::command::{CommandModel, CreateCommand};
 use twilight_model::channel::Attachment;
 
 use crate::{
-    core::Context,
-    util::{interaction::InteractionCommand, InteractionCommandExt},
+    core::{BotConfig, Context},
+    util::{constants::{GENERAL_ISSUE, NOT_OWNER}, interaction::InteractionCommand, Authored, InteractionCommandExt},
 };
 
 use self::{add::*, list::*, remove::*};
@@ -22,7 +22,7 @@ mod remove;
 /// Skinlist configuration
 pub enum Skin {
     #[command(name = "add")]
-    Add(SkinAdd),
+    Add(Box<SkinAdd>),
     #[command(name = "remove")]
     Remove(SkinRemove),
     #[command(name = "list")]
@@ -53,9 +53,26 @@ pub struct SkinRemove {
 /// View the available skins
 pub struct SkinList;
 
+pub(super) async fn ensure_owner(ctx: &Context, command: &InteractionCommand) -> Result<bool> {
+    let user = match command.user() {
+        Ok(user) => user,
+        Err(err) => {
+            command.error_callback(ctx, GENERAL_ISSUE, false).await?;
+            return Err(err.wrap_err("failed to get user from command"));
+        }
+    };
+
+    if !BotConfig::get().owners.contains(&user.id) {
+        command.error_callback(ctx, NOT_OWNER, true).await?;
+        return Ok(false);
+    }
+
+    Ok(true)
+}
+
 pub async fn slash_skin(ctx: Arc<Context>, mut command: InteractionCommand) -> Result<()> {
     match Skin::from_interaction(command.input_data())? {
-        Skin::Add(args) => add(ctx, command, args).await,
+        Skin::Add(args) => add(ctx, command, *args).await,
         Skin::Remove(args) => remove(ctx, command, args).await,
         Skin::List(_) => list(ctx, command).await,
     }

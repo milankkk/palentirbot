@@ -1,8 +1,12 @@
-use crate::core::{commands::slash::Commands, BotConfig};
-use twilight_interactions::command::CommandOptionExtended;
-use twilight_model::channel::message::component::{
-    ActionRow, Component, SelectMenu, SelectMenuOption,
+use crate::{
+    core::{
+        commands::slash::{Command, Commands},
+        BotConfig,
+    },
+    util::builder::text_select_row,
 };
+use twilight_interactions::command::CommandOptionExtended;
+use twilight_model::channel::message::component::{Component, SelectMenuOption};
 use twilight_model::channel::message::embed::EmbedField;
 use twilight_model::id::{marker::UserMarker, Id};
 
@@ -15,12 +19,17 @@ mod components;
 mod interaction;
 
 fn generate_menus(user: Id<UserMarker>, options: &[CommandOptionExtended]) -> Vec<Component> {
+    let is_owner = BotConfig::get().owners.contains(&user);
     let base_options: Vec<_> = Commands::get().filter_collect(|c| {
+        let only_owner = match c {
+            Command::Slash(slash) => slash.flags.only_owner(),
+            Command::Message(_) => false,
+        };
         let cmd = c.create();
         let name = cmd.name;
         let description = cmd.description;
 
-        if description.is_empty() || (name == "owner" && !BotConfig::get().owners.contains(&user)) {
+        if description.is_empty() || ((only_owner || name == "owner") && !is_owner) {
             None
         } else {
             Some(SelectMenuOption {
@@ -33,23 +42,7 @@ fn generate_menus(user: Id<UserMarker>, options: &[CommandOptionExtended]) -> Ve
         }
     });
 
-    let select_menu = SelectMenu {
-        custom_id: "help_basecommand".to_owned(),
-        disabled: false,
-        max_values: None,
-        min_values: None,
-        options: Some(base_options),
-        placeholder: Some("Select a base command".to_owned()),
-        channel_types: None,
-        default_values: None,
-        kind: twilight_model::channel::message::component::SelectMenuType::Text,
-    };
-
-    let row = ActionRow {
-        components: vec![Component::SelectMenu(select_menu)],
-    };
-
-    let base_menu = Component::ActionRow(row);
+    let base_menu = text_select_row("help_basecommand", "Select a base command", base_options);
 
     match parse_subcommand_menu(options) {
         Some(sub_menu) => vec![base_menu, sub_menu],
@@ -68,41 +61,20 @@ fn parse_subcommand_menu(options: &[CommandOptionExtended]) -> Option<Component>
             use twilight_model::application::command::CommandOptionType;
             match option.kind {
                 CommandOptionType::SubCommand | CommandOptionType::SubCommandGroup => {
-                    Some((&option.name, &option.description))
+                    Some(SelectMenuOption {
+                        default: false,
+                        description: Some(option.description.clone()),
+                        emoji: None,
+                        label: option.name.clone(),
+                        value: option.name.clone(),
+                    })
                 }
                 _ => None,
             }
         })
-        .map(|(name, description): (&String, &String)| SelectMenuOption {
-            default: false,
-            description: Some(description.to_owned()),
-            emoji: None,
-            label: name.to_owned(),
-            value: name.to_owned(),
-        })
         .collect();
 
-    if options.is_empty() {
-        return None;
-    }
-
-    let select_menu = SelectMenu {
-        custom_id: "help_subcommand".to_owned(),
-        disabled: false,
-        max_values: None,
-        min_values: None,
-        options: Some(options),
-        placeholder: Some("Select a subcommand".to_owned()),
-        channel_types: None,
-        default_values: None,
-        kind: twilight_model::channel::message::component::SelectMenuType::Text,
-    };
-
-    let row = ActionRow {
-        components: vec![Component::SelectMenu(select_menu)],
-    };
-
-    Some(Component::ActionRow(row))
+    (!options.is_empty()).then(|| text_select_row("help_subcommand", "Select a subcommand", options))
 }
 
 fn option_fields(children: &[CommandOptionExtended]) -> Vec<EmbedField> {

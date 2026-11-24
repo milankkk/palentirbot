@@ -4,7 +4,7 @@ use eyre::Result;
 
 use crate::{
     util::{
-        builder::{EmbedBuilder, FooterBuilder, MessageBuilder},
+        builder::{EmbedBuilder, MessageBuilder},
         interaction::InteractionCommand,
         numbers::with_comma_int,
         InteractionCommandExt,
@@ -30,7 +30,8 @@ pub async fn cache(ctx: Arc<Context>, command: InteractionCommand) -> Result<()>
 
     let embed = EmbedBuilder::new()
         .description(description)
-        .footer(FooterBuilder::new("Boot time"))
+        .timestamp(ctx.stats.start_time)
+        .footer("Boot time")
         .build();
 
     let builder = MessageBuilder::new().embed(embed);

@@ -1,15 +1,20 @@
-use std::{fmt::Write, mem};
+use std::fmt::Write;
 
 use eyre::{ContextCompat, Result};
 use twilight_interactions::command::{ApplicationCommandData, CommandOptionExtended};
+use twilight_model::{
+    application::command::CommandOptionType,
+    id::{marker::UserMarker, Id},
+};
 
 use crate::{
     core::{
-        commands::slash::{Command, Commands, SlashCommand},
-        Context,
+        commands::slash::{Command, Commands},
+        BotConfig, Context,
     },
     util::{
-        builder::{EmbedBuilder, FooterBuilder, MessageBuilder},
+        builder::{EmbedBuilder, MessageBuilder},
+        constants::NOT_OWNER,
         interaction::InteractionComponent,
         Authored, ComponentExt,
     },
@@ -19,121 +24,27 @@ use super::{generate_menus, option_fields};
 
 const AUTHORITY_STATUS: &str = "Requires authority status";
 
-type PartResult = Result<(Parts, bool)>;
-
-struct Parts {
-    name: String,
-    help: String,
+async fn send_help_view(
+    ctx: &Context,
+    component: &InteractionComponent,
+    user_id: Id<UserMarker>,
+    title: String,
+    description: String,
     options: Vec<CommandOptionExtended>,
-}
+    authority: bool,
+) -> Result<()> {
+    let mut embed = EmbedBuilder::new()
+        .title(title)
+        .description(description)
+        .fields(option_fields(&options));
 
-impl From<&'static SlashCommand> for Parts {
-    fn from(command: &'static SlashCommand) -> Self {
-        let command = (command.create)();
-
-        Self {
-            name: command.name,
-            help: command
-                .help
-                .map(|s| s.to_string())
-                .unwrap_or(command.description),
-            options: command.options,
-        }
+    if authority {
+        embed = embed.footer(AUTHORITY_STATUS);
     }
-}
 
-impl From<CommandOptionExtended> for Parts {
-    fn from(option: CommandOptionExtended) -> Self {
-        use twilight_model::application::command::CommandOptionType;
-
-        let options = match option.kind {
-            CommandOptionType::SubCommand | CommandOptionType::SubCommandGroup => {
-                option.options.unwrap_or_default()
-            }
-            _ => Vec::new(),
-        };
-
-        Self {
-            name: option.name.clone(),
-            help: option
-                .help
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| option.description.clone()),
-            options,
-        }
-    }
-}
-
-impl From<EitherCommand> for Parts {
-    fn from(either: EitherCommand) -> Self {
-        match either {
-            EitherCommand::Base(command) => command.into(),
-            EitherCommand::Option(option) => (*option).into(),
-        }
-    }
-}
-
-impl From<CommandIter> for Parts {
-    fn from(iter: CommandIter) -> Self {
-        match iter.next {
-            Some(option) => option.into(),
-            None => iter.curr.into(),
-        }
-    }
-}
-
-enum EitherCommand {
-    Base(&'static SlashCommand),
-    Option(Box<CommandOptionExtended>),
-}
-
-struct CommandIter {
-    curr: EitherCommand,
-    next: Option<CommandOptionExtended>,
-}
-
-impl From<&'static SlashCommand> for CommandIter {
-    fn from(command: &'static SlashCommand) -> Self {
-        Self {
-            curr: EitherCommand::Base(command),
-            next: None,
-        }
-    }
-}
-
-impl CommandIter {
-    fn next(&mut self, name: &str) -> bool {
-        use twilight_model::application::command::CommandOptionType;
-
-        let options = match &mut self.next {
-            Some(option) => match option.kind {
-                CommandOptionType::SubCommand | CommandOptionType::SubCommandGroup => {
-                    mem::take(&mut option.options).unwrap_or_default()
-                }
-                _ => return true,
-            },
-            None => match &mut self.curr {
-                EitherCommand::Base(command) => (command.create)().options,
-                EitherCommand::Option(option) => match option.kind {
-                    CommandOptionType::SubCommand | CommandOptionType::SubCommandGroup => {
-                        mem::take(&mut option.options).unwrap_or_default()
-                    }
-                    _ => return true,
-                },
-            },
-        };
-
-        let next = match options.into_iter().find(|o| o.name == name) {
-            Some(option) => option,
-            None => return true,
-        };
-
-        if let Some(curr) = self.next.replace(next) {
-            self.curr = EitherCommand::Option(Box::new(curr));
-        }
-
-        false
-    }
+    let components = generate_menus(user_id, &options);
+    let builder = MessageBuilder::new().embed(embed).components(components);
+    component.callback(ctx, builder).await
 }
 
 pub async fn handle_help_basecommand(ctx: &Context, component: InteractionComponent) -> Result<()> {
@@ -151,6 +62,12 @@ pub async fn handle_help_basecommand(ctx: &Context, component: InteractionCompon
         })
         .with_context(|| format!("missing slash command `{name}`"))?;
 
+    let user_id = component.user_id()?;
+    if cmd.flags.only_owner() && !BotConfig::get().owners.contains(&user_id) {
+        let builder = MessageBuilder::new().embed(NOT_OWNER);
+        return component.callback(ctx, builder).await;
+    }
+
     let ApplicationCommandData {
         name,
         description,
@@ -159,26 +76,17 @@ pub async fn handle_help_basecommand(ctx: &Context, component: InteractionCompon
         ..
     } = (cmd.create)();
 
-    let description = help
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| description.clone());
-
-    let mut embed = EmbedBuilder::new()
-        .title(name)
-        .description(description)
-        .fields(option_fields(&options));
-
-    if cmd.flags.authority() {
-        let footer = FooterBuilder::new(AUTHORITY_STATUS);
-        embed = embed.footer(footer);
-    }
-
-    let menus = generate_menus(component.user_id()?, &options);
-    let builder = MessageBuilder::new().embed(embed).components(menus);
-
-    component.callback(ctx, builder).await?;
-
-    Ok(())
+    let description = help.map_or(description, |s| s.to_string());
+    send_help_view(
+        ctx,
+        &component,
+        user_id,
+        name,
+        description,
+        options,
+        cmd.flags.authority(),
+    )
+    .await
 }
 
 pub async fn handle_help_subcommand(
@@ -193,36 +101,21 @@ pub async fn handle_help_subcommand(
         .title
         .context("missing embed title")?;
 
-    let name = component
+    let selected = component
         .data
         .values
         .first()
         .with_context(|| format!("missing subcommand for `{title}`"))?;
 
-    let (command, authority) = continue_subcommand(&mut title, name)?;
-
-    // Prepare embed and components
-    let mut embed_builder = EmbedBuilder::new()
-        .title(title)
-        .description(command.help)
-        .fields(option_fields(&command.options));
-
-    if authority {
-        embed_builder = embed_builder.footer(FooterBuilder::new(AUTHORITY_STATUS));
-    }
-
-    let components = generate_menus(component.user_id()?, &command.options);
-
-    let builder = MessageBuilder::new()
-        .embed(embed_builder)
-        .components(components);
-
-    component.callback(ctx, builder).await?;
-
-    Ok(())
+    let (help, options, authority) = resolve_subcommand(&mut title, selected)?;
+    let user_id = component.user_id()?;
+    send_help_view(ctx, &component, user_id, title, help, options, authority).await
 }
 
-fn continue_subcommand(title: &mut String, name: &str) -> PartResult {
+fn resolve_subcommand(
+    title: &mut String,
+    selected: &str,
+) -> Result<(String, Vec<CommandOptionExtended>, bool)> {
     let mut names = title.split(' ');
     let base = names.next().context("missing embed title")?;
 
@@ -235,20 +128,26 @@ fn continue_subcommand(title: &mut String, name: &str) -> PartResult {
         .context("unknown command")?;
 
     let authority = command.flags.authority();
-    let mut iter = CommandIter::from(command);
+    let mut options = (command.create)().options;
+    let mut found = None;
 
-    for name in names {
-        if iter.next(name) {
-            bail!("unknown command");
-        }
+    for segment in names.chain(std::iter::once(selected)) {
+        let opt = options
+            .into_iter()
+            .find(|o| o.name == segment)
+            .context("unknown command")?;
+
+        options = match opt.kind {
+            CommandOptionType::SubCommand | CommandOptionType::SubCommandGroup => {
+                opt.options.unwrap_or_default()
+            }
+            _ => Vec::new(),
+        };
+        found = Some((opt.name, opt.help.map_or(opt.description, |s| s.to_string())));
     }
 
-    if iter.next(name) {
-        bail!("unknown command");
-    }
+    let (leaf_name, help) = found.context("unknown command")?;
+    let _ = write!(title, " {leaf_name}");
 
-    let command = Parts::from(iter);
-    let _ = write!(title, " {}", command.name);
-
-    Ok((command, authority))
+    Ok((help, options, authority))
 }

@@ -8,31 +8,42 @@ use crate::{
 };
 
 pub async fn view(ctx: Arc<Context>, command: InteractionCommand) -> Result<()> {
-    let guild_id = command.guild_id.unwrap();
+    let Some(guild_id) = command.guild_id else {
+        command
+            .error_callback(&ctx, "This command can only be used in a server.", true)
+            .await?;
+        return Ok(());
+    };
 
-    let input_channels = ctx
-        .guild_settings(guild_id, |server| {
-            let mut iter = server.input_channels.iter();
-
-            iter.next().map(|channel| {
-                let mut text = format!("<#{channel}>");
-
-                for channel in iter {
-                    let _ = write!(text, ", <#{channel}>");
-                }
-
-                text
-            })
+    let (prefix, input_channels, ai_channel) = ctx
+        .guild_settings(guild_id, |s| {
+            let mut iter = s.input_channels.iter();
+            let channels = iter
+                .next()
+                .map(|first| {
+                    let mut text = format!("<#{first}>");
+                    for ch in iter {
+                        let _ = write!(text, ", <#{ch}>");
+                    }
+                    text
+                })
+                .unwrap_or_else(|| "All channels (unrestricted)".to_owned());
+            let ai = s
+                .ai_channel
+                .map_or_else(|| "None".to_owned(), |ch| format!("<#{ch}>"));
+            (s.effective_prefix().to_owned(), channels, ai)
         })
-        .flatten()
-        .unwrap_or_else(|| "None".to_owned());
+        .unwrap_or_else(|| {
+            (
+                "!".to_owned(),
+                "All channels (unrestricted)".to_owned(),
+                "None".to_owned(),
+            )
+        });
 
-    let output_channel = ctx
-        .guild_settings(guild_id, |s| s.output_channel)
-        .flatten()
-        .map_or_else(|| "None".to_owned(), |channel| format!("<#{channel}>"));
-
-    let content = format!("Input channels: {input_channels}\nOutput channel: {output_channel}");
+    let content = format!(
+        "Prefix: `{prefix}`\nInput channels: {input_channels}\nOutput: Requesting channel\nAI chat channel: {ai_channel}"
+    );
     let builder = MessageBuilder::new().embed(content);
     command.callback(&ctx, builder, false).await?;
 

@@ -1,14 +1,15 @@
 use proc_macro2::{Ident, Span, TokenStream};
-use quote::{quote, ToTokens};
+use quote::{format_ident, quote, ToTokens};
 use syn::{
     parse::{Parse, ParseStream},
-    parse_quote, Block, Error, FnArg, Item, ItemFn, Lit, LitBool, LitStr, MetaNameValue, PatType,
-    Result, ReturnType, Token,
+    parse_quote, Attribute, Block, Error, FnArg, Item, ItemFn, Lit, LitBool, LitStr, MetaNameValue,
+    PatType, Result, ReturnType, Token,
 };
 
 use crate::util::IdentExt;
 
 pub struct Function {
+    attrs: Vec<Attribute>,
     block: Box<Block>,
     first_arg: PatType,
     second_arg: PatType,
@@ -19,7 +20,9 @@ impl Parse for Function {
     fn parse(input: ParseStream) -> Result<Self> {
         let parsed: Item = input.parse()?;
 
-        let ItemFn { sig, block, .. } = match parsed {
+        let ItemFn {
+            attrs, sig, block, ..
+        } = match parsed {
             Item::Fn(m) => m,
 
             item => {
@@ -77,6 +80,7 @@ impl Parse for Function {
         }
 
         Ok(Self {
+            attrs,
             block,
             first_arg,
             second_arg,
@@ -136,6 +140,7 @@ impl Parse for Attributes {
 
 pub fn impl_(attrs: Attributes, fun: Function) -> Result<TokenStream> {
     let Function {
+        attrs: fn_attrs,
         block,
         first_arg,
         second_arg,
@@ -148,19 +153,22 @@ pub fn impl_(attrs: Attributes, fun: Function) -> Result<TokenStream> {
     } = attrs;
 
     let static_name = fn_name.to_uppercase();
+    let create_fn = format_ident!("__{fn_name}_create");
+    let exec_fn = format_ident!("__{fn_name}_exec");
 
     let dm_permission = OptionWrapper(dm_permission);
 
     let path = quote!(crate::core::commands::slash::MessageCommand);
 
     let tokens = quote! {
+        #(#fn_attrs)*
         pub static #static_name: #path = #path {
-            create: create__,
-            exec: exec__,
+            create: #create_fn,
+            exec: #exec_fn,
             name: #name,
         };
 
-        fn create__() -> twilight_model::application::command::Command {
+        fn #create_fn() -> twilight_model::application::command::Command {
             #[allow(deprecated)]
             twilight_model::application::command::Command {
                 application_id: None,
@@ -181,7 +189,7 @@ pub fn impl_(attrs: Attributes, fun: Function) -> Result<TokenStream> {
             }
         }
 
-        fn exec__(#first_arg, #second_arg) -> crate::core::commands::slash::CommandResult {
+        fn #exec_fn(#first_arg, #second_arg) -> crate::core::commands::slash::CommandResult {
             Box::pin(async move { #block })
         }
     };

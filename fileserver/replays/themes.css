@@ -1,0 +1,1374 @@
+/* ==========================================================================
+ * Replays Multi-Theme Engine
+ * Default: Nord Dark & Nord Light (available to everyone)
+ * osu! Account Exclusives: Classic Midnight, osu! Lazer, Catppuccin Mocha,
+ *                          Sakura Blossom, OLED Pitch
+ * ========================================================================== */
+
+:root,
+:root[data-theme="nord-dark"] {
+  color-scheme: dark;
+  --bg: #2e3440;
+  --surface: #3b4252;
+  --surface-2: #434c5e;
+  --surface-3: #4c566a;
+  --border: rgba(216, 222, 233, 0.13);
+  --border-strong: rgba(216, 222, 233, 0.24);
+  --border-hover: rgba(136, 192, 208, 0.56);
+  --text: #eceff4;
+  --text-dim: #d8dee9;
+  --text-muted: #9aa7bc;
+  --accent: #88c0d0;
+  --accent-2: #81a1c1;
+  --accent-3: #b48ead;
+  --green: #a3be8c;
+  --amber: #ebcb8b;
+  --rose: #bf616a;
+  --on-accent: #1f2430;
+  --on-accent-2: #1f2430;
+  --btn-primary-bg: linear-gradient(135deg, #88c0d0, #81a1c1);
+  --panel-bg: rgba(59, 66, 82, 0.88);
+  --panel-bg-strong: rgba(59, 66, 82, 0.96);
+  --card-bg: linear-gradient(180deg, rgba(67, 76, 94, 0.9), rgba(59, 66, 82, 0.96));
+  --input-bg: rgba(46, 52, 64, 0.84);
+  --subtle-bg: rgba(236, 239, 244, 0.055);
+  --subtle-bg-2: rgba(46, 52, 64, 0.56);
+  --hover-bg: rgba(236, 239, 244, 0.09);
+  --divider: rgba(216, 222, 233, 0.1);
+  --accent-soft: rgba(136, 192, 208, 0.14);
+  --accent-soft-2: rgba(136, 192, 208, 0.24);
+  --accent-border: rgba(136, 192, 208, 0.4);
+  --accent2-soft: rgba(180, 142, 173, 0.14);
+  --accent2-border: rgba(180, 142, 173, 0.38);
+  --bg-glow-1: rgba(136, 192, 208, 0.15);
+  --bg-glow-2: rgba(180, 142, 173, 0.13);
+  --menu-bg: rgba(46, 52, 64, 0.97);
+  --select-opt-bg: #3b4252;
+  --danger-bg: rgba(191, 97, 106, 0.16);
+  --danger-bg-hover: rgba(191, 97, 106, 0.26);
+  --danger-border: rgba(191, 97, 106, 0.48);
+  --danger-text: #f3b5bb;
+  --success-bg: rgba(163, 190, 140, 0.15);
+  --success-border: rgba(163, 190, 140, 0.42);
+  --success-text: #c7e0b3;
+  --warn-bg: rgba(235, 203, 139, 0.14);
+  --warn-border: rgba(235, 203, 139, 0.42);
+  --warn-text: #f2dcad;
+  --lazer-bg: rgba(180, 142, 173, 0.18);
+  --lazer-border: rgba(180, 142, 173, 0.46);
+  --lazer-text: #e4c7df;
+  --shadow-card: 0 16px 38px rgba(17, 21, 29, 0.4);
+  --shadow-menu: 0 18px 46px rgba(15, 19, 27, 0.56);
+  --overlay-backdrop: rgba(24, 29, 38, 0.78);
+  --kbd-bg: rgba(46, 52, 64, 0.85);
+  --player-frame-bg: #1e232d;
+  --thumb-bg: #242933;
+  --osu-btn-bg: linear-gradient(135deg, rgba(255, 102, 170, 0.2), rgba(180, 142, 173, 0.2));
+  --osu-btn-bg-hover: linear-gradient(135deg, rgba(255, 102, 170, 0.32), rgba(180, 142, 173, 0.3));
+  --osu-btn-border: rgba(255, 102, 170, 0.46);
+  --osu-btn-text: #eceff4;
+}
+
+:root[data-theme="nord-light"] {
+  color-scheme: light;
+  --bg: #eceff4;
+  --surface: #ffffff;
+  --surface-2: #e5e9f0;
+  --surface-3: #d8dee9;
+  --border: rgba(46, 52, 64, 0.13);
+  --border-strong: rgba(46, 52, 64, 0.24);
+  --border-hover: rgba(94, 129, 172, 0.62);
+  --text: #2e3440;
+  --text-dim: #434c5e;
+  --text-muted: #5d6980;
+  --accent: #5e81ac;
+  --accent-2: #4c749e;
+  --accent-3: #8f6286;
+  --green: #4f7d3d;
+  --amber: #9e6b14;
+  --rose: #b03a48;
+  --on-accent: #ffffff;
+  --on-accent-2: #ffffff;
+  --btn-primary-bg: linear-gradient(135deg, #5e81ac, #4a6f99);
+  --panel-bg: rgba(255, 255, 255, 0.9);
+  --panel-bg-strong: rgba(255, 255, 255, 0.97);
+  --card-bg: linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(244, 247, 251, 0.98));
+  --input-bg: #f6f8fb;
+  --subtle-bg: rgba(46, 52, 64, 0.048);
+  --subtle-bg-2: rgba(229, 233, 240, 0.72);
+  --hover-bg: rgba(46, 52, 64, 0.08);
+  --divider: rgba(46, 52, 64, 0.1);
+  --accent-soft: rgba(94, 129, 172, 0.12);
+  --accent-soft-2: rgba(94, 129, 172, 0.2);
+  --accent-border: rgba(94, 129, 172, 0.38);
+  --accent2-soft: rgba(143, 98, 134, 0.11);
+  --accent2-border: rgba(143, 98, 134, 0.34);
+  --bg-glow-1: rgba(136, 192, 208, 0.34);
+  --bg-glow-2: rgba(129, 161, 193, 0.24);
+  --menu-bg: rgba(255, 255, 255, 0.98);
+  --select-opt-bg: #ffffff;
+  --danger-bg: rgba(191, 97, 106, 0.11);
+  --danger-bg-hover: rgba(191, 97, 106, 0.2);
+  --danger-border: rgba(191, 97, 106, 0.42);
+  --danger-text: #9d2f3c;
+  --success-bg: rgba(79, 125, 61, 0.12);
+  --success-border: rgba(79, 125, 61, 0.38);
+  --success-text: #376127;
+  --warn-bg: rgba(180, 125, 31, 0.12);
+  --warn-border: rgba(180, 125, 31, 0.4);
+  --warn-text: #8a5b0c;
+  --lazer-bg: rgba(190, 24, 93, 0.1);
+  --lazer-border: rgba(190, 24, 93, 0.34);
+  --lazer-text: #a61b56;
+  --shadow-card: 0 12px 30px rgba(46, 52, 64, 0.1);
+  --shadow-menu: 0 18px 42px rgba(46, 52, 64, 0.18);
+  --overlay-backdrop: rgba(46, 52, 64, 0.56);
+  --kbd-bg: #e5e9f0;
+  --player-frame-bg: #2e3440;
+  --thumb-bg: #d8dee9;
+  --osu-btn-bg: linear-gradient(135deg, rgba(214, 51, 132, 0.12), rgba(143, 98, 134, 0.12));
+  --osu-btn-bg-hover: linear-gradient(135deg, rgba(214, 51, 132, 0.2), rgba(143, 98, 134, 0.2));
+  --osu-btn-border: rgba(214, 51, 132, 0.42);
+  --osu-btn-text: #9e1b5c;
+}
+
+:root[data-theme="midnight"] {
+  color-scheme: dark;
+  --bg: #0a0e17;
+  --surface: #121725;
+  --surface-2: #181f32;
+  --surface-3: #222b44;
+  --border: rgba(255, 255, 255, 0.09);
+  --border-strong: rgba(255, 255, 255, 0.18);
+  --border-hover: rgba(150, 223, 227, 0.48);
+  --text: #f3f6fb;
+  --text-dim: #9aa4b6;
+  --text-muted: #6e7b94;
+  --accent: #96dfe3;
+  --accent-2: #b066ff;
+  --accent-3: #b066ff;
+  --green: #4ade80;
+  --amber: #fbbf24;
+  --rose: #fb7185;
+  --on-accent: #071419;
+  --on-accent-2: #160826;
+  --btn-primary-bg: linear-gradient(135deg, #96dfe3, #6ec8d8);
+  --panel-bg: rgba(18, 23, 37, 0.88);
+  --panel-bg-strong: rgba(18, 23, 37, 0.96);
+  --card-bg: linear-gradient(180deg, rgba(24, 30, 47, 0.9), rgba(17, 21, 33, 0.96));
+  --input-bg: rgba(10, 14, 23, 0.78);
+  --subtle-bg: rgba(255, 255, 255, 0.04);
+  --subtle-bg-2: rgba(10, 14, 23, 0.58);
+  --hover-bg: rgba(255, 255, 255, 0.08);
+  --divider: rgba(255, 255, 255, 0.07);
+  --accent-soft: rgba(150, 223, 227, 0.12);
+  --accent-soft-2: rgba(150, 223, 227, 0.22);
+  --accent-border: rgba(150, 223, 227, 0.36);
+  --accent2-soft: rgba(176, 102, 255, 0.12);
+  --accent2-border: rgba(176, 102, 255, 0.36);
+  --bg-glow-1: rgba(150, 223, 227, 0.13);
+  --bg-glow-2: rgba(176, 102, 255, 0.12);
+  --menu-bg: rgba(16, 21, 34, 0.98);
+  --select-opt-bg: #121725;
+  --danger-bg: rgba(251, 113, 133, 0.14);
+  --danger-bg-hover: rgba(251, 113, 133, 0.24);
+  --danger-border: rgba(251, 113, 133, 0.44);
+  --danger-text: #fda4af;
+  --success-bg: rgba(74, 222, 128, 0.13);
+  --success-border: rgba(74, 222, 128, 0.42);
+  --success-text: #86efac;
+  --warn-bg: rgba(251, 191, 36, 0.12);
+  --warn-border: rgba(251, 191, 36, 0.4);
+  --warn-text: #fde68a;
+  --lazer-bg: rgba(244, 114, 182, 0.14);
+  --lazer-border: rgba(244, 114, 182, 0.42);
+  --lazer-text: #f9a8d4;
+  --shadow-card: 0 18px 42px rgba(0, 0, 0, 0.48);
+  --shadow-menu: 0 18px 46px rgba(0, 0, 0, 0.62);
+  --overlay-backdrop: rgba(4, 7, 12, 0.76);
+  --kbd-bg: rgba(255, 255, 255, 0.08);
+  --player-frame-bg: #05070c;
+  --thumb-bg: #0c101b;
+  --osu-btn-bg: linear-gradient(135deg, rgba(255, 102, 170, 0.2), rgba(176, 102, 255, 0.16));
+  --osu-btn-bg-hover: linear-gradient(135deg, rgba(255, 102, 170, 0.32), rgba(176, 102, 255, 0.24));
+  --osu-btn-border: rgba(255, 102, 170, 0.45);
+  --osu-btn-text: #f3f6fb;
+}
+
+:root[data-theme="osu-pink"] {
+  color-scheme: dark;
+  --bg: #150e19;
+  --surface: #211629;
+  --surface-2: #2c1e36;
+  --surface-3: #392847;
+  --border: rgba(255, 196, 228, 0.12);
+  --border-strong: rgba(255, 196, 228, 0.24);
+  --border-hover: rgba(255, 102, 170, 0.6);
+  --text: #fdf2f8;
+  --text-dim: #dbc2d9;
+  --text-muted: #9f82a1;
+  --accent: #ff66aa;
+  --accent-2: #c084fc;
+  --accent-3: #67e8f9;
+  --green: #6ee7b7;
+  --amber: #fcd34d;
+  --rose: #fb7185;
+  --on-accent: #1d0814;
+  --on-accent-2: #170826;
+  --btn-primary-bg: linear-gradient(135deg, #ff66aa, #e057d4);
+  --panel-bg: rgba(33, 22, 41, 0.88);
+  --panel-bg-strong: rgba(33, 22, 41, 0.96);
+  --card-bg: linear-gradient(180deg, rgba(44, 30, 54, 0.92), rgba(31, 20, 39, 0.97));
+  --input-bg: rgba(21, 14, 25, 0.84);
+  --subtle-bg: rgba(255, 196, 228, 0.055);
+  --subtle-bg-2: rgba(21, 14, 25, 0.6);
+  --hover-bg: rgba(255, 102, 170, 0.11);
+  --divider: rgba(255, 196, 228, 0.09);
+  --accent-soft: rgba(255, 102, 170, 0.15);
+  --accent-soft-2: rgba(255, 102, 170, 0.25);
+  --accent-border: rgba(255, 102, 170, 0.44);
+  --accent2-soft: rgba(192, 132, 252, 0.14);
+  --accent2-border: rgba(192, 132, 252, 0.4);
+  --bg-glow-1: rgba(255, 102, 170, 0.18);
+  --bg-glow-2: rgba(192, 132, 252, 0.16);
+  --menu-bg: rgba(28, 18, 36, 0.98);
+  --select-opt-bg: #211629;
+  --danger-bg: rgba(251, 113, 133, 0.16);
+  --danger-bg-hover: rgba(251, 113, 133, 0.26);
+  --danger-border: rgba(251, 113, 133, 0.48);
+  --danger-text: #fda4af;
+  --success-bg: rgba(110, 231, 183, 0.14);
+  --success-border: rgba(110, 231, 183, 0.42);
+  --success-text: #a7f3d0;
+  --warn-bg: rgba(252, 211, 77, 0.13);
+  --warn-border: rgba(252, 211, 77, 0.42);
+  --warn-text: #fde68a;
+  --lazer-bg: rgba(255, 102, 170, 0.18);
+  --lazer-border: rgba(255, 102, 170, 0.5);
+  --lazer-text: #ffb3d6;
+  --shadow-card: 0 18px 44px rgba(10, 4, 16, 0.52);
+  --shadow-menu: 0 20px 50px rgba(10, 4, 16, 0.66);
+  --overlay-backdrop: rgba(12, 6, 18, 0.78);
+  --kbd-bg: rgba(255, 196, 228, 0.09);
+  --player-frame-bg: #0f0913;
+  --thumb-bg: #180f20;
+  --osu-btn-bg: linear-gradient(135deg, rgba(255, 102, 170, 0.28), rgba(192, 132, 252, 0.22));
+  --osu-btn-bg-hover: linear-gradient(135deg, rgba(255, 102, 170, 0.4), rgba(192, 132, 252, 0.32));
+  --osu-btn-border: rgba(255, 102, 170, 0.58);
+  --osu-btn-text: #fdf2f8;
+}
+
+:root[data-theme="catppuccin-mocha"] {
+  color-scheme: dark;
+  --bg: #1e1e2e;
+  --surface: #26263a;
+  --surface-2: #313244;
+  --surface-3: #45475a;
+  --border: rgba(205, 214, 244, 0.12);
+  --border-strong: rgba(205, 214, 244, 0.22);
+  --border-hover: rgba(203, 166, 247, 0.58);
+  --text: #cdd6f4;
+  --text-dim: #bac2de;
+  --text-muted: #9399b2;
+  --accent: #cba6f7;
+  --accent-2: #89dceb;
+  --accent-3: #f5c2e7;
+  --green: #a6e3a1;
+  --amber: #f9e2af;
+  --rose: #f38ba8;
+  --on-accent: #11111b;
+  --on-accent-2: #11111b;
+  --btn-primary-bg: linear-gradient(135deg, #cba6f7, #89b4fa);
+  --panel-bg: rgba(38, 38, 58, 0.88);
+  --panel-bg-strong: rgba(38, 38, 58, 0.96);
+  --card-bg: linear-gradient(180deg, rgba(49, 50, 68, 0.9), rgba(38, 38, 58, 0.96));
+  --input-bg: rgba(24, 24, 37, 0.85);
+  --subtle-bg: rgba(205, 214, 244, 0.05);
+  --subtle-bg-2: rgba(24, 24, 37, 0.58);
+  --hover-bg: rgba(203, 166, 247, 0.1);
+  --divider: rgba(205, 214, 244, 0.09);
+  --accent-soft: rgba(203, 166, 247, 0.15);
+  --accent-soft-2: rgba(203, 166, 247, 0.24);
+  --accent-border: rgba(203, 166, 247, 0.42);
+  --accent2-soft: rgba(137, 220, 235, 0.14);
+  --accent2-border: rgba(137, 220, 235, 0.4);
+  --bg-glow-1: rgba(203, 166, 247, 0.15);
+  --bg-glow-2: rgba(137, 220, 235, 0.13);
+  --menu-bg: rgba(24, 24, 37, 0.98);
+  --select-opt-bg: #26263a;
+  --danger-bg: rgba(243, 139, 168, 0.15);
+  --danger-bg-hover: rgba(243, 139, 168, 0.25);
+  --danger-border: rgba(243, 139, 168, 0.46);
+  --danger-text: #f5b4c6;
+  --success-bg: rgba(166, 227, 161, 0.14);
+  --success-border: rgba(166, 227, 161, 0.42);
+  --success-text: #c2f0be;
+  --warn-bg: rgba(249, 226, 175, 0.14);
+  --warn-border: rgba(249, 226, 175, 0.42);
+  --warn-text: #f9e2af;
+  --lazer-bg: rgba(245, 194, 231, 0.15);
+  --lazer-border: rgba(245, 194, 231, 0.44);
+  --lazer-text: #f5c2e7;
+  --shadow-card: 0 18px 40px rgba(10, 10, 20, 0.46);
+  --shadow-menu: 0 20px 48px rgba(10, 10, 20, 0.62);
+  --overlay-backdrop: rgba(17, 17, 27, 0.78);
+  --kbd-bg: rgba(49, 50, 68, 0.9);
+  --player-frame-bg: #11111b;
+  --thumb-bg: #181825;
+  --osu-btn-bg: linear-gradient(135deg, rgba(245, 194, 231, 0.2), rgba(203, 166, 247, 0.18));
+  --osu-btn-bg-hover: linear-gradient(135deg, rgba(245, 194, 231, 0.3), rgba(203, 166, 247, 0.28));
+  --osu-btn-border: rgba(245, 194, 231, 0.48);
+  --osu-btn-text: #cdd6f4;
+}
+
+:root[data-theme="sakura-light"] {
+  color-scheme: light;
+  --bg: #fdf3f7;
+  --surface: #ffffff;
+  --surface-2: #fae5ee;
+  --surface-3: #f4d2e1;
+  --border: rgba(88, 38, 66, 0.13);
+  --border-strong: rgba(88, 38, 66, 0.24);
+  --border-hover: rgba(214, 51, 132, 0.56);
+  --text: #341a28;
+  --text-dim: #603c51;
+  --text-muted: #866277;
+  --accent: #d63384;
+  --accent-2: #9b51e0;
+  --accent-3: #e05697;
+  --green: #2f855a;
+  --amber: #b4690e;
+  --rose: #c53030;
+  --on-accent: #ffffff;
+  --on-accent-2: #ffffff;
+  --btn-primary-bg: linear-gradient(135deg, #d63384, #a944d6);
+  --panel-bg: rgba(255, 255, 255, 0.9);
+  --panel-bg-strong: rgba(255, 255, 255, 0.97);
+  --card-bg: linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(253, 244, 248, 0.98));
+  --input-bg: #fff8fb;
+  --subtle-bg: rgba(88, 38, 66, 0.048);
+  --subtle-bg-2: rgba(250, 229, 238, 0.65);
+  --hover-bg: rgba(214, 51, 132, 0.08);
+  --divider: rgba(88, 38, 66, 0.1);
+  --accent-soft: rgba(214, 51, 132, 0.11);
+  --accent-soft-2: rgba(214, 51, 132, 0.19);
+  --accent-border: rgba(214, 51, 132, 0.36);
+  --accent2-soft: rgba(155, 81, 224, 0.11);
+  --accent2-border: rgba(155, 81, 224, 0.34);
+  --bg-glow-1: rgba(255, 130, 186, 0.32);
+  --bg-glow-2: rgba(186, 130, 246, 0.22);
+  --menu-bg: rgba(255, 255, 255, 0.98);
+  --select-opt-bg: #ffffff;
+  --danger-bg: rgba(197, 48, 48, 0.1);
+  --danger-bg-hover: rgba(197, 48, 48, 0.18);
+  --danger-border: rgba(197, 48, 48, 0.38);
+  --danger-text: #a52222;
+  --success-bg: rgba(47, 133, 90, 0.11);
+  --success-border: rgba(47, 133, 90, 0.38);
+  --success-text: #226644;
+  --warn-bg: rgba(180, 105, 14, 0.11);
+  --warn-border: rgba(180, 105, 14, 0.38);
+  --warn-text: #8f5208;
+  --lazer-bg: rgba(214, 51, 132, 0.12);
+  --lazer-border: rgba(214, 51, 132, 0.38);
+  --lazer-text: #b31d67;
+  --shadow-card: 0 12px 30px rgba(96, 36, 68, 0.1);
+  --shadow-menu: 0 18px 42px rgba(96, 36, 68, 0.18);
+  --overlay-backdrop: rgba(52, 26, 40, 0.54);
+  --kbd-bg: #fae5ee;
+  --player-frame-bg: #261420;
+  --thumb-bg: #f4d2e1;
+  --osu-btn-bg: linear-gradient(135deg, rgba(214, 51, 132, 0.14), rgba(155, 81, 224, 0.12));
+  --osu-btn-bg-hover: linear-gradient(135deg, rgba(214, 51, 132, 0.24), rgba(155, 81, 224, 0.2));
+  --osu-btn-border: rgba(214, 51, 132, 0.46);
+  --osu-btn-text: #a81c62;
+}
+
+:root[data-theme="oled-pitch"] {
+  color-scheme: dark;
+  --bg: #000000;
+  --surface: #0a0c11;
+  --surface-2: #121620;
+  --surface-3: #1c2231;
+  --border: rgba(255, 255, 255, 0.11);
+  --border-strong: rgba(255, 255, 255, 0.22);
+  --border-hover: rgba(56, 242, 255, 0.62);
+  --text: #f8fafc;
+  --text-dim: #a8b4c8;
+  --text-muted: #6c7990;
+  --accent: #38f2ff;
+  --accent-2: #ff5ea8;
+  --accent-3: #a855f7;
+  --green: #4ade80;
+  --amber: #facc15;
+  --rose: #fb7185;
+  --on-accent: #021014;
+  --on-accent-2: #1e0512;
+  --btn-primary-bg: linear-gradient(135deg, #38f2ff, #06b6d4);
+  --panel-bg: rgba(10, 12, 17, 0.94);
+  --panel-bg-strong: rgba(10, 12, 17, 0.98);
+  --card-bg: linear-gradient(180deg, rgba(16, 20, 29, 0.94), rgba(9, 11, 16, 0.98));
+  --input-bg: rgba(4, 6, 9, 0.94);
+  --subtle-bg: rgba(255, 255, 255, 0.045);
+  --subtle-bg-2: rgba(5, 7, 11, 0.78);
+  --hover-bg: rgba(56, 242, 255, 0.09);
+  --divider: rgba(255, 255, 255, 0.09);
+  --accent-soft: rgba(56, 242, 255, 0.12);
+  --accent-soft-2: rgba(56, 242, 255, 0.22);
+  --accent-border: rgba(56, 242, 255, 0.42);
+  --accent2-soft: rgba(255, 94, 168, 0.14);
+  --accent2-border: rgba(255, 94, 168, 0.42);
+  --bg-glow-1: rgba(56, 242, 255, 0.08);
+  --bg-glow-2: rgba(255, 94, 168, 0.08);
+  --menu-bg: rgba(8, 10, 14, 0.99);
+  --select-opt-bg: #0a0c11;
+  --danger-bg: rgba(251, 113, 133, 0.15);
+  --danger-bg-hover: rgba(251, 113, 133, 0.25);
+  --danger-border: rgba(251, 113, 133, 0.46);
+  --danger-text: #fda4af;
+  --success-bg: rgba(74, 222, 128, 0.14);
+  --success-border: rgba(74, 222, 128, 0.42);
+  --success-text: #86efac;
+  --warn-bg: rgba(250, 204, 21, 0.13);
+  --warn-border: rgba(250, 204, 21, 0.42);
+  --warn-text: #fde047;
+  --lazer-bg: rgba(255, 94, 168, 0.16);
+  --lazer-border: rgba(255, 94, 168, 0.46);
+  --lazer-text: #ff9ec9;
+  --shadow-card: 0 18px 46px rgba(0, 0, 0, 0.85);
+  --shadow-menu: 0 22px 54px rgba(0, 0, 0, 0.92);
+  --overlay-backdrop: rgba(0, 0, 0, 0.84);
+  --kbd-bg: rgba(255, 255, 255, 0.09);
+  --player-frame-bg: #000000;
+  --thumb-bg: #07090d;
+  --osu-btn-bg: linear-gradient(135deg, rgba(255, 94, 168, 0.22), rgba(56, 242, 255, 0.14));
+  --osu-btn-bg-hover: linear-gradient(135deg, rgba(255, 94, 168, 0.34), rgba(56, 242, 255, 0.24));
+  --osu-btn-border: rgba(255, 94, 168, 0.54);
+  --osu-btn-text: #f8fafc;
+}
+
+/* ==========================================================================
+ * Global Page Surface & Component Overrides (Works Across All 6 Templates)
+ * ========================================================================== */
+
+body {
+  background-color: var(--bg);
+  background-image:
+    radial-gradient(circle at 14% 8%, var(--bg-glow-1), transparent 36%),
+    radial-gradient(circle at 86% 84%, var(--bg-glow-2), transparent 36%);
+  background-attachment: fixed;
+  color: var(--text);
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+
+/* Navigation & shared buttons */
+.nav-links {
+  align-items: center;
+  flex-wrap: wrap;
+}
+.nav-btn,
+.back-btn,
+.nav-links a {
+  background: var(--subtle-bg);
+  border-color: var(--border);
+  color: var(--text-dim);
+}
+.back-btn {
+  color: var(--text);
+}
+.nav-btn:hover,
+.nav-btn.active,
+.back-btn:hover,
+.nav-links a:hover {
+  color: var(--text);
+  border-color: var(--border-hover);
+  background: var(--accent-soft);
+}
+
+/* Panels, Cards, Surfaces */
+.controls,
+.panel,
+.info-card,
+.preview-card,
+.status-card,
+.account-card,
+.submit-footer,
+.footer-bar,
+.pref-banner,
+.dropzone {
+  background: var(--panel-bg);
+  border-color: var(--border);
+}
+.footer-bar,
+.submit-footer {
+  background: var(--panel-bg-strong);
+  box-shadow: var(--shadow-card);
+}
+.footer-bar {
+  border-color: var(--accent-border);
+}
+.account-card {
+  background: var(--panel-bg-strong);
+  border-color: var(--osu-btn-border);
+}
+.account-avatar {
+  border-color: var(--accent-border);
+}
+.check-card,
+.auto-banner {
+  background: var(--accent-soft);
+  border-color: var(--accent-border);
+}
+.dropzone {
+  border-color: var(--accent-border);
+}
+.dropzone:hover,
+.dropzone.dragover {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.drop-icon {
+  background: var(--accent-soft);
+  border-color: var(--accent-border);
+  color: var(--accent);
+}
+.kpi,
+.card,
+.hl-card,
+.m-card,
+.r-card {
+  background: var(--card-bg);
+  border-color: var(--border);
+}
+.card:hover,
+.hl-card:hover,
+.m-card:hover,
+.r-card:hover {
+  border-color: var(--border-hover);
+  box-shadow: var(--shadow-card);
+}
+.control-bar {
+  background: var(--panel-bg-strong);
+  border-top-color: var(--border);
+}
+.player-card {
+  background: var(--player-frame-bg);
+  border-color: var(--border);
+  box-shadow: var(--shadow-card);
+}
+
+/* Form inputs, selects, toggles, segmented controls */
+.input,
+.select,
+.search-input,
+.search-row input {
+  background: var(--input-bg);
+  border-color: var(--border);
+  color: var(--text);
+}
+.input:focus,
+.select:focus,
+.search-input:focus,
+.search-row input:focus {
+  border-color: var(--accent);
+}
+.select option,
+.seg-control select option,
+.seg-select option {
+  background: var(--select-opt-bg);
+  color: var(--text);
+}
+.seg-control,
+.seg-group {
+  background: var(--subtle-bg-2);
+  border-color: var(--border);
+}
+.seg-control button:hover,
+.seg-btn:hover {
+  background: var(--hover-bg);
+  color: var(--text);
+}
+.seg-control button.active {
+  background: var(--accent-soft-2);
+  color: var(--accent);
+}
+.toggle-item,
+.score-grid,
+.parsed-box {
+  background: var(--subtle-bg-2);
+  border-color: var(--border);
+}
+.parsed-box {
+  border-color: var(--accent-border);
+}
+.toggle-item:hover {
+  border-color: var(--accent-border);
+}
+.path-box,
+.rerender-hint code,
+kbd,
+.kbd-hint {
+  background: var(--kbd-bg);
+  border-color: var(--border);
+  color: var(--text-dim);
+}
+.filter-rows,
+.card-foot,
+.kb-item {
+  border-color: var(--divider);
+}
+
+/* Buttons, chips, tabs, toolbars */
+.btn,
+.btn-secondary,
+.mini-btn,
+.tool-btn,
+.tab-btn,
+.chip,
+.split-btn {
+  background: var(--subtle-bg);
+  border-color: var(--border);
+  color: var(--text);
+}
+.tab-btn,
+.chip,
+.tool-btn,
+.mini-btn {
+  color: var(--text-dim);
+}
+.btn:hover,
+.btn-secondary:hover,
+.mini-btn:hover,
+.tool-btn:hover,
+.tab-btn:hover,
+.chip:hover,
+.split-btn > a:hover,
+.split-btn > button:hover {
+  color: var(--text);
+  border-color: var(--border-hover);
+  background: var(--accent-soft);
+}
+.btn-primary {
+  background: var(--btn-primary-bg);
+  border-color: transparent;
+  color: var(--on-accent);
+}
+.btn-primary:hover {
+  background: var(--btn-primary-bg);
+  border-color: transparent;
+  color: var(--on-accent);
+  opacity: 0.93;
+}
+.btn-danger,
+.reset-btn {
+  background: var(--danger-bg);
+  border-color: var(--danger-border);
+  color: var(--danger-text);
+}
+.btn-danger:hover,
+.reset-btn:hover {
+  background: var(--danger-bg-hover);
+  border-color: var(--danger-border);
+  color: var(--danger-text);
+}
+.btn-osu {
+  background: linear-gradient(135deg, #ff66aa, #c855d8);
+  border-color: transparent;
+  color: #ffffff;
+}
+.btn-osu:hover {
+  background: linear-gradient(135deg, #ff66aa, #c855d8);
+  border-color: transparent;
+  color: #ffffff;
+  opacity: 0.94;
+}
+.chip.active,
+.tab-btn.active,
+.tool-btn.active {
+  color: var(--on-accent);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.chip.player-chip.active,
+.tool-btn.active-purple {
+  color: var(--on-accent-2);
+  background: var(--accent-2);
+  border-color: var(--accent-2);
+}
+
+/* Gallery / Watch / Render / Stats semantic text & badges */
+.player-link {
+  color: var(--text);
+}
+.player-link:hover {
+  color: var(--accent);
+}
+.thumb-wrap,
+.m-thumb,
+.r-thumb,
+.hl-thumb,
+.complete-thumb {
+  background: var(--thumb-bg);
+}
+/* Keep video stage overlays legible in light & dark themes */
+.stage-hud {
+  background: rgba(12, 16, 26, 0.88);
+  border-color: var(--accent-border);
+  color: #f3f6fb;
+}
+.play-circle {
+  background: rgba(12, 16, 26, 0.88);
+  border-color: var(--accent);
+}
+.thumb-wrap .b-pp {
+  color: var(--on-accent);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+/* Standalone badges inside panels (watch.html, render.html, config.html, 404.html) */
+.badge,
+.exp-pill,
+.pill {
+  background: var(--subtle-bg);
+  border-color: var(--border);
+  color: var(--text-dim);
+}
+.badge.b-star,
+.pill.accent {
+  color: var(--accent);
+  border-color: var(--accent-border);
+  background: var(--accent-soft);
+}
+.pill.purple {
+  color: var(--accent-2);
+  border-color: var(--accent2-border);
+  background: var(--accent2-soft);
+}
+.badge.b-mod,
+.exp-pill.warn {
+  color: var(--warn-text);
+  border-color: var(--warn-border);
+  background: var(--warn-bg);
+}
+.badge.b-acc,
+.acct-badge,
+.stage-pill.done {
+  color: var(--success-text);
+  border-color: var(--success-border);
+  background: var(--success-bg);
+}
+.badge.b-lazer {
+  color: var(--lazer-text);
+  border-color: var(--lazer-border);
+  background: var(--lazer-bg);
+}
+.badge.b-pp {
+  color: var(--on-accent);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.exp-pill.urgent,
+.stage-pill.err,
+.error-box {
+  color: var(--danger-text);
+  border-color: var(--danger-border);
+  background: var(--danger-bg);
+}
+.stage-pill {
+  background: var(--accent-soft);
+  border-color: var(--accent-border);
+  color: var(--accent);
+}
+.ab-drawer {
+  background: var(--accent2-soft);
+  border-top-color: var(--accent2-border);
+}
+.ab-label {
+  color: var(--accent-2);
+}
+.ab-readout {
+  background: var(--input-bg);
+  border-color: var(--border);
+  color: var(--text);
+}
+.prog-track,
+.bar-track {
+  background: var(--subtle-bg);
+  border-color: var(--border);
+}
+.bar-row:hover {
+  background: var(--accent-soft);
+}
+.bar-fill.alt {
+  background: linear-gradient(90deg, var(--accent-2), var(--accent-3));
+}
+.hist-bar {
+  background: linear-gradient(180deg, var(--accent), var(--accent-soft-2));
+}
+.h100 {
+  color: var(--green);
+}
+.h50 {
+  color: var(--amber);
+}
+.hmiss {
+  color: var(--rose);
+}
+
+/* Light-mode readable grade badges on cards/panels (keep .thumb-wrap .b-pill dark-glass!) */
+:root[data-theme="nord-light"] .badge.b-grade-SSH,
+:root[data-theme="nord-light"] .badge.b-grade-SH,
+:root[data-theme="sakura-light"] .badge.b-grade-SSH,
+:root[data-theme="sakura-light"] .badge.b-grade-SH {
+  color: #334155;
+  border-color: rgba(71, 85, 105, 0.36);
+  background: rgba(148, 163, 184, 0.2);
+}
+:root[data-theme="nord-light"] .badge.b-grade-SS,
+:root[data-theme="nord-light"] .badge.b-grade-S,
+:root[data-theme="sakura-light"] .badge.b-grade-SS,
+:root[data-theme="sakura-light"] .badge.b-grade-S {
+  color: #9a6700;
+  border-color: rgba(180, 125, 31, 0.42);
+  background: rgba(250, 204, 21, 0.2);
+}
+:root[data-theme="nord-light"] .badge.b-grade-A,
+:root[data-theme="sakura-light"] .badge.b-grade-A {
+  color: #166534;
+  border-color: rgba(22, 101, 52, 0.34);
+  background: rgba(74, 222, 128, 0.18);
+}
+:root[data-theme="nord-light"] .badge.b-grade-B,
+:root[data-theme="sakura-light"] .badge.b-grade-B {
+  color: #1d4ed8;
+  border-color: rgba(29, 78, 216, 0.34);
+  background: rgba(96, 165, 250, 0.18);
+}
+:root[data-theme="nord-light"] .badge.b-grade-C,
+:root[data-theme="sakura-light"] .badge.b-grade-C {
+  color: #6d28d9;
+  border-color: rgba(109, 40, 217, 0.34);
+  background: rgba(196, 181, 253, 0.22);
+}
+:root[data-theme="nord-light"] .badge.b-grade-D,
+:root[data-theme="nord-light"] .badge.b-grade-F,
+:root[data-theme="sakura-light"] .badge.b-grade-D,
+:root[data-theme="sakura-light"] .badge.b-grade-F {
+  color: #b91c1c;
+  border-color: rgba(185, 28, 28, 0.36);
+  background: rgba(251, 113, 133, 0.16);
+}
+
+/* Modals & Toasts */
+.modal-backdrop {
+  background: var(--overlay-backdrop);
+}
+.modal {
+  background: var(--surface);
+  border-color: var(--border);
+  box-shadow: var(--shadow-menu);
+}
+.toast {
+  background: var(--menu-bg);
+  border-color: var(--accent-border);
+  color: var(--text);
+  box-shadow: var(--shadow-menu);
+}
+
+/* ==========================================================================
+ * Navbar Auth Widget (Theme-Aware)
+ * ========================================================================== */
+
+.osu-auth-slot,
+.osu-theme-slot {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+.osu-login-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  text-decoration: none;
+  color: var(--osu-btn-text);
+  font-size: 0.83rem;
+  font-weight: 700;
+  padding: 7px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--osu-btn-border);
+  background: var(--osu-btn-bg);
+  cursor: pointer;
+  transition: all 0.14s;
+  white-space: nowrap;
+  font-family: inherit;
+}
+.osu-login-btn:hover {
+  border-color: var(--osu-btn-border);
+  background: var(--osu-btn-bg-hover);
+}
+.osu-user-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--text);
+  font-size: 0.83rem;
+  font-weight: 700;
+  padding: 4px 11px 4px 5px;
+  border-radius: 999px;
+  border: 1px solid var(--accent-border);
+  background: var(--accent-soft);
+  cursor: pointer;
+  transition: all 0.14s;
+  white-space: nowrap;
+  font-family: inherit;
+}
+.osu-user-btn:hover {
+  border-color: var(--accent);
+  background: var(--accent-soft-2);
+}
+.osu-user-avatar {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  object-fit: cover;
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+}
+.osu-user-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  min-width: 230px;
+  padding: 10px;
+  border-radius: 13px;
+  background: var(--menu-bg);
+  border: 1px solid var(--border-strong);
+  box-shadow: var(--shadow-menu);
+  z-index: 2000;
+  display: none;
+  flex-direction: column;
+  gap: 6px;
+  backdrop-filter: blur(12px);
+}
+.osu-user-menu.open {
+  display: flex;
+}
+.osu-user-menu-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 6px 8px;
+  border-bottom: 1px solid var(--divider);
+}
+.osu-user-menu-head img {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  object-fit: cover;
+  border: 1px solid var(--accent-border);
+}
+.osu-user-menu-name {
+  font-size: 0.88rem;
+  font-weight: 800;
+  color: var(--text);
+  line-height: 1.2;
+}
+.osu-user-menu-meta {
+  font-size: 0.74rem;
+  color: var(--text-dim);
+  margin-top: 2px;
+}
+.osu-menu-link {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  text-decoration: none;
+  color: var(--text-dim);
+  font-size: 0.82rem;
+  font-weight: 600;
+  padding: 7px 9px;
+  border-radius: 8px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  width: 100%;
+  font-family: inherit;
+  transition: background 0.12s, color 0.12s;
+}
+.osu-menu-link:hover {
+  background: var(--accent-soft);
+  color: var(--text);
+}
+.osu-menu-link.danger {
+  color: var(--danger-text);
+}
+.osu-menu-link.danger:hover {
+  background: var(--danger-bg);
+  color: var(--danger-text);
+}
+
+/* ==========================================================================
+ * Navbar Theme Switcher Button & Popover
+ * ========================================================================== */
+
+.osu-theme-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--text-dim);
+  font-size: 0.82rem;
+  font-weight: 700;
+  padding: 6px 11px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--subtle-bg);
+  cursor: pointer;
+  transition: all 0.14s;
+  white-space: nowrap;
+  font-family: inherit;
+}
+.osu-theme-btn:hover,
+.osu-theme-btn[aria-expanded="true"] {
+  color: var(--text);
+  border-color: var(--border-hover);
+  background: var(--accent-soft);
+}
+.osu-theme-dot {
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  border: 1.5px solid var(--border-strong);
+  display: inline-block;
+  flex-shrink: 0;
+}
+.osu-theme-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  width: 288px;
+  max-width: calc(100vw - 24px);
+  padding: 10px;
+  border-radius: 14px;
+  background: var(--menu-bg);
+  border: 1px solid var(--border-strong);
+  box-shadow: var(--shadow-menu);
+  z-index: 2050;
+  display: none;
+  flex-direction: column;
+  gap: 6px;
+  backdrop-filter: blur(14px);
+}
+.osu-theme-menu.open {
+  display: flex;
+}
+.osu-theme-section {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 6px 2px;
+  font-size: 0.69rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.osu-theme-section-pill {
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0;
+  text-transform: none;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  border: 1px solid var(--accent-border);
+}
+.osu-theme-section-pill.locked {
+  background: var(--osu-btn-bg);
+  color: var(--osu-btn-text);
+  border-color: var(--osu-btn-border);
+}
+.osu-theme-divider {
+  height: 1px;
+  background: var(--divider);
+  margin: 3px 2px;
+}
+.osu-theme-opt {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  padding: 7px 9px;
+  border-radius: 10px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+  font-family: inherit;
+  transition: background 0.12s, border-color 0.12s, opacity 0.12s;
+}
+.osu-theme-opt:hover {
+  background: var(--accent-soft);
+  border-color: var(--accent-border);
+}
+.osu-theme-opt.active {
+  background: var(--accent-soft-2);
+  border-color: var(--accent);
+}
+.osu-theme-opt.locked {
+  opacity: 0.72;
+}
+.osu-theme-opt.locked:hover {
+  opacity: 0.94;
+  background: var(--subtle-bg);
+  border-color: var(--osu-btn-border);
+}
+.osu-theme-opt-left {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+}
+.osu-theme-swatches {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px;
+  border-radius: 8px;
+  gap: 3px;
+  border: 1px solid rgba(128, 128, 128, 0.25);
+  flex-shrink: 0;
+}
+.osu-theme-swatches i {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  display: block;
+}
+.osu-theme-opt-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.osu-theme-opt-name {
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: var(--text);
+  line-height: 1.2;
+}
+.osu-theme-opt-sub {
+  font-size: 0.71rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.osu-theme-opt-tag {
+  font-size: 0.7rem;
+  font-weight: 800;
+  color: var(--accent);
+  flex-shrink: 0;
+}
+.osu-theme-opt.locked .osu-theme-opt-tag {
+  color: var(--text-muted);
+}
+.osu-theme-unlock-cta {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  margin-top: 3px;
+  padding: 8px 10px;
+  border-radius: 9px;
+  text-decoration: none;
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: var(--osu-btn-text);
+  background: var(--osu-btn-bg);
+  border: 1px solid var(--osu-btn-border);
+  transition: background 0.14s;
+}
+.osu-theme-unlock-cta:hover {
+  background: var(--osu-btn-bg-hover);
+}
+
+/* ==========================================================================
+ * /config Visual Appearance & Theme Gallery Cards
+ * ========================================================================== */
+
+.theme-gallery-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(215px, 1fr));
+  gap: 12px;
+}
+.theme-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border-radius: 13px;
+  border: 1.5px solid var(--border);
+  background: var(--subtle-bg-2);
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+  font-family: inherit;
+  transition: transform 0.14s, border-color 0.14s, box-shadow 0.14s, opacity 0.14s;
+}
+.theme-card:hover {
+  transform: translateY(-2px);
+  border-color: var(--border-hover);
+  box-shadow: var(--shadow-card);
+}
+.theme-card.active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft-2);
+}
+.theme-card.locked {
+  opacity: 0.8;
+}
+.theme-card.locked:hover {
+  border-color: var(--osu-btn-border);
+}
+.theme-preview {
+  height: 62px;
+  border-radius: 9px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  border: 1px solid rgba(128, 128, 128, 0.22);
+  overflow: hidden;
+}
+.theme-preview-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+.theme-preview-dots {
+  display: inline-flex;
+  gap: 4px;
+}
+.theme-preview-dots span {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+.theme-preview-pill {
+  height: 9px;
+  width: 44px;
+  border-radius: 999px;
+}
+.theme-preview-bars {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.theme-preview-card {
+  flex: 1;
+  height: 22px;
+  border-radius: 6px;
+  padding: 4px 6px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.theme-preview-line {
+  height: 5px;
+  width: 58%;
+  border-radius: 999px;
+  opacity: 0.72;
+}
+.theme-preview-chip {
+  height: 9px;
+  width: 22px;
+  border-radius: 999px;
+}
+.theme-card-meta {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+.theme-card-name {
+  font-size: 0.86rem;
+  font-weight: 800;
+  color: var(--text);
+  line-height: 1.2;
+}
+.theme-card-desc {
+  font-size: 0.74rem;
+  color: var(--text-muted);
+  margin-top: 2px;
+  line-height: 1.35;
+}
+.theme-card-badge {
+  font-size: 0.67rem;
+  font-weight: 800;
+  padding: 2px 7px;
+  border-radius: 999px;
+  white-space: nowrap;
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+  background: var(--subtle-bg);
+  color: var(--text-dim);
+}
+.theme-card-badge.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+}
+.theme-card-badge.free {
+  background: var(--success-bg);
+  border-color: var(--success-border);
+  color: var(--success-text);
+}
+.theme-card-badge.osu {
+  background: var(--osu-btn-bg);
+  border-color: var(--osu-btn-border);
+  color: var(--osu-btn-text);
+}
+.theme-gallery-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding-top: 4px;
+  font-size: 0.78rem;
+  color: var(--text-dim);
+}
+.theme-gallery-foot:empty {
+  display: none;
+}
+
+.res-warn {
+  display: none;
+  align-items: flex-start;
+  gap: 7px;
+  margin-top: 3px;
+  padding: 7px 10px;
+  border-radius: 9px;
+  font-size: 0.76rem;
+  font-weight: 600;
+  line-height: 1.38;
+  background: var(--warn-bg);
+  border: 1px solid var(--warn-border);
+  color: var(--warn-text);
+}
+.res-warn.show {
+  display: flex;
+}
+
+@media (max-width: 600px) {
+  .osu-theme-btn .osu-theme-btn-label {
+    display: none;
+  }
+  .osu-theme-menu {
+    right: -42px;
+  }
+}

@@ -20,11 +20,24 @@ impl SkinList {
 
         let mut skins = fs::read_dir(&path)
             .context("failed to read skins folder")?
-            .map(|res| res.map(|entry| entry.file_name()))
+            .filter_map(|res| match res {
+                Ok(entry) => {
+                    let is_dir = entry.file_type().is_ok_and(|ft| ft.is_dir());
+                    let name = entry.file_name();
+                    let hidden = name.to_string_lossy().starts_with('.');
+                    (is_dir && !hidden).then_some(Ok(name))
+                }
+                Err(err) => Some(Err(err)),
+            })
             .collect::<Result<Vec<_>, _>>()
             .context("failed to read entry of skins folder")?;
 
-        skins.sort_unstable_by_key(|name| name.to_ascii_lowercase());
+        skins.sort_unstable_by(|a, b| {
+            a.as_encoded_bytes()
+                .iter()
+                .map(u8::to_ascii_lowercase)
+                .cmp(b.as_encoded_bytes().iter().map(u8::to_ascii_lowercase))
+        });
 
         info!("Repopulated skin list cache");
 

@@ -1,0 +1,478 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>404 • Replays</title>
+  <meta name="robots" content="noindex, nofollow">
+  <meta name="theme-color" content="#2e3440">
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <script>(function(){try{var t=localStorage.getItem("osu_site_theme_v1");var ok=["nord-dark","nord-light","midnight","osu-pink","catppuccin-mocha","sakura-light","oled-pitch"];document.documentElement.dataset.theme=ok.indexOf(t)>=0?t:"nord-dark";}catch(_){document.documentElement.dataset.theme="nord-dark";}})();</script>
+  <style>
+    :root {
+      --bg: #2e3440;
+      --surface: #3b4252;
+      --surface-2: #434c5e;
+      --border: rgba(216, 222, 233, 0.13);
+      --border-hover: rgba(136, 192, 208, 0.56);
+      --text: #eceff4;
+      --text-dim: #d8dee9;
+      --text-muted: #9aa7bc;
+      --accent: #88c0d0;
+      --accent-2: #81a1c1;
+      --radius: 16px;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      min-height: 100vh;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, sans-serif;
+      background:
+        radial-gradient(ellipse 75% 45% at 50% -15%, rgba(56, 189, 248, 0.14), transparent 70%),
+        radial-gradient(ellipse 55% 40% at 85% 95%, rgba(167, 139, 250, 0.10), transparent 70%),
+        var(--bg);
+      color: var(--text);
+      padding: 28px 20px 60px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 28px;
+    }
+    .nav {
+      width: 100%;
+      max-width: 960px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .brand {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      text-decoration: none;
+      color: var(--text);
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }
+    .brand img { width: 28px; height: 28px; border-radius: 7px; }
+    .nav-links { display: flex; gap: 8px; }
+    .nav-links a {
+      text-decoration: none;
+      color: var(--text-dim);
+      font-size: 0.85rem;
+      font-weight: 600;
+      padding: 7px 12px;
+      border-radius: 9px;
+      border: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.03);
+      transition: border-color 0.15s, color 0.15s, background 0.15s;
+    }
+    .nav-links a:hover { color: var(--text); border-color: var(--border-hover); background: rgba(56, 189, 248, 0.08); }
+
+    .card {
+      width: 100%;
+      max-width: 620px;
+      background: linear-gradient(180deg, rgba(24, 30, 47, 0.9), rgba(17, 21, 33, 0.96));
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 36px 32px;
+      text-align: center;
+      box-shadow: 0 24px 64px rgba(0, 0, 0, 0.48);
+    }
+    .code {
+      font-size: 3.4rem;
+      font-weight: 800;
+      letter-spacing: -0.04em;
+      line-height: 1;
+      background: linear-gradient(135deg, var(--accent), var(--accent-2));
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+      margin-bottom: 12px;
+    }
+    h1 {
+      font-size: 1.35rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      margin-bottom: 10px;
+    }
+    p.lead {
+      color: var(--text-dim);
+      font-size: 0.94rem;
+      line-height: 1.6;
+      margin-bottom: 18px;
+    }
+    .parsed-box {
+      display: none;
+      text-align: left;
+      background: rgba(8, 10, 16, 0.65);
+      border: 1px solid rgba(56, 189, 248, 0.22);
+      border-radius: 12px;
+      padding: 14px 16px;
+      margin: 0 auto 18px;
+    }
+    .parsed-box.show { display: block; }
+    .parsed-label {
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--accent);
+      font-weight: 700;
+      margin-bottom: 6px;
+    }
+    .parsed-title {
+      font-size: 0.94rem;
+      font-weight: 600;
+      color: var(--text);
+      margin-bottom: 8px;
+      word-break: break-word;
+    }
+    .parsed-pills {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      padding: 3px 9px;
+      border-radius: 999px;
+      font-size: 0.76rem;
+      font-weight: 600;
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid var(--border);
+      color: var(--text-dim);
+    }
+    .pill.accent { color: #7dd3fc; border-color: rgba(56, 189, 248, 0.3); background: rgba(56, 189, 248, 0.1); }
+    .pill.purple { color: #c4b5fd; border-color: rgba(167, 139, 250, 0.3); background: rgba(167, 139, 250, 0.12); }
+
+    .path-box {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.76rem;
+      color: var(--text-muted);
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 8px 12px;
+      margin-bottom: 18px;
+      word-break: break-all;
+    }
+
+    .search-row {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 16px;
+    }
+    .search-row input {
+      flex: 1;
+      min-width: 0;
+      padding: 10px 14px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: rgba(8, 10, 16, 0.7);
+      color: var(--text);
+      font-size: 0.9rem;
+      outline: none;
+    }
+    .search-row input:focus { border-color: var(--accent); }
+
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 10px;
+    }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 7px;
+      padding: 10px 18px;
+      border-radius: 10px;
+      font-weight: 600;
+      font-size: 0.88rem;
+      text-decoration: none;
+      border: 1px solid transparent;
+      cursor: pointer;
+      transition: transform 0.15s, opacity 0.15s, border-color 0.15s, background 0.15s;
+    }
+    .btn-primary {
+      background: linear-gradient(135deg, var(--accent), #0284c7);
+      color: #04131c;
+    }
+    .btn-secondary {
+      background: rgba(255, 255, 255, 0.05);
+      border-color: var(--border);
+      color: var(--text);
+    }
+    .btn:hover { transform: translateY(-1px); opacity: 0.95; }
+    .btn-secondary:hover { border-color: var(--border-hover); background: rgba(56, 189, 248, 0.1); }
+
+    .rerender-hint {
+      margin-top: 18px;
+      font-size: 0.8rem;
+      color: var(--text-muted);
+      line-height: 1.5;
+    }
+    .rerender-hint code {
+      background: rgba(255, 255, 255, 0.07);
+      color: var(--text-dim);
+      padding: 2px 6px;
+      border-radius: 5px;
+      font-size: 0.78rem;
+    }
+
+    .recent-section {
+      width: 100%;
+      max-width: 960px;
+      display: none;
+    }
+    .recent-section.show { display: block; }
+    .recent-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 14px;
+    }
+    .recent-head h2 {
+      font-size: 1rem;
+      font-weight: 700;
+      color: var(--text);
+    }
+    .recent-head a {
+      font-size: 0.84rem;
+      color: var(--accent);
+      text-decoration: none;
+      font-weight: 600;
+    }
+    .recent-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(215px, 1fr));
+      gap: 14px;
+    }
+    .r-card {
+      display: flex;
+      flex-direction: column;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 13px;
+      overflow: hidden;
+      text-decoration: none;
+      color: var(--text);
+      transition: transform 0.16s, border-color 0.16s;
+    }
+    .r-card:hover { transform: translateY(-2px); border-color: var(--border-hover); }
+    .r-thumb {
+      position: relative;
+      aspect-ratio: 16 / 9;
+      background: #0c101b;
+      overflow: hidden;
+    }
+    .r-thumb img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+    .r-dur {
+      position: absolute;
+      right: 7px;
+      bottom: 7px;
+      font-size: 0.72rem;
+      font-weight: 700;
+      padding: 2px 6px;
+      border-radius: 5px;
+      background: rgba(5, 8, 14, 0.82);
+      color: #e2e8f0;
+    }
+    .r-body {
+      padding: 10px 12px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+    .r-title {
+      font-size: 0.84rem;
+      font-weight: 600;
+      line-height: 1.35;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+    .r-meta {
+      font-size: 0.75rem;
+      color: var(--text-dim);
+      display: flex;
+      justify-content: space-between;
+      gap: 6px;
+    }
+    @media (max-width: 560px) {
+      .card { padding: 28px 20px; }
+      .search-row { flex-direction: column; }
+    }
+  </style>
+  <link rel="stylesheet" href="/themes.css?v=2">
+</head>
+<body>
+  <nav class="nav">
+    <a class="brand" href="/">&larr; Gallery</a>
+    <div class="nav-links">
+      <a href="/">Gallery</a>
+      <a href="/render">Render</a>
+      <a href="/config">Config</a>
+      <a href="/stats">Stats</a>
+    </div>
+  </nav>
+
+  <main class="card">
+    <div class="code">404</div>
+    <h1>Replay Not Found or Expired</h1>
+    <p class="lead">
+      This replay doesn't exist anymore. Rendered replays are stored for
+      <strong>7 days</strong> before automatic cleanup.
+    </p>
+
+    <div class="parsed-box" id="parsed-box">
+      <div class="parsed-label">Requested Replay</div>
+      <div class="parsed-title" id="parsed-title"></div>
+      <div class="parsed-pills" id="parsed-pills"></div>
+    </div>
+
+    <div class="path-box" id="req-path">{{.OriginalReq.URL.Path | html}}</div>
+
+    <form class="search-row" id="search-form" action="/" method="get">
+      <input type="search" name="q" id="search-input" placeholder="Search active replays by player, map, or mod..." autocomplete="off">
+      <button type="submit" class="btn btn-secondary">Search</button>
+    </form>
+
+    <div class="actions" id="actions">
+      <a class="btn btn-primary" href="/">Browse All Replays</a>
+      <a class="btn btn-secondary" href="/stats">View Replay Stats</a>
+    </div>
+
+    <p class="rerender-hint">
+      Need this score again? Re-render it in Discord with <code>!rr</code>, <code>!rtop</code>, or <code>!render</code>.
+    </p>
+  </main>
+
+  <section class="recent-section" id="recent-section">
+    <div class="recent-head">
+      <h2>Recent Active Replays</h2>
+      <a href="/">View all &rarr;</a>
+    </div>
+    <div class="recent-grid" id="recent-grid"></div>
+  </section>
+
+  <script>
+    (function () {
+      const pathEl = document.getElementById("req-path");
+      const rawPath = (pathEl ? pathEl.textContent : location.pathname) || "";
+      const mWatch = rawPath.match(/^\/(?:watch\/)?([A-Za-z0-9._-]+?)(?:\.mp4)?$/);
+      if (mWatch) {
+        const slug = mWatch[1];
+        const mSlug = slug.match(/^(\d+_\d+)-([^-]+)-(.+)-([A-Z0-9]{2,16})-(\d+_\d+)_[0-9a-f]{4,}_(\d+)$/);
+        if (mSlug) {
+          const stars = mSlug[1].replace("_", ".");
+          const player = mSlug[2].replace(/_/g, " ");
+          const mapName = mSlug[3].replace(/_-_/g, " - ").replace(/_/g, " ");
+          const mods = mSlug[4];
+          const acc = mSlug[5].replace("_", ".");
+          const ts = Number(mSlug[6]);
+
+          const box = document.getElementById("parsed-box");
+          document.getElementById("parsed-title").textContent = mapName;
+          const pills = document.getElementById("parsed-pills");
+
+          const addPill = (txt, cls) => {
+            const sp = document.createElement("span");
+            sp.className = "pill" + (cls ? " " + cls : "");
+            sp.textContent = txt;
+            pills.appendChild(sp);
+          };
+          addPill(stars + "★", "accent");
+          addPill(player);
+          if (mods && mods !== "NM") addPill("+" + mods, "purple");
+          addPill(acc + "%");
+          if (ts > 1500000000) {
+            const d = new Date(ts * 1000);
+            addPill("Rendered " + d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }));
+          }
+          box.classList.add("show");
+
+          if (player && player.toLowerCase() !== "unknown") {
+            const actions = document.getElementById("actions");
+            const btn = document.createElement("a");
+            btn.className = "btn btn-secondary";
+            btn.href = "/?player=" + encodeURIComponent(player);
+            btn.textContent = "More by " + player;
+            actions.appendChild(btn);
+            document.getElementById("search-input").value = player;
+          }
+        }
+      }
+
+      const fmtDur = (s) => {
+        if (!s || !isFinite(s)) return "";
+        const m = Math.floor(s / 60);
+        const sec = Math.floor(s % 60);
+        return m + ":" + String(sec).padStart(2, "0");
+      };
+
+      fetch("/index.json", { cache: "no-cache" })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((data) => {
+          if (!data || !Array.isArray(data.replays) || !data.replays.length) return;
+          const grid = document.getElementById("recent-grid");
+          data.replays.slice(0, 4).forEach((item) => {
+            const a = document.createElement("a");
+            a.className = "r-card";
+            a.href = "/watch/" + encodeURIComponent(item.short_id || item.slug);
+
+            const thumb = document.createElement("div");
+            thumb.className = "r-thumb";
+            const img = document.createElement("img");
+            img.loading = "lazy";
+            img.decoding = "async";
+            img.src = item.has_webp
+              ? "/" + encodeURIComponent(item.slug) + ".webp"
+              : item.has_thumb
+              ? "/" + encodeURIComponent(item.slug) + ".jpg"
+              : "/fallback-thumb.jpg";
+            img.alt = item.map_title || item.title || item.slug;
+            img.onerror = function () { this.src = "/fallback-thumb.jpg"; };
+            thumb.appendChild(img);
+
+            if (item.duration) {
+              const dur = document.createElement("span");
+              dur.className = "r-dur";
+              dur.textContent = fmtDur(item.duration);
+              thumb.appendChild(dur);
+            }
+
+            const body = document.createElement("div");
+            body.className = "r-body";
+            const t = document.createElement("div");
+            t.className = "r-title";
+            t.textContent = item.map_title || item.title || item.slug;
+            const meta = document.createElement("div");
+            meta.className = "r-meta";
+            const left = document.createElement("span");
+            left.textContent = item.player || "Unknown";
+            const right = document.createElement("span");
+            right.textContent =
+              (item.stars != null ? Number(item.stars).toFixed(2) + "★" : "") +
+              (item.mods && item.mods !== "NM" ? " +" + item.mods : "");
+            meta.append(left, right);
+            body.append(t, meta);
+            a.append(thumb, body);
+            grid.appendChild(a);
+          });
+          document.getElementById("recent-section").classList.add("show");
+        })
+        .catch(() => {});
+    })();
+  </script>
+  <script src="/render-shared.js?v=6"></script>
+</body>
+</html>

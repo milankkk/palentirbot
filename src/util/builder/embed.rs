@@ -1,12 +1,10 @@
 use time::OffsetDateTime;
 use twilight_model::{
-    channel::message::embed::{Embed, EmbedAuthor, EmbedField, EmbedImage, EmbedThumbnail},
+    channel::message::embed::{Embed, EmbedAuthor, EmbedField, EmbedFooter},
     util::Timestamp,
 };
 
 use crate::util::constants::BEIGE;
-
-use super::footer::IntoEmbedFooter;
 
 #[derive(Clone)]
 pub struct EmbedBuilder(Embed);
@@ -42,7 +40,6 @@ impl EmbedBuilder {
         self.0
     }
 
-    #[allow(unused)]
     pub fn author(mut self, author: impl Into<EmbedAuthor>) -> Self {
         self.0.author = Some(author.into());
 
@@ -56,8 +53,7 @@ impl EmbedBuilder {
     }
 
     pub fn description(mut self, description: impl Into<String>) -> Self {
-        let description = description.into();
-        self.0.description = Some(description);
+        self.0.description = Some(description.into());
 
         self
     }
@@ -68,32 +64,18 @@ impl EmbedBuilder {
         self
     }
 
-    pub fn footer(mut self, footer: impl IntoEmbedFooter) -> Self {
-        self.0.footer = Some(footer.into());
-
-        self
-    }
-
-    #[allow(unused)]
-    pub fn image(mut self, image: impl Into<String>) -> Self {
-        let url = image.into();
-
-        if !url.is_empty() {
-            let image = EmbedImage {
-                height: None,
-                width: None,
-                proxy_url: None,
-                url,
-            };
-
-            self.0.image = Some(image);
-        }
+    pub fn footer(mut self, text: impl Into<String>) -> Self {
+        self.0.footer = Some(EmbedFooter {
+            text: text.into(),
+            icon_url: None,
+            proxy_icon_url: None,
+        });
 
         self
     }
 
     pub fn timestamp(mut self, timestamp: OffsetDateTime) -> Self {
-        self.0.timestamp = Timestamp::from_secs(timestamp.unix_timestamp() as i64).ok();
+        self.0.timestamp = Timestamp::from_secs(timestamp.unix_timestamp()).ok();
 
         self
     }
@@ -104,25 +86,6 @@ impl EmbedBuilder {
         self
     }
 
-    #[allow(unused)]
-    pub fn thumbnail(mut self, thumbnail: impl Into<String>) -> Self {
-        let url = thumbnail.into();
-
-        if !url.is_empty() {
-            let thumbnail = EmbedThumbnail {
-                height: None,
-                width: None,
-                proxy_url: None,
-                url,
-            };
-
-            self.0.thumbnail = Some(thumbnail);
-        }
-
-        self
-    }
-
-    #[allow(unused)]
     pub fn url(mut self, url: impl Into<String>) -> Self {
         self.0.url = Some(url.into());
 

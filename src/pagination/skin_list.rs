@@ -1,18 +1,23 @@
 use std::fmt::Write;
 
-use command_macros::pagination;
 use twilight_model::channel::message::embed::Embed;
 
-use crate::util::builder::{EmbedBuilder, FooterBuilder};
+use crate::util::builder::EmbedBuilder;
 
-use super::Pages;
+use super::{Pages, PaginationBuilder, PaginationKind};
 
-#[pagination(per_page = 15, entries = "skins")]
 pub struct SkinListPagination {
     skins: Vec<String>,
 }
 
 impl SkinListPagination {
+    pub fn builder(skins: Vec<String>) -> PaginationBuilder {
+        let pages = Pages::new(15, skins.len());
+        let kind = PaginationKind::SkinList(Box::new(Self { skins }));
+
+        PaginationBuilder::new(kind, pages)
+    }
+
     pub fn build_page(&mut self, pages: &Pages) -> Embed {
         let mut description = String::with_capacity(256);
 
@@ -34,7 +39,7 @@ impl SkinListPagination {
 
         EmbedBuilder::new()
             .description(description)
-            .footer(FooterBuilder::new(footer_text))
+            .footer(footer_text)
             .build()
     }
 }

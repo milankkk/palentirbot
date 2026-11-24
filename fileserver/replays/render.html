@@ -1,0 +1,1461 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Render • Replays</title>
+  <meta name="description" content="Upload an osu! .osr replay file, customize danser settings, and render directly in the browser.">
+  <meta name="theme-color" content="#2e3440">
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <script>(function(){try{var t=localStorage.getItem("osu_site_theme_v1");var ok=["nord-dark","nord-light","midnight","osu-pink","catppuccin-mocha","sakura-light","oled-pitch"];document.documentElement.dataset.theme=ok.indexOf(t)>=0?t:"nord-dark";}catch(_){document.documentElement.dataset.theme="nord-dark";}})();</script>
+  <style>
+    :root {
+      --bg: #2e3440;
+      --surface: #3b4252;
+      --surface-2: #434c5e;
+      --border: rgba(216, 222, 233, 0.13);
+      --border-hover: rgba(136, 192, 208, 0.56);
+      --text: #eceff4;
+      --text-dim: #d8dee9;
+      --text-muted: #9aa7bc;
+      --accent: #88c0d0;
+      --accent-2: #81a1c1;
+      --green: #a3be8c;
+      --amber: #ebcb8b;
+      --rose: #bf616a;
+      --radius: 15px;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      min-height: 100vh;
+      font-family: 'Segoe UI', system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+      background-color: var(--bg);
+      background-image:
+        radial-gradient(circle at 14% 8%, rgba(150, 223, 227, 0.13), transparent 34%),
+        radial-gradient(circle at 86% 84%, rgba(176, 102, 255, 0.12), transparent 34%);
+      background-attachment: fixed;
+      color: var(--text);
+      padding: 24px 20px 72px;
+    }
+    .wrap {
+      width: 100%;
+      max-width: 1040px;
+      margin: 0 auto;
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+    }
+
+    /* Header */
+    .header {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 12px 16px;
+      padding-bottom: 14px;
+      border-bottom: 1px solid var(--border);
+    }
+    .title-area { display: flex; flex-direction: column; gap: 5px; }
+    h1.page-title {
+      font-size: 1.65rem;
+      font-weight: 800;
+      letter-spacing: -0.025em;
+      line-height: 1.1;
+      background: linear-gradient(135deg, var(--accent), var(--accent-2));
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+    }
+    .sub-status {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px 14px;
+      font-size: 0.81rem;
+      color: var(--text-dim);
+    }
+    .dot {
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--green);
+      margin-right: 5px;
+      vertical-align: middle;
+    }
+    .dot.busy { background: var(--amber); }
+
+    .nav-actions { display: flex; flex-wrap: wrap; gap: 7px; align-items: center; }
+    .nav-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      text-decoration: none;
+      color: var(--text-dim);
+      font-size: 0.84rem;
+      font-weight: 600;
+      padding: 7px 13px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.035);
+      cursor: pointer;
+      transition: all 0.14s;
+    }
+    .nav-btn:hover, .nav-btn.active {
+      color: var(--text);
+      border-color: var(--border-hover);
+      background: rgba(150, 223, 227, 0.1);
+    }
+
+    /* Views */
+    .stage { display: none; flex-direction: column; gap: 16px; }
+    .stage.active { display: flex; }
+
+    /* Dropzone Stage */
+    .dropzone {
+      position: relative;
+      background: rgba(18, 23, 37, 0.84);
+      border: 2px dashed rgba(150, 223, 227, 0.34);
+      border-radius: 20px;
+      padding: 64px 28px;
+      text-align: center;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 14px;
+      cursor: pointer;
+      transition: border-color 0.18s, background 0.18s, transform 0.15s;
+    }
+    .dropzone:hover, .dropzone.dragover {
+      border-color: var(--accent);
+      background: rgba(150, 223, 227, 0.07);
+      transform: translateY(-1px);
+    }
+    .drop-icon {
+      width: 58px;
+      height: 58px;
+      border-radius: 16px;
+      background: rgba(150, 223, 227, 0.1);
+      border: 1px solid rgba(150, 223, 227, 0.3);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--accent);
+    }
+    .dropzone h2 { font-size: 1.28rem; font-weight: 800; letter-spacing: -0.02em; }
+    .dropzone p { font-size: 0.9rem; color: var(--text-dim); max-width: 460px; line-height: 1.5; }
+    .drop-note {
+      font-size: 0.78rem;
+      color: var(--text-muted);
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 8px 14px;
+      margin-top: 6px;
+    }
+
+    .pref-banner {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 12px 16px;
+      border-radius: 13px;
+      background: rgba(18, 23, 37, 0.85);
+      border: 1px solid var(--border);
+      font-size: 0.83rem;
+      color: var(--text-dim);
+    }
+    .pref-banner strong { color: var(--text); }
+    .pref-banner a { color: var(--accent); text-decoration: none; font-weight: 700; }
+    .pref-banner a:hover { text-decoration: underline; }
+
+    /* Replay Preview Banner */
+    .preview-card {
+      background: rgba(18, 23, 37, 0.9);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 16px 20px;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+    }
+    .preview-info { display: flex; flex-direction: column; gap: 6px; min-width: 0; flex: 1 1 360px; }
+    .badge-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      font-size: 0.74rem;
+      font-weight: 800;
+      padding: 2px 8px;
+      border-radius: 7px;
+      border: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.05);
+      color: var(--text);
+    }
+    .b-star { color: var(--accent); border-color: rgba(150, 223, 227, 0.35); background: rgba(150, 223, 227, 0.1); }
+    .b-mod { color: #fde68a; border-color: rgba(251, 191, 36, 0.38); background: rgba(251, 191, 36, 0.1); }
+    .b-acc { color: #6ee7b7; border-color: rgba(52, 211, 153, 0.35); background: rgba(52, 211, 153, 0.1); }
+    .b-lazer { color: #f9a8d4; border-color: rgba(244, 114, 182, 0.4); background: rgba(244, 114, 182, 0.12); }
+    .preview-title { font-size: 1.05rem; font-weight: 800; word-break: break-word; }
+    .preview-sub { font-size: 0.81rem; color: var(--text-dim); display: flex; flex-wrap: wrap; gap: 6px 12px; }
+
+    /* Auto-start skip banner */
+    .auto-banner {
+      display: none;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 14px 18px;
+      border-radius: 13px;
+      background: rgba(150, 223, 227, 0.1);
+      border: 1px solid rgba(150, 223, 227, 0.45);
+      font-size: 0.88rem;
+    }
+    .auto-banner.show { display: flex; }
+
+    /* Presets & Settings Sections */
+    .panel {
+      background: rgba(18, 23, 37, 0.88);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 18px 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+    .presets-bar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding-bottom: 14px;
+      border-bottom: 1px solid var(--border);
+    }
+    .preset-group { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; }
+    .section-tabs {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 7px;
+    }
+    .tab-btn {
+      padding: 7px 13px;
+      border-radius: 9px;
+      border: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.03);
+      color: var(--text-dim);
+      font-size: 0.82rem;
+      font-weight: 700;
+      cursor: pointer;
+      transition: all 0.14s;
+    }
+    .tab-btn:hover { color: var(--text); border-color: rgba(255, 255, 255, 0.22); }
+    .tab-btn.active {
+      color: #071419;
+      background: var(--accent);
+      border-color: var(--accent);
+    }
+    .tab-pane { display: none; flex-direction: column; gap: 14px; }
+    .tab-pane.active { display: flex; }
+
+    .field-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 13px 16px;
+    }
+    .field { display: flex; flex-direction: column; gap: 6px; }
+    .field label {
+      font-size: 0.78rem;
+      font-weight: 700;
+      color: var(--text-dim);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .field label span.val { color: var(--accent); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .input, .select {
+      width: 100%;
+      padding: 8px 11px;
+      border-radius: 9px;
+      border: 1px solid var(--border);
+      background: rgba(10, 14, 23, 0.78);
+      color: var(--text);
+      font-size: 0.86rem;
+      outline: none;
+    }
+    .input:focus, .select:focus { border-color: var(--accent); }
+    .select option { background: #121725; color: var(--text); }
+    .select:disabled {
+      opacity: 0.72;
+      cursor: not-allowed;
+      color: var(--text-dim);
+      border-style: dashed;
+    }
+    input[type="range"] {
+      width: 100%;
+      accent-color: var(--accent);
+      cursor: pointer;
+    }
+    .hint { font-size: 0.73rem; color: var(--text-muted); }
+
+    .toggle-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(195px, 1fr));
+      gap: 9px;
+    }
+    .toggle-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 9px 12px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: rgba(10, 14, 23, 0.55);
+      cursor: pointer;
+      font-size: 0.83rem;
+      font-weight: 600;
+      color: var(--text);
+      user-select: none;
+      transition: border-color 0.14s;
+    }
+    .toggle-item:hover { border-color: rgba(150, 223, 227, 0.35); }
+    .toggle-item input[type="checkbox"] {
+      width: 17px;
+      height: 17px;
+      accent-color: var(--accent);
+      cursor: pointer;
+    }
+
+    /* Footer with Save & Skip checkboxes + Render CTA */
+    .submit-footer {
+      background: rgba(18, 23, 37, 0.94);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 16px 20px;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px 20px;
+    }
+    .check-stack { display: flex; flex-direction: column; gap: 9px; }
+    .check-row {
+      display: inline-flex;
+      align-items: center;
+      gap: 9px;
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: var(--text);
+      cursor: pointer;
+      user-select: none;
+    }
+    .check-row input[type="checkbox"] {
+      width: 17px;
+      height: 17px;
+      accent-color: var(--accent);
+      cursor: pointer;
+    }
+    .check-row small { color: var(--text-muted); font-weight: 500; }
+
+    .btn-row { display: flex; flex-wrap: wrap; gap: 9px; align-items: center; }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 7px;
+      padding: 10px 18px;
+      border-radius: 10px;
+      font-size: 0.88rem;
+      font-weight: 700;
+      text-decoration: none;
+      border: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.04);
+      color: var(--text);
+      cursor: pointer;
+      transition: all 0.14s;
+    }
+    .btn:hover { border-color: var(--border-hover); background: rgba(150, 223, 227, 0.12); }
+    .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+    .btn-sm { padding: 6px 11px; font-size: 0.78rem; border-radius: 8px; }
+    .btn-primary {
+      background: linear-gradient(135deg, var(--accent), #6ec8d8);
+      border-color: transparent;
+      color: #071419;
+    }
+    .btn-primary:hover { opacity: 0.94; background: linear-gradient(135deg, var(--accent), #6ec8d8); }
+    .btn-danger {
+      background: rgba(251, 113, 133, 0.14);
+      border-color: rgba(251, 113, 133, 0.4);
+      color: #fda4af;
+    }
+    .btn-danger:hover { background: rgba(251, 113, 133, 0.24); }
+
+    /* Progress & Complete Cards */
+    .status-card {
+      background: rgba(18, 23, 37, 0.92);
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      padding: 34px 28px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      text-align: center;
+      gap: 16px;
+    }
+    .stage-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      padding: 5px 13px;
+      border-radius: 999px;
+      font-size: 0.8rem;
+      font-weight: 700;
+      background: rgba(150, 223, 227, 0.12);
+      border: 1px solid rgba(150, 223, 227, 0.35);
+      color: var(--accent);
+    }
+    .stage-pill.done { color: #86efac; border-color: rgba(74, 222, 128, 0.45); background: rgba(74, 222, 128, 0.12); }
+    .stage-pill.err { color: #fda4af; border-color: rgba(251, 113, 133, 0.45); background: rgba(251, 113, 133, 0.12); }
+    .prog-title { font-size: 1.15rem; font-weight: 800; max-width: 720px; word-break: break-word; }
+    .prog-track {
+      width: 100%;
+      max-width: 560px;
+      height: 11px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.07);
+      overflow: hidden;
+      border: 1px solid var(--border);
+    }
+    .prog-fill {
+      height: 100%;
+      width: 0%;
+      border-radius: 999px;
+      background: linear-gradient(90deg, var(--accent), var(--accent-2));
+      transition: width 0.35s ease;
+    }
+    .prog-meta { font-size: 0.84rem; color: var(--text-dim); }
+    .complete-thumb {
+      width: 100%;
+      max-width: 440px;
+      aspect-ratio: 16 / 9;
+      border-radius: 12px;
+      overflow: hidden;
+      border: 1px solid var(--border);
+      background: #0c101b;
+    }
+    .complete-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+    .redirect-line {
+      font-size: 0.92rem;
+      color: var(--text-dim);
+    }
+    .redirect-line strong { color: var(--accent); }
+    .error-box {
+      display: none;
+      width: 100%;
+      padding: 11px 15px;
+      border-radius: 10px;
+      background: rgba(251, 113, 133, 0.12);
+      border: 1px solid rgba(251, 113, 133, 0.45);
+      color: #fda4af;
+      font-size: 0.85rem;
+      font-weight: 600;
+    }
+    .error-box.show { display: block; }
+
+    .toast {
+      position: fixed;
+      bottom: 22px;
+      left: 50%;
+      transform: translateX(-50%) translateY(18px);
+      background: rgba(16, 21, 34, 0.96);
+      border: 1px solid rgba(150, 223, 227, 0.45);
+      color: var(--text);
+      padding: 9px 16px;
+      border-radius: 10px;
+      font-size: 0.84rem;
+      font-weight: 600;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.18s, transform 0.18s;
+      z-index: 150;
+    }
+    .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  </style>
+  <link rel="stylesheet" href="/themes.css?v=2">
+</head>
+<body>
+  <div class="wrap">
+    <header class="header">
+      <div class="title-area">
+        <h1 class="page-title">Render Replay</h1>
+        <div class="sub-status">
+          <span id="queue-indicator"><span class="dot" id="queue-dot"></span>Checking queue…</span>
+          <span>Shared queue with Discord</span>
+          <span id="hdr-quality-pill">720p60 &middot; 900p60 / 1080p60 with osu! login</span>
+        </div>
+      </div>
+      <nav class="nav-actions">
+        <a class="nav-btn" href="/">Gallery</a>
+        <a class="nav-btn active" href="/render">Render</a>
+        <a class="nav-btn" href="/config">Config</a>
+        <a class="nav-btn" href="/stats">Stats</a>
+      </nav>
+    </header>
+
+    <div class="error-box" id="error-box"></div>
+
+    <!-- STAGE 1: DROP / CHOOSE FILE -->
+    <section class="stage active" id="stage-upload">
+      <div class="dropzone" id="dropzone" role="button" tabindex="0">
+        <div class="drop-icon">
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+        </div>
+        <h2>Drop your .osr replay file here</h2>
+        <p>Upload a .osr replay to customize settings and render it in the browser.</p>
+        <button class="btn btn-primary" id="choose-btn" type="button">Choose .osr File</button>
+        <input id="file-input" type="file" accept=".osr" hidden>
+        <div class="drop-note">
+          <span>osu!standard .osr</span>
+          <span>&middot;</span>
+          <span>Up to 5 MB</span>
+          <span>&middot;</span>
+          <span>Drop anywhere on the site</span>
+        </div>
+      </div>
+
+      <div class="pref-banner" id="pref-banner">
+        <span id="pref-summary">Using default settings.</span>
+        <a href="/config">Edit default config &rarr;</a>
+      </div>
+    </section>
+
+    <!-- STAGE 2: PREVIEW & CUSTOMIZE SETTINGS -->
+    <section class="stage" id="stage-configure">
+      <div class="auto-banner" id="auto-banner">
+        <span id="auto-banner-msg"><strong>Auto-render active:</strong> Starting with your saved settings…</span>
+        <button class="btn btn-sm" id="auto-edit-btn" type="button">Edit Settings Instead</button>
+      </div>
+
+      <div class="preview-card">
+        <div class="preview-info">
+          <div class="badge-row" id="preview-badges"></div>
+          <div class="preview-title" id="preview-title">Inspecting replay…</div>
+          <div class="preview-sub" id="preview-sub"></div>
+        </div>
+        <button class="btn btn-sm" id="change-file-btn" type="button">Change File</button>
+      </div>
+
+      <div class="panel">
+        <div class="presets-bar">
+          <div class="preset-group" id="presets-group">
+            <span style="font-size:0.76rem;font-weight:700;text-transform:uppercase;letter-spacing:0.06em;color:var(--text-muted);margin-right:4px;">Presets</span>
+          </div>
+          <button class="btn btn-sm" id="reset-defaults-btn" type="button">Reset Defaults</button>
+        </div>
+
+        <div class="section-tabs" role="tablist">
+          <button class="tab-btn active" data-tab="render" type="button">Render Options</button>
+          <button class="tab-btn" data-tab="visuals" type="button">Skin &amp; Visuals</button>
+          <button class="tab-btn" data-tab="hud" type="button">HUD &amp; Overlays</button>
+          <button class="tab-btn" data-tab="audio" type="button">Audio &amp; Playback</button>
+        </div>
+
+        <!-- Tab 1: Per-render overrides (Discord /render options) -->
+        <div class="tab-pane active" data-pane="render">
+          <div class="field-grid">
+            <div class="field">
+              <label for="opt-start">Start Time</label>
+              <input class="input" id="opt-start" type="text" placeholder="0 or MM:SS (e.g. 1:20)">
+              <span class="hint">Leave blank to render from start</span>
+            </div>
+            <div class="field">
+              <label for="opt-end">End Time</label>
+              <input class="input" id="opt-end" type="text" placeholder="0 or MM:SS (e.g. 2:45)">
+              <span class="hint">Leave blank to render to end</span>
+            </div>
+            <div class="field">
+              <label for="opt-pitch">Music Pitch (0.5 &ndash; 5.0)</label>
+              <input class="input" id="opt-pitch" type="number" step="0.05" min="0.5" max="5" placeholder="Default (Nightcore is 1.5)">
+            </div>
+            <div class="field">
+              <label for="opt-offset">Local Audio Offset (ms)</label>
+              <input class="input" id="opt-offset" type="number" step="5" min="-5000" max="5000" placeholder="0 (-5000 to 5000)">
+            </div>
+          </div>
+          <div class="toggle-grid">
+            <label class="toggle-item"><span>Skip Intro</span><input id="opt-skip-intro" type="checkbox"></label>
+            <label class="toggle-item"><span>Force Re-render (bypass cache)</span><input id="opt-force" type="checkbox"></label>
+          </div>
+        </div>
+
+        <!-- Tab 2: Skin & Visuals -->
+        <div class="tab-pane" data-pane="visuals">
+          <div class="field-grid">
+            <div class="field">
+              <label for="set-skin">Skin</label>
+              <select class="select" id="set-skin"></select>
+            </div>
+            <div class="field">
+              <label for="set-resolution">Render Quality <span class="val" id="val-res-badge" style="color:var(--text-muted);font-family:inherit;font-size:0.72rem;">720p60</span></label>
+              <select class="select" id="set-resolution" disabled aria-disabled="true">
+                <option value="1080p" id="opt-res-1080p" disabled>Full HD (1080p 60fps — Log in with osu!)</option>
+                <option value="900p" id="opt-res-900p" disabled>High Quality (900p 60fps — Log in with osu!)</option>
+                <option value="720p" selected>Standard (720p 60fps — 1280&times;720)</option>
+              </select>
+              <span class="hint" id="hint-res">Log in with osu! to unlock 900p60 &amp; 1080p60.</span>
+              <div class="res-warn" id="warn-res-1080p" role="note">&#9888; 1080p60 takes noticeably longer to render than 900p60 or 720p60.</div>
+            </div>
+            <div class="field">
+              <label for="set-dim">Background Dim <span class="val" id="val-dim">75%</span></label>
+              <input id="set-dim" type="range" min="0" max="100" step="1" value="75">
+            </div>
+            <div class="field">
+              <label for="set-cursor-scale">Cursor Scale <span class="val" id="val-cursor-scale">1.00&times;</span></label>
+              <input id="set-cursor-scale" type="range" min="0.1" max="2.0" step="0.05" value="1">
+            </div>
+          </div>
+          <div class="toggle-grid">
+            <label class="toggle-item"><span>Storyboard</span><input id="set-storyboard" type="checkbox"></label>
+            <label class="toggle-item"><span>Background Video</span><input id="set-video" type="checkbox"></label>
+            <label class="toggle-item"><span>Motion Blur</span><input id="set-motion-blur" type="checkbox"></label>
+            <label class="toggle-item"><span>Cursor Ripples</span><input id="set-cursor-ripples" type="checkbox"></label>
+          </div>
+        </div>
+
+        <!-- Tab 3: HUD & Overlays -->
+        <div class="tab-pane" data-pane="hud">
+          <div class="toggle-grid">
+            <label class="toggle-item"><span>PP Counter</span><input id="set-pp" type="checkbox"></label>
+            <label class="toggle-item"><span>Leaderboard</span><input id="set-leaderboard" type="checkbox"></label>
+            <label class="toggle-item"><span>Key Overlay</span><input id="set-key-overlay" type="checkbox"></label>
+            <label class="toggle-item"><span>Hit Counter</span><input id="set-hit-counter" type="checkbox"></label>
+            <label class="toggle-item"><span>Sliderbreaks</span><input id="set-sliderbreaks" type="checkbox"></label>
+            <label class="toggle-item"><span>Strain Graph</span><input id="set-strain-graph" type="checkbox"></label>
+            <label class="toggle-item"><span>Strain Outline</span><input id="set-strain-outline" type="checkbox"></label>
+            <label class="toggle-item"><span>Hit Error Meter</span><input id="set-hit-error" type="checkbox"></label>
+            <label class="toggle-item"><span>Aim Error Meter</span><input id="set-aim-error" type="checkbox"></label>
+          </div>
+          <div class="field-grid">
+            <div class="field">
+              <label for="set-pp-dec">PP Counter Decimals (0&ndash;3)</label>
+              <select class="select" id="set-pp-dec">
+                <option value="0">0 decimals</option>
+                <option value="1">1 decimal</option>
+                <option value="2">2 decimals</option>
+                <option value="3">3 decimals</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="set-hit-dec">Hit Error UR Decimals (0&ndash;3)</label>
+              <select class="select" id="set-hit-dec">
+                <option value="0">0 decimals</option>
+                <option value="1">1 decimal</option>
+                <option value="2">2 decimals</option>
+                <option value="3">3 decimals</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="set-aim-dec">Aim Error UR Decimals (0&ndash;3)</label>
+              <select class="select" id="set-aim-dec">
+                <option value="0">0 decimals</option>
+                <option value="1">1 decimal</option>
+                <option value="2">2 decimals</option>
+                <option value="3">3 decimals</option>
+              </select>
+            </div>
+          </div>
+        </div>
+
+        <!-- Tab 4: Audio & Playback -->
+        <div class="tab-pane" data-pane="audio">
+          <div class="field-grid">
+            <div class="field">
+              <label for="set-music-vol">Music Volume <span class="val" id="val-music-vol">70%</span></label>
+              <input id="set-music-vol" type="range" min="0" max="100" step="1" value="70">
+            </div>
+            <div class="field">
+              <label for="set-hit-vol">Hitsound Volume <span class="val" id="val-hit-vol">50%</span></label>
+              <input id="set-hit-vol" type="range" min="0" max="100" step="1" value="50">
+            </div>
+          </div>
+          <div class="toggle-grid">
+            <label class="toggle-item"><span>Beatmap Hitsounds</span><input id="set-beatmap-hs" type="checkbox"></label>
+            <label class="toggle-item"><span>Always Skip Intro</span><input id="set-always-skip" type="checkbox"></label>
+            <label class="toggle-item"><span>Results Screen</span><input id="set-results-screen" type="checkbox"></label>
+          </div>
+        </div>
+      </div>
+
+      <div class="submit-footer">
+        <div class="check-stack">
+          <label class="check-row">
+            <input id="chk-save-config" type="checkbox" checked>
+            <span>Save config for future renders</span>
+          </label>
+          <label class="check-row">
+            <input id="chk-skip-settings" type="checkbox">
+            <span>Skip settings next time <small>(<a href="/config" style="color:var(--accent);">Config</a>)</small></span>
+          </label>
+        </div>
+        <div class="btn-row">
+          <button class="btn" id="cancel-config-btn" type="button">Cancel</button>
+          <button class="btn btn-primary" id="start-render-btn" type="button">Render Replay</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- STAGE 3: RENDERING / QUEUE PROGRESS -->
+    <section class="stage" id="stage-progress">
+      <div class="status-card">
+        <div class="stage-pill" id="prog-stage">Queued</div>
+        <div class="prog-title" id="prog-title">Preparing replay…</div>
+        <div class="prog-track"><div class="prog-fill" id="prog-fill"></div></div>
+        <div class="prog-meta" id="prog-meta">Waiting in shared queue…</div>
+        <div class="btn-row" style="margin-top:6px;">
+          <button class="btn btn-danger" id="cancel-job-btn" type="button">Cancel Render</button>
+          <button class="btn" id="retry-err-btn" type="button" style="display:none;">Back to Upload</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- STAGE 4: RENDER COMPLETE + 3s AUTO-REDIRECT -->
+    <section class="stage" id="stage-complete">
+      <div class="status-card">
+        <div class="stage-pill done">Render Complete</div>
+        <div class="prog-title" id="complete-title"></div>
+        <div class="complete-thumb" id="complete-thumb-wrap" style="display:none;">
+          <img id="complete-thumb" src="" alt="">
+        </div>
+        <div class="redirect-line" id="redirect-line">
+          Redirecting to watch page in <strong id="redirect-secs">3</strong>s…
+        </div>
+        <div class="btn-row">
+          <a class="btn btn-primary" id="watch-now-btn" href="/">Watch Replay Now &rarr;</a>
+          <a class="btn" id="download-done-btn" href="/" download style="display:none;">Download MP4</a>
+          <button class="btn" id="stay-btn" type="button">Stay Here</button>
+          <button class="btn" id="render-another-btn" type="button">Render Another</button>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <script src="/render-shared.js?v=6"></script>
+  <script>
+    (function () {
+      const Shared = window.OsuRenderShared;
+      const errorBox = document.getElementById("error-box");
+      const toastEl = document.getElementById("toast");
+
+      let serverConfig = { skins: [], defaults: {}, presets: [], queue_length: 0, can_use_900p: false };
+      let osuLoggedIn = false;
+      let userChoseResolution = false;
+      let currentFile = null; // { name, size, b64 }
+      let activeJobId = null;
+      let pollTimer = null;
+      let elapsedTimer = null;
+      let jobStartMs = 0;
+      let redirectTimer = null;
+      let autoStartTimer = null;
+
+      function showError(msg) {
+        if (!msg) { errorBox.classList.remove("show"); errorBox.textContent = ""; return; }
+        errorBox.textContent = msg;
+        errorBox.classList.add("show");
+      }
+      let toastTimer = null;
+      function showToast(msg) {
+        toastEl.textContent = msg;
+        toastEl.classList.add("show");
+        clearTimeout(toastTimer);
+        toastTimer = setTimeout(() => toastEl.classList.remove("show"), 2200);
+      }
+
+      function setStage(name) {
+        document.querySelectorAll(".stage").forEach((el) => el.classList.remove("active"));
+        const target = document.getElementById("stage-" + name);
+        if (target) target.classList.add("active");
+      }
+
+      // Tabs
+      document.querySelectorAll(".tab-btn").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const id = btn.dataset.tab;
+          document.querySelectorAll(".tab-btn").forEach((b) => b.classList.toggle("active", b === btn));
+          document.querySelectorAll(".tab-pane").forEach((p) => p.classList.toggle("active", p.dataset.pane === id));
+        });
+      });
+
+      // Live range labels
+      const bindRange = (id, lblId, fmt) => {
+        const el = document.getElementById(id);
+        const lbl = document.getElementById(lblId);
+        const upd = () => { lbl.textContent = fmt(el.value); };
+        el.addEventListener("input", upd);
+        return upd;
+      };
+      const updDim = bindRange("set-dim", "val-dim", (v) => v + "%");
+      const updCS = bindRange("set-cursor-scale", "val-cursor-scale", (v) => Number(v).toFixed(2) + "×");
+      const updMusic = bindRange("set-music-vol", "val-music-vol", (v) => v + "%");
+      const updHit = bindRange("set-hit-vol", "val-hit-vol", (v) => v + "%");
+
+      function updateResWarning() {
+        const sel = document.getElementById("set-resolution");
+        const warn = document.getElementById("warn-res-1080p");
+        if (!sel || !warn) return;
+        warn.classList.toggle("show", osuLoggedIn && sel.value === "1080p");
+      }
+
+      function syncQualityAccess(canUseHdPlus, preferredRes) {
+        osuLoggedIn = Boolean(canUseHdPlus);
+        const sel = document.getElementById("set-resolution");
+        const opt1080 = document.getElementById("opt-res-1080p");
+        const opt900 = document.getElementById("opt-res-900p");
+        const badge = document.getElementById("val-res-badge");
+        const hint = document.getElementById("hint-res");
+        if (!sel || !opt1080 || !opt900 || !badge || !hint) return;
+
+        if (osuLoggedIn) {
+          sel.disabled = false;
+          sel.removeAttribute("aria-disabled");
+          opt1080.disabled = false;
+          opt1080.textContent = "Full HD (1080p 60fps — 1920×1080 · Slower)";
+          opt900.disabled = false;
+          opt900.textContent = "High Quality (900p 60fps — 1600×900)";
+          badge.textContent = "900p / 1080p Unlocked";
+          badge.style.color = "var(--accent)";
+          hint.textContent = "900p60 default · 1080p60 & 720p60 available.";
+          if (userChoseResolution && (preferredRes === "720p" || preferredRes === "900p" || preferredRes === "1080p")) {
+            sel.value = preferredRes;
+          } else if (preferredRes === "1080p" || preferredRes === "900p") {
+            sel.value = preferredRes;
+          } else {
+            sel.value = "900p";
+          }
+        } else {
+          opt1080.disabled = true;
+          opt1080.textContent = "Full HD (1080p 60fps — Log in with osu!)";
+          opt900.disabled = true;
+          opt900.textContent = "High Quality (900p 60fps — Log in with osu!)";
+          sel.value = "720p";
+          sel.disabled = true;
+          sel.setAttribute("aria-disabled", "true");
+          badge.textContent = "720p60";
+          badge.style.color = "var(--text-muted)";
+          const loginHref = (Shared && Shared.buildOsuLoginUrl)
+            ? Shared.buildOsuLoginUrl("/render")
+            : "/api/auth/osu/login?return_to=%2Frender";
+          hint.innerHTML = '<a href="' + loginHref + '" style="color:var(--accent);text-decoration:underline;">Log in with osu!</a> to unlock 900p60 &amp; 1080p60.';
+        }
+        updateResWarning();
+      }
+
+      document.getElementById("set-resolution").addEventListener("change", () => {
+        if (osuLoggedIn) userChoseResolution = true;
+        updateResWarning();
+      });
+      window.addEventListener("osu-auth-change", (e) => {
+        const logged = Boolean(e && e.detail && e.detail.logged_in);
+        const stored = Shared.loadStoredConfig();
+        userChoseResolution = Boolean(stored.userChoseResolution);
+        syncQualityAccess(logged, stored.settings && stored.settings.resolution);
+      });
+
+      function applySettingsToForm(s, opts) {
+        const d = { ...(serverConfig.defaults || {}), ...(s || {}) };
+        const skinSel = document.getElementById("set-skin");
+        if (d.skin && [...skinSel.options].some((o) => o.value === d.skin)) {
+          skinSel.value = d.skin;
+        } else if (skinSel.options.length) {
+          skinSel.selectedIndex = 0;
+        }
+        syncQualityAccess(osuLoggedIn, d.resolution);
+        document.getElementById("set-dim").value = d.dim ?? 75; updDim();
+        document.getElementById("set-cursor-scale").value = d.cursor_scale ?? 1.0; updCS();
+        document.getElementById("set-storyboard").checked = Boolean(d.storyboard ?? true);
+        document.getElementById("set-video").checked = Boolean(d.video ?? true);
+        document.getElementById("set-motion-blur").checked = Boolean(d.motion_blur ?? false);
+        document.getElementById("set-cursor-ripples").checked = Boolean(d.cursor_ripples ?? false);
+
+        document.getElementById("set-pp").checked = Boolean(d.pp ?? true);
+        document.getElementById("set-pp-dec").value = String(d.pp_decimals ?? 0);
+        document.getElementById("set-leaderboard").checked = Boolean(d.leaderboard ?? true);
+        document.getElementById("set-key-overlay").checked = Boolean(d.key_overlay ?? true);
+        document.getElementById("set-hit-counter").checked = Boolean(d.hit_counter ?? true);
+        document.getElementById("set-sliderbreaks").checked = Boolean(d.sliderbreaks ?? true);
+        document.getElementById("set-strain-graph").checked = Boolean(d.strain_graph ?? true);
+        document.getElementById("set-strain-outline").checked = Boolean(d.strain_graph_outline ?? true);
+        document.getElementById("set-hit-error").checked = Boolean(d.hit_error_meter ?? true);
+        document.getElementById("set-hit-dec").value = String(d.hit_error_decimals ?? 0);
+        document.getElementById("set-aim-error").checked = Boolean(d.aim_error_meter ?? false);
+        document.getElementById("set-aim-dec").value = String(d.aim_error_decimals ?? 0);
+
+        document.getElementById("set-music-vol").value = d.music_volume ?? 70; updMusic();
+        document.getElementById("set-hit-vol").value = d.hitsound_volume ?? 50; updHit();
+        document.getElementById("set-beatmap-hs").checked = Boolean(d.beatmap_hitsounds ?? true);
+        document.getElementById("set-always-skip").checked = Boolean(d.skip_intro ?? false);
+        document.getElementById("set-results-screen").checked = Boolean(d.results_screen ?? true);
+
+        if (opts) {
+          document.getElementById("opt-pitch").value = opts.pitch || "";
+          document.getElementById("opt-offset").value = opts.offset_ms || "";
+          document.getElementById("opt-skip-intro").checked = Boolean(opts.skip_intro);
+          document.getElementById("opt-force").checked = Boolean(opts.force_rerender);
+        }
+      }
+
+      function readSettingsFromForm() {
+        const pitchRaw = document.getElementById("opt-pitch").value.trim();
+        const offRaw = document.getElementById("opt-offset").value.trim();
+        return {
+          settings: {
+            skin: document.getElementById("set-skin").value,
+            resolution: osuLoggedIn ? document.getElementById("set-resolution").value : "720p",
+            dim: Number(document.getElementById("set-dim").value),
+            cursor_scale: Number(document.getElementById("set-cursor-scale").value),
+            storyboard: document.getElementById("set-storyboard").checked,
+            video: document.getElementById("set-video").checked,
+            motion_blur: document.getElementById("set-motion-blur").checked,
+            cursor_ripples: document.getElementById("set-cursor-ripples").checked,
+            pp: document.getElementById("set-pp").checked,
+            pp_decimals: Number(document.getElementById("set-pp-dec").value),
+            leaderboard: document.getElementById("set-leaderboard").checked,
+            key_overlay: document.getElementById("set-key-overlay").checked,
+            hit_counter: document.getElementById("set-hit-counter").checked,
+            sliderbreaks: document.getElementById("set-sliderbreaks").checked,
+            strain_graph: document.getElementById("set-strain-graph").checked,
+            strain_graph_outline: document.getElementById("set-strain-outline").checked,
+            hit_error_meter: document.getElementById("set-hit-error").checked,
+            hit_error_decimals: Number(document.getElementById("set-hit-dec").value),
+            aim_error_meter: document.getElementById("set-aim-error").checked,
+            aim_error_decimals: Number(document.getElementById("set-aim-dec").value),
+            music_volume: Number(document.getElementById("set-music-vol").value),
+            hitsound_volume: Number(document.getElementById("set-hit-vol").value),
+            beatmap_hitsounds: document.getElementById("set-beatmap-hs").checked,
+            skip_intro: document.getElementById("set-always-skip").checked,
+            results_screen: document.getElementById("set-results-screen").checked,
+          },
+          options: {
+            start: document.getElementById("opt-start").value.trim() || null,
+            end: document.getElementById("opt-end").value.trim() || null,
+            pitch: pitchRaw ? Number(pitchRaw) : null,
+            offset_ms: offRaw ? Number(offRaw) : null,
+            skip_intro: document.getElementById("opt-skip-intro").checked,
+            force_rerender: document.getElementById("opt-force").checked,
+          },
+        };
+      }
+
+      // Sync Save / Skip checkboxes
+      const chkSave = document.getElementById("chk-save-config");
+      const chkSkip = document.getElementById("chk-skip-settings");
+      chkSkip.addEventListener("change", () => {
+        if (chkSkip.checked) chkSave.checked = true;
+      });
+      chkSave.addEventListener("change", () => {
+        if (!chkSave.checked) chkSkip.checked = false;
+      });
+
+      function updatePrefBanner() {
+        const stored = Shared.loadStoredConfig();
+        const el = document.getElementById("pref-summary");
+        if (stored.saveConfig && stored.skipSettings) {
+          el.innerHTML = '<strong>Quick Render:</strong> Replays start automatically with your saved config.';
+        } else if (stored.saveConfig && stored.hasSavedSettings) {
+          el.innerHTML = '<strong>Saved config active.</strong>';
+        } else {
+          el.innerHTML = 'Using default settings.';
+        }
+      }
+
+      async function loadServerConfig() {
+        try {
+          const r = await fetch("/api/web-render/config", { credentials: "same-origin", cache: "no-store" });
+          const data = await r.json();
+          if (data && data.ok) {
+            serverConfig = data;
+            osuLoggedIn = Boolean(data.can_use_900p);
+          }
+        } catch (_) {}
+        if (Shared && Shared.getAuthState && Shared.getAuthState().loaded) {
+          osuLoggedIn = Boolean(Shared.getAuthState().logged_in) || osuLoggedIn;
+        }
+
+        // Populate skins
+        const skinSel = document.getElementById("set-skin");
+        skinSel.innerHTML = "";
+        const defOpt = document.createElement("option");
+        defOpt.value = "";
+        defOpt.textContent = "Server Default";
+        skinSel.appendChild(defOpt);
+        (serverConfig.skins || []).forEach((sk) => {
+          const opt = document.createElement("option");
+          opt.value = sk.value;
+          opt.textContent = sk.label;
+          skinSel.appendChild(opt);
+        });
+
+        // Populate presets
+        const pg = document.getElementById("presets-group");
+        while (pg.children.length > 1) pg.removeChild(pg.lastChild);
+        (serverConfig.presets || []).forEach((p) => {
+          const btn = document.createElement("button");
+          btn.type = "button";
+          btn.className = "btn btn-sm";
+          btn.textContent = p.label;
+          btn.onclick = () => {
+            const cur = readSettingsFromForm().settings;
+            if (p.patch && p.patch.resolution && osuLoggedIn) {
+              userChoseResolution = true;
+            }
+            applySettingsToForm({ ...cur, ...p.patch }, null);
+            showToast("Applied preset: " + p.label);
+          };
+          pg.appendChild(btn);
+        });
+
+        // Hydrate stored config
+        const stored = Shared.loadStoredConfig();
+        userChoseResolution = Boolean(stored.userChoseResolution);
+        chkSave.checked = stored.saveConfig;
+        chkSkip.checked = stored.saveConfig && stored.skipSettings;
+        applySettingsToForm(stored.settings || serverConfig.defaults, stored.options);
+        updatePrefBanner();
+        updateQueueIndicator(serverConfig.queue_length || 0);
+      }
+
+      function updateQueueIndicator(qLen) {
+        const ind = document.getElementById("queue-indicator");
+        const busy = qLen > 0;
+        ind.innerHTML =
+          '<span class="dot' + (busy ? " busy" : "") + '"></span>' +
+          (busy ? qLen + (qLen === 1 ? " render in queue" : " renders in queue") : "Queue idle");
+      }
+
+      async function refreshQueuePill() {
+        try {
+          const r = await fetch("/api/web-render/queue", { cache: "no-store" });
+          const d = await r.json();
+          if (d && d.ok) updateQueueIndicator(d.queue_length || 0);
+        } catch (_) {}
+      }
+
+      async function handleLoadedReplay(name, size, buffer) {
+        showError("");
+        clearTimeout(autoStartTimer);
+        document.getElementById("auto-banner").classList.remove("show");
+
+        const b64 = Shared.arrayBufferToBase64(buffer);
+        currentFile = { name, size, b64 };
+
+        // Clear per-clip start/end for fresh replay
+        document.getElementById("opt-start").value = "";
+        document.getElementById("opt-end").value = "";
+
+        const badgesEl = document.getElementById("preview-badges");
+        const titleEl = document.getElementById("preview-title");
+        const subEl = document.getElementById("preview-sub");
+        badgesEl.innerHTML = "";
+        titleEl.textContent = name;
+        subEl.textContent = "Inspecting .osr replay…";
+        setStage("configure");
+
+        // Inspect replay via backend
+        let inspectOk = true;
+        try {
+          const res = await fetch("/api/web-render/inspect", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ filename: name, osr_base64: b64 }),
+          });
+          const data = await res.json();
+          if (!res.ok || !data.ok) {
+            inspectOk = false;
+            showError(data.error || "Could not parse replay file.");
+            currentFile = null;
+            setStage("upload");
+            return;
+          }
+          const r = data.replay;
+          const addBadge = (txt, cls) => {
+            const sp = document.createElement("span");
+            sp.className = "badge" + (cls ? " " + cls : "");
+            sp.textContent = txt;
+            badgesEl.appendChild(sp);
+          };
+          if (r.grade) addBadge(r.grade);
+          if (r.stars != null) addBadge(Number(r.stars).toFixed(2) + "★", "b-star");
+          if (r.mods && r.mods !== "NM") addBadge("+" + r.mods, "b-mod");
+          if (r.accuracy != null) addBadge(Number(r.accuracy).toFixed(2) + "%", "b-acc");
+          if (r.is_lazer) addBadge("osu!lazer", "b-lazer");
+
+          titleEl.textContent = r.map_title || name;
+          const subParts = [
+            "Player: " + (r.player || "Unknown"),
+            r.max_combo != null
+              ? "Combo: " + r.max_combo + (r.map_max_combo ? "/" + r.map_max_combo + "x" : "x")
+              : null,
+            r.count_300 != null
+              ? "Hits: " + r.count_300 + "/" + r.count_100 + "/" + r.count_50 + "/" + r.count_miss
+              : null,
+          ].filter(Boolean);
+          subEl.textContent = subParts.join(" · ");
+        } catch (_) {
+          subEl.textContent = (size / 1024).toFixed(1) + " KB .osr ready to render";
+        }
+
+        // If user enabled "Skip settings from the next render on", auto-start cleanly!
+        const stored = Shared.loadStoredConfig();
+        if (inspectOk && stored.saveConfig && stored.skipSettings) {
+          const banner = document.getElementById("auto-banner");
+          banner.classList.add("show");
+          autoStartTimer = setTimeout(() => {
+            banner.classList.remove("show");
+            submitRender();
+          }, 900);
+        }
+      }
+
+      document.getElementById("auto-edit-btn").addEventListener("click", () => {
+        clearTimeout(autoStartTimer);
+        document.getElementById("auto-banner").classList.remove("show");
+        showToast("Auto-start paused — customize your settings below.");
+      });
+
+      async function submitRender() {
+        if (!currentFile) return;
+        showError("");
+        clearTimeout(autoStartTimer);
+
+        const { settings, options } = readSettingsFromForm();
+        const stored = Shared.loadStoredConfig();
+
+        // Persist checkboxes & config
+        Shared.saveStoredConfig({
+          saveConfig: chkSave.checked,
+          skipSettings: chkSkip.checked,
+          userChoseResolution,
+          settings,
+          options: {
+            pitch: options.pitch != null ? String(options.pitch) : "",
+            offset_ms: options.offset_ms != null ? String(options.offset_ms) : "",
+            skip_intro: options.skip_intro,
+            force_rerender: options.force_rerender,
+          },
+          rawSettingsJson: stored.rawSettingsJson || "",
+        });
+        updatePrefBanner();
+
+        const btn = document.getElementById("start-render-btn");
+        btn.disabled = true;
+        btn.textContent = "Submitting…";
+
+        try {
+          const res = await fetch("/api/web-render/submit", {
+            method: "POST",
+            credentials: "same-origin",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              filename: currentFile.name,
+              osr_base64: currentFile.b64,
+              options,
+              settings,
+              raw_settings_json: stored.rawSettingsJson || null,
+            }),
+          });
+          const data = await res.json();
+          if (!res.ok || !data.ok) {
+            showError(data.error || "Failed to enqueue render.");
+            btn.disabled = false;
+            btn.textContent = "Render Replay";
+            return;
+          }
+
+          activeJobId = data.job_id;
+          jobStartMs = Date.now();
+          document.getElementById("prog-title").textContent =
+            document.getElementById("preview-title").textContent || currentFile.name;
+          document.getElementById("prog-stage").className = "stage-pill";
+          document.getElementById("prog-stage").textContent =
+            data.position > 1 ? "Queued #" + data.position : "Starting…";
+          document.getElementById("prog-fill").style.width = "4%";
+          document.getElementById("prog-meta").textContent =
+            data.position > 1
+              ? "Position #" + data.position + " of " + data.queue_length + " in shared queue"
+              : "Starting render…";
+          document.getElementById("cancel-job-btn").style.display = "inline-flex";
+          document.getElementById("retry-err-btn").style.display = "none";
+          setStage("progress");
+          startPollingJob();
+        } catch (err) {
+          showError("Network error while submitting render. Please try again.");
+        } finally {
+          btn.disabled = false;
+          btn.textContent = "Render Replay";
+        }
+      }
+
+      function stopTimers() {
+        clearInterval(pollTimer); pollTimer = null;
+        clearInterval(elapsedTimer); elapsedTimer = null;
+        clearInterval(redirectTimer); redirectTimer = null;
+      }
+
+      function startPollingJob() {
+        stopTimers();
+        pollJobOnce();
+        pollTimer = setInterval(pollJobOnce, 1000);
+      }
+
+      async function pollJobOnce() {
+        if (!activeJobId) return;
+        try {
+          const res = await fetch("/api/web-render/jobs/" + encodeURIComponent(activeJobId), { cache: "no-store" });
+          const d = await res.json();
+          if (!res.ok || !d.ok) {
+            stopTimers();
+            showJobFailed(d.error || "Render job was lost.");
+            return;
+          }
+          if (d.title) document.getElementById("prog-title").textContent = d.title;
+
+          const elapsed = Math.max(0, Math.floor((Date.now() - jobStartMs) / 1000));
+          const elStr = Math.floor(elapsed / 60) + ":" + String(elapsed % 60).padStart(2, "0");
+
+          const pill = document.getElementById("prog-stage");
+          const fill = document.getElementById("prog-fill");
+          const meta = document.getElementById("prog-meta");
+
+          if (d.status === "done") {
+            stopTimers();
+            showCompleteScreen(d);
+            return;
+          }
+          if (d.status === "error") {
+            stopTimers();
+            showJobFailed(d.error || "Render failed.");
+            return;
+          }
+          if (d.status === "cancelled") {
+            stopTimers();
+            pill.className = "stage-pill err";
+            pill.textContent = "Cancelled";
+            meta.textContent = "Render was cancelled.";
+            document.getElementById("cancel-job-btn").style.display = "none";
+            document.getElementById("retry-err-btn").style.display = "inline-flex";
+            return;
+          }
+
+          if (d.position && d.position > 1) {
+            pill.textContent = "Queued #" + d.position;
+            fill.style.width = "5%";
+            meta.textContent =
+              "Waiting in shared queue (#" + d.position + " of " + d.queue_length + ") · Elapsed " + elStr;
+          } else if (d.status === "downloading") {
+            pill.textContent = "Downloading Beatmap";
+            fill.style.width = "12%";
+            meta.textContent = "Fetching beatmap files… · Elapsed " + elStr;
+          } else if (d.status === "map_found") {
+            pill.textContent = "Beatmap Ready";
+            fill.style.width = "18%";
+            meta.textContent = "Starting danser… · Elapsed " + elStr;
+          } else if (d.status === "rendering") {
+            const pct = Math.max(0, Math.min(100, Number(d.progress) || 0));
+            pill.textContent = "Rendering " + pct + "%";
+            fill.style.width = Math.max(20, Math.round(20 + pct * 0.72)) + "%";
+            meta.textContent = "Encoding video on GPU (" + pct + "%) · Elapsed " + elStr;
+          } else if (d.status === "uploading") {
+            pill.textContent = "Uploading & Indexing";
+            fill.style.width = "95%";
+            meta.textContent = "Generating thumbnails & publishing… · Elapsed " + elStr;
+          } else {
+            pill.textContent = "Starting…";
+            fill.style.width = "8%";
+            meta.textContent = "Preparing render job… · Elapsed " + elStr;
+          }
+        } catch (_) {}
+      }
+
+      function showJobFailed(msg) {
+        const pill = document.getElementById("prog-stage");
+        pill.className = "stage-pill err";
+        pill.textContent = "Render Failed";
+        document.getElementById("prog-meta").textContent = msg;
+        document.getElementById("cancel-job-btn").style.display = "none";
+        document.getElementById("retry-err-btn").style.display = "inline-flex";
+      }
+
+      function showCompleteScreen(d) {
+        const watchHref = d.watch_path || d.watch_url || "/";
+        document.getElementById("complete-title").textContent = d.title || "Replay Ready";
+        document.getElementById("watch-now-btn").href = watchHref;
+
+        const dlBtn = document.getElementById("download-done-btn");
+        if (d.video_url) {
+          dlBtn.href = d.video_url;
+          dlBtn.style.display = "inline-flex";
+        } else {
+          dlBtn.style.display = "none";
+        }
+
+        const thumbWrap = document.getElementById("complete-thumb-wrap");
+        const thumbImg = document.getElementById("complete-thumb");
+        const thumbSrc = d.thumbnail_url || (d.video_url ? d.video_url.replace(/\.mp4$/i, ".jpg") : null);
+        if (thumbSrc) {
+          thumbImg.src = thumbSrc;
+          thumbImg.onerror = () => { thumbWrap.style.display = "none"; };
+          thumbWrap.style.display = "block";
+        } else {
+          thumbWrap.style.display = "none";
+        }
+
+        let secs = 3;
+        const secsEl = document.getElementById("redirect-secs");
+        const lineEl = document.getElementById("redirect-line");
+        lineEl.innerHTML = 'Redirecting to watch page in <strong id="redirect-secs">3</strong>s…';
+        document.getElementById("stay-btn").style.display = "inline-flex";
+
+        setStage("complete");
+
+        clearInterval(redirectTimer);
+        redirectTimer = setInterval(() => {
+          secs -= 1;
+          const s = document.getElementById("redirect-secs");
+          if (s) s.textContent = String(Math.max(0, secs));
+          if (secs <= 0) {
+            clearInterval(redirectTimer);
+            redirectTimer = null;
+            location.href = watchHref;
+          }
+        }, 1000);
+      }
+
+      // Wire Upload Zone & Buttons
+      const dropzone = document.getElementById("dropzone");
+      const fileInput = document.getElementById("file-input");
+
+      async function ingestBrowserFile(file) {
+        if (!file) return;
+        if (!/\.osr$/i.test(file.name || "")) {
+          showError("Only .osr replay files are supported.");
+          return;
+        }
+        if (file.size <= 0 || file.size > Shared.MAX_OSR_BYTES) {
+          showError("Replay file must be between 1 byte and 5 MB.");
+          return;
+        }
+        const buf = await file.arrayBuffer();
+        await handleLoadedReplay(file.name, file.size, buf);
+      }
+
+      document.getElementById("choose-btn").addEventListener("click", (e) => {
+        e.stopPropagation();
+        fileInput.click();
+      });
+      dropzone.addEventListener("click", () => fileInput.click());
+      dropzone.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); fileInput.click(); } });
+      fileInput.addEventListener("change", () => {
+        if (fileInput.files && fileInput.files[0]) ingestBrowserFile(fileInput.files[0]);
+        fileInput.value = "";
+      });
+
+      ["dragenter", "dragover"].forEach((ev) => {
+        dropzone.addEventListener(ev, (e) => { e.preventDefault(); dropzone.classList.add("dragover"); });
+      });
+      ["dragleave", "drop"].forEach((ev) => {
+        dropzone.addEventListener(ev, (e) => { e.preventDefault(); dropzone.classList.remove("dragover"); });
+      });
+      dropzone.addEventListener("drop", (e) => {
+        const files = e.dataTransfer && e.dataTransfer.files;
+        if (files && files[0]) ingestBrowserFile(files[0]);
+      });
+
+      // Also support dropping anywhere on /render when on upload or configure stage
+      window.addEventListener("dragover", (e) => { if (e.dataTransfer && e.dataTransfer.types && [...e.dataTransfer.types].includes("Files")) e.preventDefault(); });
+      window.addEventListener("drop", (e) => {
+        if (e.target === dropzone || dropzone.contains(e.target)) return;
+        const files = e.dataTransfer && e.dataTransfer.files;
+        if (files && files[0] && (document.getElementById("stage-upload").classList.contains("active") || document.getElementById("stage-configure").classList.contains("active"))) {
+          e.preventDefault();
+          ingestBrowserFile(files[0]);
+        }
+      });
+
+      document.getElementById("change-file-btn").addEventListener("click", () => {
+        clearTimeout(autoStartTimer);
+        currentFile = null;
+        showError("");
+        setStage("upload");
+      });
+      document.getElementById("cancel-config-btn").addEventListener("click", () => {
+        clearTimeout(autoStartTimer);
+        currentFile = null;
+        showError("");
+        setStage("upload");
+      });
+      document.getElementById("reset-defaults-btn").addEventListener("click", () => {
+        userChoseResolution = false;
+        applySettingsToForm(serverConfig.defaults, { pitch: "", offset_ms: "", skip_intro: false, force_rerender: false });
+        showToast("Reset to server defaults");
+      });
+      document.getElementById("start-render-btn").addEventListener("click", submitRender);
+
+      document.getElementById("cancel-job-btn").addEventListener("click", async () => {
+        if (!activeJobId) return;
+        const btn = document.getElementById("cancel-job-btn");
+        btn.disabled = true;
+        try {
+          await fetch("/api/web-render/jobs/" + encodeURIComponent(activeJobId) + "/cancel", { method: "POST" });
+          await pollJobOnce();
+        } finally {
+          btn.disabled = false;
+        }
+      });
+
+      document.getElementById("retry-err-btn").addEventListener("click", () => {
+        stopTimers();
+        activeJobId = null;
+        currentFile = null;
+        setStage("upload");
+        refreshQueuePill();
+      });
+
+      document.getElementById("stay-btn").addEventListener("click", () => {
+        clearInterval(redirectTimer);
+        redirectTimer = null;
+        document.getElementById("redirect-line").textContent = "Auto-redirect cancelled. Use the link below whenever you're ready.";
+        document.getElementById("stay-btn").style.display = "none";
+      });
+
+      document.getElementById("render-another-btn").addEventListener("click", () => {
+        stopTimers();
+        activeJobId = null;
+        currentFile = null;
+        setStage("upload");
+        refreshQueuePill();
+      });
+
+      // Boot: load server config & check if redirected from drag-and-drop on another page
+      loadServerConfig().then(async () => {
+        const pending = await Shared.loadPendingReplay();
+        if (pending && pending.buffer) {
+          await Shared.clearPendingReplay();
+          if (location.search.includes("dropped=1")) {
+            history.replaceState(null, "", "/render");
+          }
+          await handleLoadedReplay(pending.name, pending.size, pending.buffer);
+        }
+      });
+      setInterval(refreshQueuePill, 15000);
+    })();
+  </script>
+</body>
+</html>

@@ -1,0 +1,1015 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Config • Replays</title>
+  <meta name="description" content="Configure your saved browser render settings and quick-render defaults.">
+  <meta name="theme-color" content="#2e3440">
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <script>(function(){try{var t=localStorage.getItem("osu_site_theme_v1");var ok=["nord-dark","nord-light","midnight","osu-pink","catppuccin-mocha","sakura-light","oled-pitch"];document.documentElement.dataset.theme=ok.indexOf(t)>=0?t:"nord-dark";}catch(_){document.documentElement.dataset.theme="nord-dark";}})();</script>
+  <style>
+    :root {
+      --bg: #2e3440;
+      --surface: #3b4252;
+      --surface-2: #434c5e;
+      --border: rgba(216, 222, 233, 0.13);
+      --border-hover: rgba(136, 192, 208, 0.56);
+      --text: #eceff4;
+      --text-dim: #d8dee9;
+      --text-muted: #9aa7bc;
+      --accent: #88c0d0;
+      --accent-2: #81a1c1;
+      --green: #a3be8c;
+      --rose: #bf616a;
+      --radius: 15px;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      min-height: 100vh;
+      font-family: 'Segoe UI', system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+      background-color: var(--bg);
+      background-image:
+        radial-gradient(circle at 14% 8%, rgba(150, 223, 227, 0.13), transparent 34%),
+        radial-gradient(circle at 86% 84%, rgba(176, 102, 255, 0.12), transparent 34%);
+      background-attachment: fixed;
+      color: var(--text);
+      padding: 24px 20px 72px;
+    }
+    .wrap {
+      width: 100%;
+      max-width: 1040px;
+      margin: 0 auto;
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+    }
+
+    .header {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 12px 16px;
+      padding-bottom: 14px;
+      border-bottom: 1px solid var(--border);
+    }
+    .title-area { display: flex; flex-direction: column; gap: 5px; }
+    h1.page-title {
+      font-size: 1.65rem;
+      font-weight: 800;
+      letter-spacing: -0.025em;
+      line-height: 1.1;
+      background: linear-gradient(135deg, var(--accent), var(--accent-2));
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+    }
+    .sub-line { font-size: 0.82rem; color: var(--text-dim); }
+    .nav-actions { display: flex; flex-wrap: wrap; gap: 7px; align-items: center; }
+    .nav-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      text-decoration: none;
+      color: var(--text-dim);
+      font-size: 0.84rem;
+      font-weight: 600;
+      padding: 7px 13px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.035);
+      cursor: pointer;
+      transition: all 0.14s;
+    }
+    .nav-btn:hover, .nav-btn.active {
+      color: var(--text);
+      border-color: var(--border-hover);
+      background: rgba(150, 223, 227, 0.1);
+    }
+
+    .panel {
+      background: rgba(18, 23, 37, 0.88);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 18px 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+    .panel-head {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid var(--border);
+    }
+    .panel-head h2 { font-size: 0.98rem; font-weight: 800; }
+    .panel-head span.hint { font-size: 0.78rem; color: var(--text-muted); }
+
+    .check-card {
+      background: rgba(150, 223, 227, 0.06);
+      border: 1px solid rgba(150, 223, 227, 0.28);
+      border-radius: var(--radius);
+      padding: 16px 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .check-row {
+      display: flex;
+      align-items: flex-start;
+      gap: 11px;
+      cursor: pointer;
+      user-select: none;
+    }
+    .check-row input[type="checkbox"] {
+      width: 18px;
+      height: 18px;
+      margin-top: 2px;
+      accent-color: var(--accent);
+      cursor: pointer;
+      flex-shrink: 0;
+    }
+    .check-row strong { display: block; font-size: 0.9rem; color: var(--text); }
+    .check-row small { display: block; font-size: 0.79rem; color: var(--text-dim); margin-top: 2px; }
+
+    .preset-group { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; }
+    .field-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 13px 16px;
+    }
+    .field { display: flex; flex-direction: column; gap: 6px; }
+    .field label {
+      font-size: 0.78rem;
+      font-weight: 700;
+      color: var(--text-dim);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .field label span.val { color: var(--accent); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .input, .select {
+      width: 100%;
+      padding: 8px 11px;
+      border-radius: 9px;
+      border: 1px solid var(--border);
+      background: rgba(10, 14, 23, 0.78);
+      color: var(--text);
+      font-size: 0.86rem;
+      outline: none;
+    }
+    .input:focus, .select:focus { border-color: var(--accent); }
+    .select option { background: #121725; color: var(--text); }
+    .select:disabled {
+      opacity: 0.72;
+      cursor: not-allowed;
+      color: var(--text-dim);
+      border-style: dashed;
+    }
+    .hint { font-size: 0.73rem; color: var(--text-muted); }
+    input[type="range"] { width: 100%; accent-color: var(--accent); cursor: pointer; }
+
+    .toggle-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(195px, 1fr));
+      gap: 9px;
+    }
+    .toggle-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 9px 12px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: rgba(10, 14, 23, 0.55);
+      cursor: pointer;
+      font-size: 0.83rem;
+      font-weight: 600;
+      color: var(--text);
+      user-select: none;
+    }
+    .toggle-item:hover { border-color: rgba(150, 223, 227, 0.35); }
+    .toggle-item input[type="checkbox"] { width: 17px; height: 17px; accent-color: var(--accent); cursor: pointer; }
+
+    .footer-bar {
+      position: sticky;
+      bottom: 14px;
+      background: rgba(18, 23, 37, 0.96);
+      backdrop-filter: blur(10px);
+      border: 1px solid rgba(150, 223, 227, 0.3);
+      border-radius: var(--radius);
+      padding: 13px 18px;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      box-shadow: 0 18px 42px rgba(0, 0, 0, 0.55);
+    }
+    .btn-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 7px;
+      padding: 9px 15px;
+      border-radius: 10px;
+      font-size: 0.85rem;
+      font-weight: 700;
+      text-decoration: none;
+      border: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.04);
+      color: var(--text);
+      cursor: pointer;
+      transition: all 0.14s;
+    }
+    .btn:hover { border-color: var(--border-hover); background: rgba(150, 223, 227, 0.12); }
+    .btn-sm { padding: 6px 11px; font-size: 0.78rem; border-radius: 8px; }
+    .btn-primary {
+      background: linear-gradient(135deg, var(--accent), #6ec8d8);
+      border-color: transparent;
+      color: #071419;
+    }
+    .btn-primary:hover { opacity: 0.94; background: linear-gradient(135deg, var(--accent), #6ec8d8); }
+    .btn-danger {
+      background: rgba(251, 113, 133, 0.12);
+      border-color: rgba(251, 113, 133, 0.4);
+      color: #fda4af;
+    }
+    .btn-danger:hover { background: rgba(251, 113, 133, 0.22); }
+
+    .json-status { font-size: 0.8rem; color: var(--text-dim); }
+    .account-card {
+      background: rgba(18, 23, 37, 0.92);
+      border: 1px solid rgba(255, 102, 170, 0.28);
+      border-radius: var(--radius);
+      padding: 16px 20px;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+    }
+    .account-info { display: flex; align-items: center; gap: 13px; min-width: 0; }
+    .account-avatar {
+      width: 44px;
+      height: 44px;
+      border-radius: 50%;
+      object-fit: cover;
+      border: 2px solid rgba(150, 223, 227, 0.48);
+      background: var(--surface-2);
+      display: none;
+      flex-shrink: 0;
+    }
+    .account-avatar.show { display: block; }
+    .account-title { font-size: 0.96rem; font-weight: 800; color: var(--text); display: flex; flex-wrap: wrap; align-items: center; gap: 7px; }
+    .account-sub { font-size: 0.8rem; color: var(--text-dim); margin-top: 3px; line-height: 1.45; }
+    .acct-badge {
+      display: inline-flex;
+      align-items: center;
+      font-size: 0.7rem;
+      font-weight: 700;
+      padding: 2px 7px;
+      border-radius: 999px;
+      border: 1px solid rgba(74, 222, 128, 0.4);
+      background: rgba(74, 222, 128, 0.12);
+      color: #86efac;
+    }
+    .btn-osu {
+      background: linear-gradient(135deg, #ff66aa, #c855d8);
+      border-color: transparent;
+      color: #fff;
+    }
+    .btn-osu:hover { opacity: 0.94; background: linear-gradient(135deg, #ff66aa, #c855d8); }
+    .toast {
+      position: fixed;
+      bottom: 84px;
+      left: 50%;
+      transform: translateX(-50%) translateY(18px);
+      background: rgba(16, 21, 34, 0.96);
+      border: 1px solid rgba(150, 223, 227, 0.45);
+      color: var(--text);
+      padding: 9px 16px;
+      border-radius: 10px;
+      font-size: 0.84rem;
+      font-weight: 600;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.18s, transform 0.18s;
+      z-index: 150;
+    }
+    .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  </style>
+  <link rel="stylesheet" href="/themes.css?v=2">
+</head>
+<body>
+  <div class="wrap">
+    <header class="header">
+      <div class="title-area">
+        <h1 class="page-title">Render Config</h1>
+        <div class="sub-line">Web render defaults and site appearance.</div>
+      </div>
+      <nav class="nav-actions">
+        <a class="nav-btn" href="/">Gallery</a>
+        <a class="nav-btn" href="/render">Render</a>
+        <a class="nav-btn active" href="/config">Config</a>
+        <a class="nav-btn" href="/stats">Stats</a>
+      </nav>
+    </header>
+
+    <!-- osu! Account Session Card -->
+    <section class="account-card" id="account-card">
+      <div class="account-info">
+        <img class="account-avatar" id="acct-avatar" src="" alt="">
+        <div>
+          <div class="account-title" id="acct-title">Checking osu! session…</div>
+          <div class="account-sub" id="acct-sub">Sign in with osu! for 900p60 / 1080p60 renders and extra themes.</div>
+        </div>
+      </div>
+      <div class="btn-row" id="acct-actions"></div>
+    </section>
+
+    <!-- Site Appearance & Themes -->
+    <section class="panel" id="theme-panel">
+      <div class="panel-head">
+        <h2>Site Appearance &amp; Themes</h2>
+        <span class="hint" id="theme-panel-hint">Nord Dark &amp; Light free &middot; Log in with osu! for 5 more</span>
+      </div>
+      <div class="theme-gallery-grid" id="theme-gallery-grid"></div>
+      <div class="theme-gallery-foot" id="theme-gallery-foot"></div>
+    </section>
+
+    <!-- Core Save & Skip Checkboxes -->
+    <section class="check-card">
+      <label class="check-row">
+        <input id="chk-save-config" type="checkbox" checked>
+        <span>
+          <strong>Save config for future renders</strong>
+          <small>Remember your render settings for next time.</small>
+        </span>
+      </label>
+      <label class="check-row">
+        <input id="chk-skip-settings" type="checkbox">
+        <span>
+          <strong>Skip settings on next render</strong>
+          <small>Start rendering right away when you drop a .osr file.</small>
+        </span>
+      </label>
+    </section>
+
+    <!-- Presets -->
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Quick Presets</h2>
+        <div class="preset-group" id="presets-group"></div>
+      </div>
+
+      <!-- Skin & Visuals -->
+      <div class="panel-head" style="padding-top:2px;">
+        <h2>Skin &amp; Visuals</h2>
+      </div>
+      <div class="field-grid">
+        <div class="field">
+          <label for="set-skin">Skin</label>
+          <select class="select" id="set-skin"></select>
+        </div>
+        <div class="field">
+          <label for="set-resolution">Render Quality <span class="val" id="val-res-badge" style="color:var(--text-muted);font-family:inherit;font-size:0.72rem;">720p60</span></label>
+          <select class="select" id="set-resolution" disabled aria-disabled="true">
+            <option value="1080p" id="opt-res-1080p" disabled>Full HD (1080p 60fps — Log in with osu!)</option>
+            <option value="900p" id="opt-res-900p" disabled>High Quality (900p 60fps — Log in with osu!)</option>
+            <option value="720p" selected>Standard (720p 60fps — 1280&times;720)</option>
+          </select>
+          <span class="hint" id="hint-res">Log in with osu! above to unlock 900p60 &amp; 1080p60.</span>
+          <div class="res-warn" id="warn-res-1080p" role="note">&#9888; 1080p60 takes noticeably longer to render than 900p60 or 720p60.</div>
+        </div>
+        <div class="field">
+          <label for="set-dim">Background Dim <span class="val" id="val-dim">75%</span></label>
+          <input id="set-dim" type="range" min="0" max="100" step="1" value="75">
+        </div>
+        <div class="field">
+          <label for="set-cursor-scale">Cursor Scale <span class="val" id="val-cursor-scale">1.00&times;</span></label>
+          <input id="set-cursor-scale" type="range" min="0.1" max="2.0" step="0.05" value="1">
+        </div>
+      </div>
+      <div class="toggle-grid">
+        <label class="toggle-item"><span>Storyboard</span><input id="set-storyboard" type="checkbox"></label>
+        <label class="toggle-item"><span>Background Video</span><input id="set-video" type="checkbox"></label>
+        <label class="toggle-item"><span>Motion Blur</span><input id="set-motion-blur" type="checkbox"></label>
+        <label class="toggle-item"><span>Cursor Ripples</span><input id="set-cursor-ripples" type="checkbox"></label>
+      </div>
+    </section>
+
+    <!-- HUD & Overlays -->
+    <section class="panel">
+      <div class="panel-head">
+        <h2>HUD &amp; Overlays</h2>
+      </div>
+      <div class="toggle-grid">
+        <label class="toggle-item"><span>PP Counter</span><input id="set-pp" type="checkbox"></label>
+        <label class="toggle-item"><span>Leaderboard</span><input id="set-leaderboard" type="checkbox"></label>
+        <label class="toggle-item"><span>Key Overlay</span><input id="set-key-overlay" type="checkbox"></label>
+        <label class="toggle-item"><span>Hit Counter</span><input id="set-hit-counter" type="checkbox"></label>
+        <label class="toggle-item"><span>Sliderbreaks</span><input id="set-sliderbreaks" type="checkbox"></label>
+        <label class="toggle-item"><span>Strain Graph</span><input id="set-strain-graph" type="checkbox"></label>
+        <label class="toggle-item"><span>Strain Outline</span><input id="set-strain-outline" type="checkbox"></label>
+        <label class="toggle-item"><span>Hit Error Meter</span><input id="set-hit-error" type="checkbox"></label>
+        <label class="toggle-item"><span>Aim Error Meter</span><input id="set-aim-error" type="checkbox"></label>
+      </div>
+      <div class="field-grid">
+        <div class="field">
+          <label for="set-pp-dec">PP Counter Decimals (0&ndash;3)</label>
+          <select class="select" id="set-pp-dec">
+            <option value="0">0 decimals</option>
+            <option value="1">1 decimal</option>
+            <option value="2">2 decimals</option>
+            <option value="3">3 decimals</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="set-hit-dec">Hit Error UR Decimals (0&ndash;3)</label>
+          <select class="select" id="set-hit-dec">
+            <option value="0">0 decimals</option>
+            <option value="1">1 decimal</option>
+            <option value="2">2 decimals</option>
+            <option value="3">3 decimals</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="set-aim-dec">Aim Error UR Decimals (0&ndash;3)</label>
+          <select class="select" id="set-aim-dec">
+            <option value="0">0 decimals</option>
+            <option value="1">1 decimal</option>
+            <option value="2">2 decimals</option>
+            <option value="3">3 decimals</option>
+          </select>
+        </div>
+      </div>
+    </section>
+
+    <!-- Audio & Default Render Options -->
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Audio &amp; Playback Defaults</h2>
+      </div>
+      <div class="field-grid">
+        <div class="field">
+          <label for="set-music-vol">Music Volume <span class="val" id="val-music-vol">70%</span></label>
+          <input id="set-music-vol" type="range" min="0" max="100" step="1" value="70">
+        </div>
+        <div class="field">
+          <label for="set-hit-vol">Hitsound Volume <span class="val" id="val-hit-vol">50%</span></label>
+          <input id="set-hit-vol" type="range" min="0" max="100" step="1" value="50">
+        </div>
+        <div class="field">
+          <label for="opt-pitch">Default Pitch (0.5 &ndash; 5.0)</label>
+          <input class="input" id="opt-pitch" type="number" step="0.05" min="0.5" max="5" placeholder="Default (leave blank)">
+        </div>
+        <div class="field">
+          <label for="opt-offset">Default Audio Offset (ms)</label>
+          <input class="input" id="opt-offset" type="number" step="5" min="-5000" max="5000" placeholder="0">
+        </div>
+      </div>
+      <div class="toggle-grid">
+        <label class="toggle-item"><span>Beatmap Hitsounds</span><input id="set-beatmap-hs" type="checkbox"></label>
+        <label class="toggle-item"><span>Always Skip Intro</span><input id="set-always-skip" type="checkbox"></label>
+        <label class="toggle-item"><span>Results Screen</span><input id="set-results-screen" type="checkbox"></label>
+        <label class="toggle-item"><span>Force Re-render by default</span><input id="opt-force" type="checkbox"></label>
+      </div>
+    </section>
+
+    <!-- Custom Danser JSON Import/Export -->
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Advanced Danser JSON</h2>
+        <span class="hint">Optional danser .json override</span>
+      </div>
+      <div style="display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px;">
+        <span class="json-status" id="json-status">No custom Danser JSON imported.</span>
+        <div class="btn-row">
+          <button class="btn btn-sm" id="import-json-btn" type="button">Import .json</button>
+          <input id="import-json-input" type="file" accept=".json,application/json" hidden>
+          <button class="btn btn-sm" id="export-json-btn" type="button">Export Config</button>
+          <button class="btn btn-sm btn-danger" id="clear-json-btn" type="button" style="display:none;">Remove Imported JSON</button>
+        </div>
+      </div>
+    </section>
+
+    <div class="footer-bar">
+      <div class="btn-row">
+        <button class="btn btn-danger" id="reset-btn" type="button">Reset to Defaults</button>
+      </div>
+      <div class="btn-row">
+        <a class="btn" href="/render">Go to Render &rarr;</a>
+        <button class="btn btn-primary" id="save-btn" type="button">Save Config</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <script src="/render-shared.js?v=6"></script>
+  <script>
+    (function () {
+      const Shared = window.OsuRenderShared;
+      const toastEl = document.getElementById("toast");
+      let serverConfig = { skins: [], defaults: {}, presets: [], can_use_900p: false };
+      let osuLoggedIn = false;
+      let userChoseResolution = false;
+      let importedRawJson = "";
+
+      let toastTimer = null;
+      function showToast(msg) {
+        toastEl.textContent = msg;
+        toastEl.classList.add("show");
+        clearTimeout(toastTimer);
+        toastTimer = setTimeout(() => toastEl.classList.remove("show"), 2200);
+      }
+
+      const bindRange = (id, lblId, fmt) => {
+        const el = document.getElementById(id);
+        const lbl = document.getElementById(lblId);
+        const upd = () => { lbl.textContent = fmt(el.value); };
+        el.addEventListener("input", upd);
+        return upd;
+      };
+      const updDim = bindRange("set-dim", "val-dim", (v) => v + "%");
+      const updCS = bindRange("set-cursor-scale", "val-cursor-scale", (v) => Number(v).toFixed(2) + "×");
+      const updMusic = bindRange("set-music-vol", "val-music-vol", (v) => v + "%");
+      const updHit = bindRange("set-hit-vol", "val-hit-vol", (v) => v + "%");
+
+      const chkSave = document.getElementById("chk-save-config");
+      const chkSkip = document.getElementById("chk-skip-settings");
+      chkSkip.addEventListener("change", () => { if (chkSkip.checked) chkSave.checked = true; });
+      chkSave.addEventListener("change", () => { if (!chkSave.checked) chkSkip.checked = false; });
+
+      function updateJsonStatus() {
+        const st = document.getElementById("json-status");
+        const clr = document.getElementById("clear-json-btn");
+        if (importedRawJson) {
+          st.textContent = "Custom Danser JSON loaded (" + (importedRawJson.length / 1024).toFixed(1) + " KB). Form values override imported fields.";
+          clr.style.display = "inline-flex";
+        } else {
+          st.textContent = "No custom Danser JSON imported.";
+          clr.style.display = "none";
+        }
+      }
+
+      function updateResWarning() {
+        const sel = document.getElementById("set-resolution");
+        const warn = document.getElementById("warn-res-1080p");
+        if (!sel || !warn) return;
+        warn.classList.toggle("show", osuLoggedIn && sel.value === "1080p");
+      }
+
+      function syncQualityAccess(canUseHdPlus, preferredRes) {
+        osuLoggedIn = Boolean(canUseHdPlus);
+        const sel = document.getElementById("set-resolution");
+        const opt1080 = document.getElementById("opt-res-1080p");
+        const opt900 = document.getElementById("opt-res-900p");
+        const badge = document.getElementById("val-res-badge");
+        const hint = document.getElementById("hint-res");
+        if (!sel || !opt1080 || !opt900 || !badge || !hint) return;
+
+        if (osuLoggedIn) {
+          sel.disabled = false;
+          sel.removeAttribute("aria-disabled");
+          opt1080.disabled = false;
+          opt1080.textContent = "Full HD (1080p 60fps — 1920×1080 · Slower)";
+          opt900.disabled = false;
+          opt900.textContent = "High Quality (900p 60fps — 1600×900)";
+          badge.textContent = "900p / 1080p Unlocked";
+          badge.style.color = "var(--accent)";
+          hint.textContent = "900p60 default · 1080p60 & 720p60 available.";
+          if (userChoseResolution && (preferredRes === "720p" || preferredRes === "900p" || preferredRes === "1080p")) {
+            sel.value = preferredRes;
+          } else if (preferredRes === "1080p" || preferredRes === "900p") {
+            sel.value = preferredRes;
+          } else {
+            sel.value = "900p";
+          }
+        } else {
+          opt1080.disabled = true;
+          opt1080.textContent = "Full HD (1080p 60fps — Log in with osu!)";
+          opt900.disabled = true;
+          opt900.textContent = "High Quality (900p 60fps — Log in with osu!)";
+          sel.value = "720p";
+          sel.disabled = true;
+          sel.setAttribute("aria-disabled", "true");
+          badge.textContent = "720p60";
+          badge.style.color = "var(--text-muted)";
+          hint.textContent = "Log in with osu! above to unlock 900p60 & 1080p60.";
+        }
+        updateResWarning();
+      }
+
+      document.getElementById("set-resolution").addEventListener("change", () => {
+        if (osuLoggedIn) userChoseResolution = true;
+        updateResWarning();
+      });
+
+      function applyToForm(s, opts) {
+        const d = { ...(serverConfig.defaults || {}), ...(s || {}) };
+        const skinSel = document.getElementById("set-skin");
+        if (d.skin && [...skinSel.options].some((o) => o.value === d.skin)) skinSel.value = d.skin;
+        else if (skinSel.options.length) skinSel.selectedIndex = 0;
+        syncQualityAccess(osuLoggedIn, d.resolution);
+        document.getElementById("set-dim").value = d.dim ?? 75; updDim();
+        document.getElementById("set-cursor-scale").value = d.cursor_scale ?? 1.0; updCS();
+        document.getElementById("set-storyboard").checked = Boolean(d.storyboard ?? true);
+        document.getElementById("set-video").checked = Boolean(d.video ?? true);
+        document.getElementById("set-motion-blur").checked = Boolean(d.motion_blur ?? false);
+        document.getElementById("set-cursor-ripples").checked = Boolean(d.cursor_ripples ?? false);
+
+        document.getElementById("set-pp").checked = Boolean(d.pp ?? true);
+        document.getElementById("set-pp-dec").value = String(d.pp_decimals ?? 0);
+        document.getElementById("set-leaderboard").checked = Boolean(d.leaderboard ?? true);
+        document.getElementById("set-key-overlay").checked = Boolean(d.key_overlay ?? true);
+        document.getElementById("set-hit-counter").checked = Boolean(d.hit_counter ?? true);
+        document.getElementById("set-sliderbreaks").checked = Boolean(d.sliderbreaks ?? true);
+        document.getElementById("set-strain-graph").checked = Boolean(d.strain_graph ?? true);
+        document.getElementById("set-strain-outline").checked = Boolean(d.strain_graph_outline ?? true);
+        document.getElementById("set-hit-error").checked = Boolean(d.hit_error_meter ?? true);
+        document.getElementById("set-hit-dec").value = String(d.hit_error_decimals ?? 0);
+        document.getElementById("set-aim-error").checked = Boolean(d.aim_error_meter ?? false);
+        document.getElementById("set-aim-dec").value = String(d.aim_error_decimals ?? 0);
+
+        document.getElementById("set-music-vol").value = d.music_volume ?? 70; updMusic();
+        document.getElementById("set-hit-vol").value = d.hitsound_volume ?? 50; updHit();
+        document.getElementById("set-beatmap-hs").checked = Boolean(d.beatmap_hitsounds ?? true);
+        document.getElementById("set-always-skip").checked = Boolean(d.skip_intro ?? false);
+        document.getElementById("set-results-screen").checked = Boolean(d.results_screen ?? true);
+
+        if (opts) {
+          document.getElementById("opt-pitch").value = opts.pitch || "";
+          document.getElementById("opt-offset").value = opts.offset_ms || "";
+          document.getElementById("opt-force").checked = Boolean(opts.force_rerender);
+        }
+      }
+
+      function readFromForm() {
+        return {
+          settings: {
+            skin: document.getElementById("set-skin").value,
+            resolution: osuLoggedIn ? document.getElementById("set-resolution").value : "720p",
+            dim: Number(document.getElementById("set-dim").value),
+            cursor_scale: Number(document.getElementById("set-cursor-scale").value),
+            storyboard: document.getElementById("set-storyboard").checked,
+            video: document.getElementById("set-video").checked,
+            motion_blur: document.getElementById("set-motion-blur").checked,
+            cursor_ripples: document.getElementById("set-cursor-ripples").checked,
+            pp: document.getElementById("set-pp").checked,
+            pp_decimals: Number(document.getElementById("set-pp-dec").value),
+            leaderboard: document.getElementById("set-leaderboard").checked,
+            key_overlay: document.getElementById("set-key-overlay").checked,
+            hit_counter: document.getElementById("set-hit-counter").checked,
+            sliderbreaks: document.getElementById("set-sliderbreaks").checked,
+            strain_graph: document.getElementById("set-strain-graph").checked,
+            strain_graph_outline: document.getElementById("set-strain-outline").checked,
+            hit_error_meter: document.getElementById("set-hit-error").checked,
+            hit_error_decimals: Number(document.getElementById("set-hit-dec").value),
+            aim_error_meter: document.getElementById("set-aim-error").checked,
+            aim_error_decimals: Number(document.getElementById("set-aim-dec").value),
+            music_volume: Number(document.getElementById("set-music-vol").value),
+            hitsound_volume: Number(document.getElementById("set-hit-vol").value),
+            beatmap_hitsounds: document.getElementById("set-beatmap-hs").checked,
+            skip_intro: document.getElementById("set-always-skip").checked,
+            results_screen: document.getElementById("set-results-screen").checked,
+          },
+          options: {
+            pitch: document.getElementById("opt-pitch").value.trim(),
+            offset_ms: document.getElementById("opt-offset").value.trim(),
+            skip_intro: document.getElementById("set-always-skip").checked,
+            force_rerender: document.getElementById("opt-force").checked,
+          },
+        };
+      }
+
+      function persistNow() {
+        const { settings, options } = readFromForm();
+        Shared.saveStoredConfig({
+          saveConfig: chkSave.checked,
+          skipSettings: chkSkip.checked,
+          userChoseResolution,
+          settings,
+          options,
+          rawSettingsJson: importedRawJson,
+        });
+        showToast(chkSave.checked ? "Config saved!" : "Saved config cleared.");
+      }
+
+      document.getElementById("save-btn").addEventListener("click", persistNow);
+      document.getElementById("reset-btn").addEventListener("click", () => {
+        importedRawJson = "";
+        userChoseResolution = false;
+        Shared.clearStoredConfig();
+        chkSave.checked = true;
+        chkSkip.checked = false;
+        applyToForm(serverConfig.defaults, { pitch: "", offset_ms: "", force_rerender: false });
+        updateJsonStatus();
+        showToast("Reset to server defaults");
+      });
+
+      const importInput = document.getElementById("import-json-input");
+      document.getElementById("import-json-btn").addEventListener("click", () => importInput.click());
+      importInput.addEventListener("change", async () => {
+        const file = importInput.files && importInput.files[0];
+        importInput.value = "";
+        if (!file) return;
+        if (file.size > 256 * 1024) { showToast("JSON file exceeds 256 KB limit"); return; }
+        try {
+          const text = await file.text();
+          const parsed = JSON.parse(text);
+          if (parsed && parsed.settings && typeof parsed.settings === "object") {
+            applyToForm(parsed.settings, parsed.options || null);
+            importedRawJson = typeof parsed.rawSettingsJson === "string" ? parsed.rawSettingsJson : "";
+          } else {
+            importedRawJson = text;
+          }
+          updateJsonStatus();
+          showToast("Imported JSON — click Save Config to persist");
+        } catch (_) {
+          showToast("Invalid JSON file");
+        }
+      });
+
+      document.getElementById("export-json-btn").addEventListener("click", () => {
+        const { settings, options } = readFromForm();
+        const blob = new Blob(
+          [JSON.stringify({ settings, options, rawSettingsJson: importedRawJson }, null, 2)],
+          { type: "application/json" }
+        );
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "replay-render-config.json";
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 4000);
+      });
+
+      document.getElementById("clear-json-btn").addEventListener("click", () => {
+        importedRawJson = "";
+        updateJsonStatus();
+        showToast("Removed imported Danser JSON");
+      });
+
+      function renderAccountCard(st) {
+        const avatar = document.getElementById("acct-avatar");
+        const title = document.getElementById("acct-title");
+        const sub = document.getElementById("acct-sub");
+        const actions = document.getElementById("acct-actions");
+        actions.innerHTML = "";
+
+        if (st && st.logged_in && st.user) {
+          const u = st.user;
+          avatar.src = u.avatar_url || ("https://a.ppy.sh/" + u.osu_user_id);
+          avatar.classList.add("show");
+          title.innerHTML = "";
+          const nameEl = document.createElement("span");
+          nameEl.textContent = u.username + (u.country_code ? " (" + u.country_code + ")" : "");
+          title.appendChild(nameEl);
+          const pill = document.createElement("span");
+          pill.className = "acct-badge";
+          pill.textContent = "Logged in";
+          title.appendChild(pill);
+          if (u.linked_discord) {
+            const dc = document.createElement("span");
+            dc.className = "acct-badge";
+            dc.style.cssText = "border-color:var(--accent-border);background:var(--accent-soft);color:var(--accent);";
+            dc.textContent = "Discord Linked";
+            title.appendChild(dc);
+          }
+
+          sub.textContent =
+            "#" + u.osu_user_id + " · 900p60, 1080p60 & all 7 themes unlocked";
+
+          const storedForRes = Shared.loadStoredConfig();
+          userChoseResolution = Boolean(storedForRes.userChoseResolution);
+          syncQualityAccess(true, storedForRes.settings && storedForRes.settings.resolution);
+
+          const prof = document.createElement("a");
+          prof.className = "btn btn-sm";
+          prof.href = "https://osu.ppy.sh/users/" + encodeURIComponent(String(u.osu_user_id));
+          prof.target = "_blank";
+          prof.rel = "noopener noreferrer";
+          prof.textContent = "osu! Profile ↗";
+          actions.appendChild(prof);
+
+          const out = document.createElement("button");
+          out.type = "button";
+          out.className = "btn btn-sm btn-danger";
+          out.textContent = "Log out";
+          out.addEventListener("click", () => {
+            if (Shared && Shared.logoutOsu) Shared.logoutOsu();
+            else fetch("/api/auth/logout", { method: "POST", credentials: "same-origin" }).then(() => location.reload());
+          });
+          actions.appendChild(out);
+        } else {
+          avatar.classList.remove("show");
+          avatar.removeAttribute("src");
+          title.textContent = "osu! Account";
+          sub.textContent = "Sign in with osu! for 900p60 / 1080p60 renders and extra themes.";
+          syncQualityAccess(false, "720p");
+          const login = document.createElement("a");
+          login.className = "btn btn-osu";
+          login.href = (Shared && Shared.buildOsuLoginUrl)
+            ? Shared.buildOsuLoginUrl("/config")
+            : "/api/auth/osu/login?return_to=%2Fconfig";
+          login.textContent = "Log in with osu!";
+          actions.appendChild(login);
+        }
+        renderThemeGallery();
+      }
+
+      function renderThemeGallery() {
+        const grid = document.getElementById("theme-gallery-grid");
+        const hint = document.getElementById("theme-panel-hint");
+        const foot = document.getElementById("theme-gallery-foot");
+        if (!grid || !Shared || !Shared.getThemes) return;
+
+        const themes = Shared.getThemes();
+        const active = Shared.getActiveTheme ? Shared.getActiveTheme() : themes[0];
+        const st = Shared.getAuthState ? Shared.getAuthState() : { logged_in: false };
+        const loggedIn = Boolean(st && st.logged_in);
+
+        if (hint) {
+          hint.textContent = loggedIn
+            ? "All 7 themes unlocked"
+            : "Nord Dark & Light free · Log in with osu! for 5 more";
+        }
+
+        grid.innerHTML = "";
+        themes.forEach((t) => {
+          const isActive = active && active.id === t.id;
+          const locked = Boolean(t.requiresLogin && !loggedIn);
+
+          const card = document.createElement("button");
+          card.type = "button";
+          card.className = "theme-card" + (isActive ? " active" : "") + (locked ? " locked" : "");
+          card.setAttribute("aria-pressed", isActive ? "true" : "false");
+
+          const prev = document.createElement("div");
+          prev.className = "theme-preview";
+          prev.style.background = t.preview.bg;
+
+          const top = document.createElement("div");
+          top.className = "theme-preview-top";
+          const dots = document.createElement("div");
+          dots.className = "theme-preview-dots";
+          [t.preview.accent, t.preview.accent2, t.preview.text].forEach((col) => {
+            const sp = document.createElement("span");
+            sp.style.background = col;
+            dots.appendChild(sp);
+          });
+          const pill = document.createElement("span");
+          pill.className = "theme-preview-pill";
+          pill.style.background = t.preview.accent;
+          top.appendChild(dots);
+          top.appendChild(pill);
+
+          const bars = document.createElement("div");
+          bars.className = "theme-preview-bars";
+          const mini = document.createElement("div");
+          mini.className = "theme-preview-card";
+          mini.style.background = t.preview.surface;
+          const line = document.createElement("span");
+          line.className = "theme-preview-line";
+          line.style.background = t.preview.text;
+          const chip = document.createElement("span");
+          chip.className = "theme-preview-chip";
+          chip.style.background = t.preview.accent2;
+          mini.appendChild(line);
+          mini.appendChild(chip);
+          bars.appendChild(mini);
+
+          prev.appendChild(top);
+          prev.appendChild(bars);
+          card.appendChild(prev);
+
+          const meta = document.createElement("div");
+          meta.className = "theme-card-meta";
+          const textWrap = document.createElement("div");
+          const nm = document.createElement("div");
+          nm.className = "theme-card-name";
+          nm.textContent = t.name;
+          const desc = document.createElement("div");
+          desc.className = "theme-card-desc";
+          desc.textContent = t.tagline + " · " + (t.mode === "light" ? "Light" : "Dark");
+          textWrap.appendChild(nm);
+          textWrap.appendChild(desc);
+
+          const badge = document.createElement("span");
+          badge.className = "theme-card-badge" + (isActive ? " active" : !t.requiresLogin ? " free" : " osu");
+          if (isActive) {
+            badge.textContent = "Active";
+          } else if (!t.requiresLogin) {
+            badge.textContent = "Free";
+          } else if (locked) {
+            badge.textContent = "🔒 osu!";
+          } else {
+            badge.textContent = "osu!";
+          }
+
+          meta.appendChild(textWrap);
+          meta.appendChild(badge);
+          card.appendChild(meta);
+
+          card.addEventListener("click", () => {
+            if (locked) {
+              showToast("Log in with osu! above to unlock " + t.name);
+              return;
+            }
+            Shared.applyTheme(t.id, { persist: true, syncServer: true, userInitiated: true });
+            showToast("Theme: " + t.name);
+          });
+
+          grid.appendChild(card);
+        });
+
+        if (foot) {
+          foot.innerHTML = "";
+          if (!loggedIn) {
+            const link = document.createElement("a");
+            link.className = "btn btn-sm btn-osu";
+            link.href = Shared.buildOsuLoginUrl ? Shared.buildOsuLoginUrl("/config") : "/api/auth/osu/login?return_to=%2Fconfig";
+            link.textContent = "Log in with osu! to unlock 5 themes";
+            foot.appendChild(link);
+          }
+        }
+      }
+
+      window.addEventListener("osu-theme-change", renderThemeGallery);
+      renderThemeGallery();
+
+      window.addEventListener("osu-auth-change", (e) => renderAccountCard(e.detail));
+      if (Shared && Shared.getAuthState && Shared.getAuthState().loaded) {
+        renderAccountCard(Shared.getAuthState());
+      } else if (Shared && Shared.refreshAuthStatus) {
+        Shared.refreshAuthStatus().then(renderAccountCard);
+      } else {
+        fetch("/api/auth/me", { credentials: "same-origin", cache: "no-store" })
+          .then((r) => r.json())
+          .then((d) => renderAccountCard({ loaded: true, logged_in: Boolean(d && d.ok && d.logged_in && d.user), user: d && d.logged_in ? d.user : null }))
+          .catch(() => renderAccountCard({ loaded: true, logged_in: false, user: null }));
+      }
+
+      fetch("/api/web-render/config", { credentials: "same-origin", cache: "no-store" })
+        .then((r) => r.json())
+        .then((data) => {
+          if (data && data.ok) {
+            serverConfig = data;
+            osuLoggedIn = Boolean(data.can_use_900p) || osuLoggedIn;
+          }
+        })
+        .catch(() => {})
+        .finally(() => {
+          const skinSel = document.getElementById("set-skin");
+          skinSel.innerHTML = "";
+          const defOpt = document.createElement("option");
+          defOpt.value = "";
+          defOpt.textContent = "Server Default";
+          skinSel.appendChild(defOpt);
+          (serverConfig.skins || []).forEach((sk) => {
+            const opt = document.createElement("option");
+            opt.value = sk.value;
+            opt.textContent = sk.label;
+            skinSel.appendChild(opt);
+          });
+
+          const pg = document.getElementById("presets-group");
+          pg.innerHTML = "";
+          (serverConfig.presets || []).forEach((p) => {
+            const btn = document.createElement("button");
+            btn.type = "button";
+            btn.className = "btn btn-sm";
+            btn.textContent = p.label;
+            btn.onclick = () => {
+              const cur = readFromForm().settings;
+              if (p.patch && p.patch.resolution && osuLoggedIn) {
+                userChoseResolution = true;
+              }
+              applyToForm({ ...cur, ...p.patch }, null);
+              showToast("Applied preset: " + p.label);
+            };
+            pg.appendChild(btn);
+          });
+
+          const stored = Shared.loadStoredConfig();
+          userChoseResolution = Boolean(stored.userChoseResolution);
+          chkSave.checked = stored.saveConfig;
+          chkSkip.checked = stored.saveConfig && stored.skipSettings;
+          importedRawJson = stored.rawSettingsJson || "";
+          applyToForm(stored.settings || serverConfig.defaults, stored.options);
+          updateJsonStatus();
+        });
+    })();
+  </script>
+</body>
+</html>

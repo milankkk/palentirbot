@@ -1,19 +1,21 @@
 use crate::core::ai::AiClient;
 use eyre::{Result, WrapErr};
 use flexmap::tokio::TokioMutexMap;
-use rosu_v2::Osu;
-use std::sync::{Arc, Mutex, MutexGuard};
-use tokio::{fs, io::AsyncWriteExt};
+use rosu_v2::{error::OsuError, Osu};
+use std::{
+    sync::{Arc, Mutex, MutexGuard, RwLock},
+    time::{Duration, Instant},
+};
+use tokio::fs;
 use twilight_gateway::{MessageSender, Shard};
 use twilight_http::{client::InteractionClient, Client};
 use twilight_model::{
     channel::message::AllowedMentions,
     id::{
-        marker::{ApplicationMarker, MessageMarker},
+        marker::{ApplicationMarker, MessageMarker, UserMarker},
         Id,
     },
 };
-use twilight_standby::Standby;
 
 use crate::{
     core::BotConfig, custom_client::CustomClient, database::Database, pagination::Pagination,
@@ -31,15 +33,38 @@ pub struct Context {
     pub cache: Cache,
     pub shard_senders: Vec<MessageSender>,
     pub http: Arc<Client>,
-    pub paginations: Arc<TokioMutexMap<Id<MessageMarker>, Pagination, IntBuildHasher>>,
-    pub standby: Standby,
-    pub stats: Arc<BotStats>,
+    pub paginations: TokioMutexMap<Id<MessageMarker>, Pagination, IntBuildHasher>,
+    pub stats: BotStats,
     pub replay_queue: ReplayQueue,
     root_settings: RootSettings,
-    skin_list: Arc<Mutex<SkinList>>,
+    skin_list: Mutex<SkinList>,
     application_id: Id<ApplicationMarker>,
     clients: Clients,
+    osu_refresh_lock: tokio::sync::Mutex<Option<Instant>>,
+    gpu_lock: tokio::sync::Mutex<()>,
     ai: AiClient,
+}
+
+/// Execute an async osu! API call against `ctx.osu()`, refreshing the OAuth client once on 401/NoToken.
+#[macro_export]
+macro_rules! osu_call {
+    ($ctx:expr, |$osu:ident| $req:expr) => {{
+        let $osu = $ctx.osu();
+        match $req.await {
+            Ok(val) => Ok(val),
+            Err(err) => {
+                if $crate::core::Context::is_osu_auth_error(&err) {
+                    if let Ok($osu) = $ctx.refresh_osu_client().await {
+                        $req.await
+                    } else {
+                        Err(err)
+                    }
+                } else {
+                    Err(err)
+                }
+            }
+        }
+    }};
 }
 
 impl Context {
@@ -47,8 +72,62 @@ impl Context {
         self.http.interaction(self.application_id)
     }
 
-    pub fn osu(&self) -> &Osu {
-        &self.clients.osu
+    pub fn bot_user_id(&self) -> Id<UserMarker> {
+        self.application_id.cast()
+    }
+
+    /// Build the Discord OAuth2 bot + application-commands invite URL.
+    pub fn invite_url(&self) -> String {
+        format!(
+            "https://discord.com/oauth2/authorize?client_id={}&permissions=274878286848&integration_type=0&scope=bot+applications.commands",
+            self.bot_user_id()
+        )
+    }
+
+    pub fn osu(&self) -> Arc<Osu> {
+        Arc::clone(
+            &self
+                .clients
+                .osu
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        )
+    }
+
+    pub fn is_osu_auth_error(err: &OsuError) -> bool {
+        matches!(err, OsuError::NoToken)
+            || matches!(err, OsuError::Response { status, .. } if status.as_u16() == 401)
+    }
+
+    pub async fn refresh_osu_client(&self) -> Result<Arc<Osu>> {
+        let mut guard = self.osu_refresh_lock.lock().await;
+        if let Some(last) = *guard {
+            if last.elapsed() < Duration::from_secs(10) {
+                return Ok(self.osu());
+            }
+        }
+
+        let config = BotConfig::get();
+        let fresh = Arc::new(
+            Osu::new(
+                config.tokens.osu_client_id,
+                &config.tokens.osu_client_secret,
+            )
+            .await
+            .wrap_err("failed to re-authenticate osu! API client")?,
+        );
+        {
+            let mut slot = self
+                .clients
+                .osu
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            *slot = Arc::clone(&fresh);
+        }
+        *guard = Some(Instant::now());
+        info!("Re-authenticated osu! API client");
+
+        Ok(fresh)
     }
 
     pub fn psql(&self) -> &Database {
@@ -60,11 +139,17 @@ impl Context {
     }
 
     pub fn skin_list(&self) -> MutexGuard<'_, SkinList> {
-        self.skin_list.lock().unwrap()
+        self.skin_list
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     pub fn ai(&self) -> &AiClient {
         &self.ai
+    }
+
+    pub fn gpu_lock(&self) -> &tokio::sync::Mutex<()> {
+        &self.gpu_lock
     }
 
     pub async fn new() -> Result<(Self, Vec<Shard>)> {
@@ -88,6 +173,7 @@ impl Context {
 
         let http = Client::builder()
             .token(discord_token.to_owned())
+            .timeout(Duration::from_secs(30))
             .remember_invalid_token(false)
             .default_allowed_mentions(mentions)
             .build();
@@ -104,6 +190,7 @@ impl Context {
 
         let psql =
             Database::new(&config.database_url).wrap_err("failed to create database client")?;
+        psql.run_migrations().await;
 
         let osu_client_id = config.tokens.osu_client_id;
         let osu_client_secret = &config.tokens.osu_client_secret;
@@ -111,11 +198,11 @@ impl Context {
 
         let custom = CustomClient::new();
 
-        let (cache, _resume_data) = Cache::new().await;
-        let stats = Arc::new(BotStats::new());
+        let cache = Cache::new();
+        let stats = BotStats::new();
 
         let clients = Clients::new(osu, custom, psql);
-        let (shards, shard_senders) = build_shards(discord_token, Arc::clone(&http)).await?;
+        let (shards, shard_senders) = build_shards(discord_token, &http).await?;
 
         let paginations = TokioMutexMap::with_shard_amount_and_hasher(16, IntBuildHasher);
 
@@ -123,14 +210,15 @@ impl Context {
             cache,
             http,
             clients,
+            osu_refresh_lock: tokio::sync::Mutex::new(None),
+            gpu_lock: tokio::sync::Mutex::new(()),
             shard_senders,
             application_id,
             root_settings,
-            paginations: Arc::new(paginations),
-            standby: Standby::new(),
+            paginations,
             stats,
-            replay_queue: ReplayQueue::new(),
-            skin_list: Arc::new(Mutex::default()),
+            replay_queue: ReplayQueue::load().await,
+            skin_list: Mutex::default(),
             ai: AiClient::new().await,
         };
 
@@ -140,55 +228,58 @@ impl Context {
 
 struct Clients {
     custom: CustomClient,
-    osu: Osu,
+    osu: RwLock<Arc<Osu>>,
     psql: Database,
 }
 
 impl Clients {
     fn new(osu: Osu, custom: CustomClient, psql: Database) -> Self {
-        Self { osu, custom, psql }
+        Self {
+            osu: RwLock::new(Arc::new(osu)),
+            custom,
+            psql,
+        }
     }
 }
 
 async fn create_missing_folders_and_files(config: &BotConfig) -> Result<()> {
-    fs::create_dir_all(config.paths.downloads())
-        .await
-        .context("failed to create Downloads folder")?;
+    for (name, path) in [
+        ("Downloads", config.paths.downloads()),
+        ("Replays", config.paths.replays()),
+        ("Skins", config.paths.skins()),
+        ("Songs", config.paths.songs()),
+    ] {
+        fs::create_dir_all(&path)
+            .await
+            .with_context(|| format!("failed to create {name} folder"))?;
+    }
 
-    fs::create_dir_all(config.paths.replays())
-        .await
-        .context("failed to create Replays folder")?;
-
-    fs::create_dir_all(config.paths.skins())
-        .await
-        .context("failed to create Skins folder")?;
-
-    fs::create_dir_all(config.paths.songs())
-        .await
-        .context("failed to create Songs folder")?;
-
-    let danser_entry = config
-        .paths
-        .danser()
-        .read_dir()
-        .ok()
-        .and_then(|mut dir| dir.next());
+    let danser_entry = match fs::read_dir(config.paths.danser()).await {
+        Ok(mut dir) => dir.next_entry().await.ok().flatten(),
+        Err(_) => None,
+    };
 
     ensure!(
         danser_entry.is_some(),
         "danser not found! please download from https://github.com/Wieku/danser-go/releases/"
     );
 
+    let danser_bin = config.paths.danser().join("danser");
+    if tokio::fs::metadata(&danser_bin)
+        .await
+        .is_ok_and(|m| m.is_dir())
+    {
+        warn!(
+            path = ?danser_bin,
+            "`DANSER_PATH/danser` is a directory instead of the danser executable binary; replay rendering will fail until danser files are placed directly inside DANSER_PATH"
+        );
+    }
+
     let server_settings = config.paths.server_settings();
-
-    if !server_settings.exists() {
-        let mut file = fs::File::create(server_settings)
+    if !tokio::fs::try_exists(&server_settings).await.unwrap_or(false) {
+        crate::util::fs::write_bytes_atomic(&server_settings, b"{\"Servers\":[]}")
             .await
-            .context("failed to create server settings file")?;
-
-        file.write_all(b"{\"Servers\":[]}")
-            .await
-            .context("failed writing to server settings file")?;
+            .context("failed creating initial server settings file")?;
     }
 
     Ok(())

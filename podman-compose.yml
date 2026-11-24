@@ -13,7 +13,7 @@ services:
       postgres:
         condition: service_healthy
       fileserver:
-        condition: service_started
+        condition: service_healthy
       ollama:
         condition: service_started
     env_file:
@@ -23,8 +23,8 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER:-palentirbot}:${POSTGRES_PASSWORD:-palentirbot_pass}@postgres:5432/${POSTGRES_DB:-palentirbot}
       # Linked automatically with fileserver service
       UPLOAD_URL: http://fileserver:${UPLOAD_PORT:-5555}/upload
-      UPLOAD_SECRET: ${UPLOAD_SECRET:-palentir_replay_secret_key}
-      UPLOAD_MBPS: ${UPLOAD_MBPS:-auto}
+      PUBLIC_REPLAY_BASE_URL: ${PUBLIC_REPLAY_BASE_URL:-http://localhost:${CADDY_HTTP_PORT:-8085}}
+      UPLOAD_SECRET: ${UPLOAD_SECRET:?Set UPLOAD_SECRET in .env}
       OLLAMA_URL: http://ollama:11434
       DANSER_PATH: /app/data
       FOLDERS_PATH: /app/data
@@ -77,13 +77,13 @@ services:
     environment:
       UPLOAD_DIR: /uploads
       # Linked automatically with bot service
-      UPLOAD_SECRET: ${UPLOAD_SECRET:-palentir_replay_secret_key}
+      UPLOAD_SECRET: ${UPLOAD_SECRET:?Set UPLOAD_SECRET in .env}
       UPLOAD_PORT: ${UPLOAD_PORT:-5555}
       BASE_URL: ${PUBLIC_REPLAY_BASE_URL:-http://localhost:${CADDY_HTTP_PORT:-8085}}
     volumes:
       - uploaded_replays:/uploads:z
     healthcheck:
-      test: ["CMD-SHELL", "python -c 'import urllib.request; urllib.request.urlopen(\"http://127.0.0.1:5555/\")' || exit 0"]
+      test: ["CMD", "python", "-c", "import os, urllib.request; urllib.request.urlopen(f'http://127.0.0.1:{os.environ.get(\"UPLOAD_PORT\", 5555)}/health', timeout=3)"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -106,6 +106,7 @@ services:
     volumes:
       - uploaded_replays:/srv/replays:ro,z
       - ./Caddyfile:/etc/caddy/Caddyfile:ro,z
+      - ./fileserver/replays:/etc/caddy/replays:ro,z
       - caddy_data:/data:Z
       - caddy_config:/config:Z
 

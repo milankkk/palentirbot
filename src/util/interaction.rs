@@ -5,7 +5,7 @@ use twilight_model::{
         modal::ModalInteractionData,
     },
     channel::Message,
-    guild::{PartialMember, Permissions},
+    guild::PartialMember,
     id::{
         marker::{ChannelMarker, GuildMarker, InteractionMarker},
         Id,
@@ -17,8 +17,6 @@ use super::Authored;
 
 #[derive(Debug)]
 pub struct InteractionCommand {
-    #[allow(dead_code)]
-    pub permissions: Option<Permissions>,
     pub channel_id: Id<ChannelMarker>,
     pub data: Box<CommandData>,
     pub guild_id: Option<Id<GuildMarker>>,
@@ -30,8 +28,6 @@ pub struct InteractionCommand {
 
 #[derive(Debug)]
 pub struct InteractionComponent {
-    #[allow(dead_code)]
-    pub permissions: Option<Permissions>,
     pub channel_id: Id<ChannelMarker>,
     pub data: MessageComponentInteractionData,
     pub guild_id: Option<Id<GuildMarker>>,
@@ -44,8 +40,6 @@ pub struct InteractionComponent {
 
 #[derive(Debug)]
 pub struct InteractionModal {
-    #[allow(dead_code)]
-    pub permissions: Option<Permissions>,
     pub channel_id: Id<ChannelMarker>,
     pub data: ModalInteractionData,
     pub guild_id: Option<Id<GuildMarker>>,

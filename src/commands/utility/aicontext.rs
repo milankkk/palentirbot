@@ -4,21 +4,18 @@ use command_macros::SlashCommand;
 use eyre::Result;
 use twilight_interactions::command::{CommandModel, CreateCommand};
 use twilight_model::{
-    channel::{
-        message::{
-            embed::{Embed, EmbedField},
-            Message,
-        },
-    },
+    channel::message::embed::{Embed, EmbedField},
     id::{marker::ChannelMarker, Id},
 };
 
+use super::ask::{estimate_tokens, HISTORY_MESSAGE_CHAR_LIMIT};
 use crate::{
     core::Context,
     util::{
         builder::{EmbedBuilder, MessageBuilder},
         interaction::InteractionCommand,
-        InteractionCommandExt,
+        numbers::with_comma_int,
+        Authored, InteractionCommandExt,
     },
 };
 
@@ -29,48 +26,82 @@ use crate::{
 pub struct AiContext;
 
 async fn slash_aicontext(ctx: Arc<Context>, command: InteractionCommand) -> Result<()> {
+    let user_id = command.user_id()?;
+    if let Err(reason) = super::ask::check_ai_access(&ctx, user_id, command.guild_id).await {
+        command.error_callback(&ctx, reason, true).await?;
+        return Ok(());
+    }
+
+    command.defer(&ctx, true).await?;
     let embed = create_context_embed(&ctx, command.channel_id).await;
     let builder = MessageBuilder::new().embed(embed);
-    command.callback(&ctx, builder, true).await?;
+    command.update(&ctx, &builder).await?;
 
     Ok(())
 }
 
 /// Build the rich context breakdown embed for both slash and prefix commands.
 pub async fn create_context_embed(ctx: &Context, channel_id: Id<ChannelMarker>) -> Embed {
-    let bot_id = ctx
-        .cache
-        .current_user(|user| user.id)
-        .expect("missing CurrentUser in cache");
+    let bot_id = ctx.bot_user_id();
 
     // 1. System prompt metrics
-    let prompt = ctx.ai().get_prompt().await;
-    let prompt_chars = prompt.chars().count();
-    let prompt_bytes = prompt.len();
-    // In English & slang text with Qwen tokenizer, 1 token is ~3.8 characters
-    let prompt_tokens = (prompt_chars as f64 / 3.8).round() as usize;
+    let (prompt_chars, prompt_bytes) = ctx.ai().prompt_metrics().await;
+    let prompt_tokens = estimate_tokens(prompt_chars);
 
-    // 2. Channel conversation history metrics
-    let history = fetch_channel_history(ctx, channel_id).await.unwrap_or_default();
-    let total_messages = history.len();
+    let guild_id = ctx.cache.channel(channel_id, |c| c.guild_id).ok().flatten();
+    let guild_prefix = ctx.guild_prefix(guild_id);
+
+    // 2. Channel conversation history metrics (filtered using the same rules as ask.rs)
+    let history = tokio::time::timeout(
+        std::time::Duration::from_secs(4),
+        super::ask::get_history(ctx, channel_id, None),
+    )
+    .await
+    .ok()
+    .and_then(Result::ok)
+    .unwrap_or_default();
+    let slash_turns = ctx
+        .ai()
+        .slash_turns_for(history.iter().map(|m| m.id))
+        .await;
     let mut user_messages = 0;
     let mut bot_messages = 0;
     let mut history_chars = 0;
 
     for msg in &history {
+        let formatted = super::ask::format_message_text_and_embeds(msg);
+        let trimmed = formatted.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if msg.author.bot && msg.author.id != bot_id {
+            continue;
+        }
         if msg.author.id == bot_id {
+            if super::ask::is_transient_status(trimmed) {
+                continue;
+            }
             bot_messages += 1;
+            if let Some(slash_prompt) = slash_turns.get(&msg.id) {
+                user_messages += 1;
+                history_chars += slash_prompt.chars().count().min(HISTORY_MESSAGE_CHAR_LIMIT);
+            }
         } else {
+            if super::ask::is_non_ai_command_with_prefix(trimmed, Some(guild_prefix.as_ref())) {
+                continue;
+            }
             user_messages += 1;
         }
-        history_chars += msg.content.chars().count();
+        history_chars += trimmed.chars().count().min(HISTORY_MESSAGE_CHAR_LIMIT);
     }
+    let total_messages = user_messages + bot_messages;
 
-    let history_tokens = (history_chars as f64 / 3.8).round() as usize;
+    let history_tokens = estimate_tokens(history_chars);
 
     // 3. Overall window metrics
+    let cfg = ctx.ai().runtime_config();
     let total_used_tokens = prompt_tokens + history_tokens;
-    let max_window = (ctx.ai().num_ctx() as usize).max(1);
+    let max_window = (cfg.num_ctx as usize).max(1);
     let free_tokens = max_window.saturating_sub(total_used_tokens);
     let used_percent = ((total_used_tokens as f64 / max_window as f64) * 100.0).clamp(0.0, 100.0);
     let free_percent = (100.0 - used_percent).max(0.0);
@@ -88,8 +119,6 @@ pub async fn create_context_embed(ctx: &Context, channel_id: Id<ChannelMarker>) 
         format!("{queue_len} active/queued")
     };
 
-    let model_name = ctx.ai().model_name();
-
     let mut fields = Vec::with_capacity(5);
 
     fields.push(EmbedField {
@@ -97,9 +126,9 @@ pub async fn create_context_embed(ctx: &Context, channel_id: Id<ChannelMarker>) 
         name: "📋 System Prompt (`prompt.txt`)".to_string(),
         value: format!(
             "**~{}** tokens\n`{:.1} KB` • `{} chars`",
-            format_num(prompt_tokens),
+            with_comma_int(prompt_tokens),
             prompt_bytes as f64 / 1024.0,
-            format_num(prompt_chars)
+            with_comma_int(prompt_chars)
         ),
     });
 
@@ -108,7 +137,7 @@ pub async fn create_context_embed(ctx: &Context, channel_id: Id<ChannelMarker>) 
         name: "💬 Chat History".to_string(),
         value: format!(
             "**~{}** tokens\n`{total_messages}` msgs ({user_messages} user, {bot_messages} bot)",
-            format_num(history_tokens),
+            with_comma_int(history_tokens),
         ),
     });
 
@@ -117,7 +146,7 @@ pub async fn create_context_embed(ctx: &Context, channel_id: Id<ChannelMarker>) 
         name: "🆓 Free Headroom".to_string(),
         value: format!(
             "**~{}** tokens\n`{free_percent:.1}%` available",
-            format_num(free_tokens),
+            with_comma_int(free_tokens),
         ),
     });
 
@@ -136,33 +165,38 @@ pub async fn create_context_embed(ctx: &Context, channel_id: Id<ChannelMarker>) 
             name: "⚡ Last Generation (Engine Verified)".to_string(),
             value: format!(
                 "**Evaluated:** `{}` prompt tokens • **Generated:** `{}` tokens in `{:.2}s` (`{speed}`)",
-                format_num(stats.prompt_tokens),
-                format_num(stats.response_tokens),
+                with_comma_int(stats.prompt_tokens),
+                with_comma_int(stats.response_tokens),
                 stats.eval_duration_ms as f64 / 1000.0,
             ),
         });
     }
 
-    let num_predict = ctx.ai().num_predict();
+    let num_predict_display = if cfg.num_predict < 0 {
+        "unlimited".to_owned()
+    } else {
+        with_comma_int(cfg.num_predict as usize).to_string()
+    };
 
     fields.push(EmbedField {
         inline: false,
         name: "🧠 Model & Memory Allocation".to_string(),
         value: format!(
-            "• **Model:** `{model_name}`\n\
+            "• **Model:** `{}`\n\
              • **Total Context:** `{}` tokens (max `{}` predicted)\n\
-             • **Memory:** GPU VRAM (weights & active cache) + System RAM (context overflow)\n\
+             • **Memory:** Managed by Ollama runtime\n\
              • **Queue Status:** {queue_status}",
-            format_num(max_window),
-            format_num(num_predict as usize)
+            cfg.model,
+            with_comma_int(max_window),
+            num_predict_display
         ),
     });
 
     let description = format!(
         "**Context Window Usage:**\n\
          `{progress_bar}` • **{} / {}** tokens",
-        format_num(total_used_tokens),
-        format_num(max_window)
+        with_comma_int(total_used_tokens),
+        with_comma_int(max_window)
     );
 
     EmbedBuilder::new()
@@ -171,19 +205,6 @@ pub async fn create_context_embed(ctx: &Context, channel_id: Id<ChannelMarker>) 
         .description(description)
         .fields(fields)
         .build()
-}
-
-fn format_num(n: usize) -> String {
-    let s = n.to_string();
-    let mut result = String::new();
-    let chars: Vec<char> = s.chars().collect();
-    for (i, c) in chars.iter().enumerate() {
-        if i > 0 && (chars.len() - i) % 3 == 0 {
-            result.push(',');
-        }
-        result.push(*c);
-    }
-    result
 }
 
 fn make_progress_bar(used: usize, total: usize, width: usize) -> String {
@@ -196,20 +217,4 @@ fn make_progress_bar(used: usize, total: usize, width: usize) -> String {
     let empty = width.saturating_sub(filled);
     let percent = ratio * 100.0;
     format!("[{}{}] {:.1}%", "█".repeat(filled), "░".repeat(empty), percent)
-}
-
-async fn fetch_channel_history(ctx: &Context, channel_id: Id<ChannelMarker>) -> Result<Vec<Message>> {
-    let limit = std::env::var("AI_HISTORY_MESSAGES")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(25);
-    let limit = limit.clamp(1, 50);
-    let response = ctx.http.channel_messages(channel_id).limit(limit).await?;
-    let mut messages: Vec<Message> = response.model().await?;
-
-    if let Some(cutoff) = ctx.ai().get_cutoff(channel_id).await {
-        messages.retain(|msg| msg.timestamp.as_secs() > cutoff);
-    }
-
-    Ok(messages)
 }

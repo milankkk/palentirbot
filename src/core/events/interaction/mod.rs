@@ -3,13 +3,21 @@ use std::sync::Arc;
 use twilight_model::application::interaction::{Interaction, InteractionData, InteractionType};
 
 use crate::{
-    core::Context,
-    util::interaction::{InteractionCommand, InteractionComponent, InteractionModal},
+    core::{events::EventLocation, Context},
+    util::{
+        interaction::{InteractionCommand, InteractionComponent, InteractionModal},
+        Authored,
+    },
 };
 
 use self::{
     autocomplete::handle_autocomplete, command::handle_command, component::handle_component,
     modal::handle_modal,
+};
+pub(crate) use self::component::{
+    clear_interaction_component_expiry, clear_pp_select, last_pp_select_activity,
+    spawn_interaction_component_expiry, touch_interaction_component_expiry, wait_idle_expiry,
+    COMPONENT_IDLE_TIMEOUT_SECS,
 };
 
 mod autocomplete;
@@ -17,9 +25,22 @@ mod command;
 mod component;
 mod modal;
 
+pub(super) fn log_interaction(
+    ctx: &Context,
+    authored: &impl Authored,
+    verb: &str,
+    name: &str,
+) {
+    let username = authored
+        .user()
+        .map(|u| u.name.as_str())
+        .unwrap_or("<unknown user>");
+    let location = EventLocation::new(ctx, authored);
+    info!("[{location}] {username} {verb} `{name}`");
+}
+
 pub async fn handle_interaction(ctx: Arc<Context>, interaction: Interaction) {
     let Interaction {
-        app_permissions: permissions,
         channel,
         #[allow(deprecated)]
         channel_id,
@@ -42,9 +63,8 @@ pub async fn handle_interaction(ctx: Arc<Context>, interaction: Interaction) {
     match data {
         Some(InteractionData::ApplicationCommand(data)) => {
             let cmd = InteractionCommand {
-                permissions,
                 channel_id,
-                data: Box::new(*data),
+                data,
                 guild_id,
                 id,
                 member,
@@ -67,7 +87,6 @@ pub async fn handle_interaction(ctx: Arc<Context>, interaction: Interaction) {
             };
 
             let component = InteractionComponent {
-                permissions,
                 channel_id,
                 data: *data,
                 guild_id,
@@ -82,7 +101,6 @@ pub async fn handle_interaction(ctx: Arc<Context>, interaction: Interaction) {
         }
         Some(InteractionData::ModalSubmit(data)) => {
             let modal = InteractionModal {
-                permissions,
                 channel_id,
                 data,
                 guild_id,

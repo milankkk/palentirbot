@@ -1,41 +1,43 @@
 use std::fmt;
 
-/// Round with two decimal positions
-#[allow(dead_code)]
-pub fn round(n: f32) -> f32 {
-    (100.0 * n).round() / 100.0
+/// Round `n` to two decimal places.
+pub fn round_2_decimals(n: f64) -> f64 {
+    (n * 100.0).round() / 100.0
 }
 
 pub fn with_comma_int<T: Int>(n: T) -> FormatInt {
-    FormatInt(n.into_i64())
+    FormatInt(n.into_i128())
 }
 
-pub struct FormatInt(i64);
+pub struct FormatInt(i128);
 
 impl fmt::Display for FormatInt {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.0 == 0 {
+            return f.write_str("0");
+        }
+
         let mut n = if self.0 < 0 {
             f.write_str("-")?;
 
-            -self.0
+            self.0.unsigned_abs()
         } else {
-            self.0
+            self.0 as u128
         };
 
-        let mut rev = 0;
-        let mut triples = 0;
+        let mut chunks = [0_u16; 14];
+        let mut count = 0_usize;
 
         while n > 0 {
-            rev = rev * 1000 + n % 1000;
+            chunks[count] = (n % 1000) as u16;
             n /= 1000;
-            triples += 1;
+            count += 1;
         }
 
-        write!(f, "{}", rev % 1000)?;
+        write!(f, "{}", chunks[count - 1])?;
 
-        for _ in 0..triples - 1 {
-            rev /= 1000;
-            write!(f, ",{:0>3}", rev % 1000)?;
+        for &chunk in chunks[..count - 1].iter().rev() {
+            write!(f, ",{chunk:0>3}")?;
         }
 
         Ok(())
@@ -43,14 +45,14 @@ impl fmt::Display for FormatInt {
 }
 
 pub trait Int {
-    fn into_i64(self) -> i64;
+    fn into_i128(self) -> i128;
 }
 
 macro_rules! into_int {
     ($ty:ty) => {
         impl Int for $ty {
-            fn into_i64(self) -> i64 {
-                self as i64
+            fn into_i128(self) -> i128 {
+                self as i128
             }
         }
     };
@@ -69,7 +71,11 @@ into_int!(i64);
 into_int!(isize);
 
 pub fn last_multiple(per_page: usize, total: usize) -> usize {
-    if per_page <= total && total % per_page == 0 {
+    if per_page == 0 || total == 0 {
+        return 0;
+    }
+
+    if per_page <= total && total.is_multiple_of(per_page) {
         total - per_page
     } else {
         total - total % per_page
@@ -81,20 +87,40 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_round() {
+    fn test_round_2_decimals() {
         let v1 = 3.1615;
         let v2 = 3.16;
 
-        if round(v1) - v2 > std::f32::EPSILON {
-            panic!("[test_round] round({v1})={} != {v2}", round(v1));
+        if (round_2_decimals(v1) - v2).abs() > f64::EPSILON {
+            panic!(
+                "[test_round_2_decimals] round_2_decimals({v1})={} != {v2}",
+                round_2_decimals(v1)
+            );
         }
     }
 
     #[test]
     fn test_with_comma_int() {
+        assert_eq!(with_comma_int(0_u64).to_string(), "0".to_owned());
+        assert_eq!(with_comma_int(-1000_i64).to_string(), "-1,000".to_owned());
+        assert_eq!(
+            with_comma_int(i64::MIN).to_string(),
+            "-9,223,372,036,854,775,808".to_owned()
+        );
+        assert_eq!(
+            with_comma_int(9_000_000_000_000_000_999_i64).to_string(),
+            "9,000,000,000,000,000,999".to_owned()
+        );
+        assert_eq!(
+            with_comma_int(u64::MAX).to_string(),
+            "18,446,744,073,709,551,615".to_owned()
+        );
         assert_eq!(
             with_comma_int(31_415_926_u32).to_string(),
             "31,415,926".to_owned()
         );
+        assert_eq!(last_multiple(0, 10), 0);
+        assert_eq!(last_multiple(10, 0), 0);
+        assert_eq!(last_multiple(10, 20), 10);
     }
 }

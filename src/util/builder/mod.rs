@@ -1,9 +1,6 @@
-pub use self::{
-    embed::EmbedBuilder, footer::FooterBuilder, message::MessageBuilder, modal::ModalBuilder,
-};
+pub use self::{component::*, embed::EmbedBuilder, message::MessageBuilder, modal::ModalBuilder};
 
-mod author;
+mod component;
 mod embed;
-mod footer;
 mod message;
 mod modal;

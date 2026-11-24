@@ -1,36 +1,72 @@
 use eyre::{Context, Report, Result};
 use std::{
-    ffi::OsString,
     fs,
-    io::Cursor,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
 };
-use zip::ZipArchive;
 
 use crate::{
-    core::{BotConfig, Context as TwilightContext},
+    core::{
+        ai::search::validate_and_resolve_url, replay_queue::process::extract_zip_safely,
+        BotConfig, Context as TwilightContext,
+    },
+    custom_client::MAX_SKIN_BYTES,
     util::{
         builder::MessageBuilder,
         constants::GENERAL_ISSUE,
         interaction::InteractionCommand,
-        Authored, InteractionCommandExt,
+        str::percent_decode_utf8,
+        InteractionCommandExt,
     },
 };
 
 use super::SkinAdd;
 
-fn is_private_or_local_ip(ip: std::net::IpAddr) -> bool {
-    match ip {
-        std::net::IpAddr::V4(v4) => {
-            v4.is_loopback()
-                || v4.is_private()
-                || v4.is_link_local()
-                || v4.is_unspecified()
-                || v4.is_broadcast()
-                || v4.is_documentation()
-        }
-        std::net::IpAddr::V6(v6) => v6.is_loopback() || v6.is_unspecified(),
+static FLATTEN_SEQ: AtomicU64 = AtomicU64::new(1);
+
+pub(crate) fn sanitize_skin_dir_name(raw: &str) -> String {
+    let decoded = percent_decode_utf8(raw.trim());
+    let lower = decoded.to_ascii_lowercase();
+    let stripped = if lower.ends_with(".osk") || lower.ends_with(".zip") {
+        &decoded[..decoded.len() - 4]
+    } else {
+        decoded.as_str()
+    };
+
+    let mut cleaned: String = stripped
+        .chars()
+        .map(|c| {
+            if c.is_control()
+                || matches!(
+                    c,
+                    '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '\0'
+                )
+            {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+
+    while cleaned.contains("..") {
+        cleaned = cleaned.replace("..", "_");
+    }
+
+    let trimmed = cleaned.trim_matches(|c: char| c.is_whitespace() || c == '.' || c == '_');
+    if trimmed.is_empty() || trimmed == "." || trimmed == ".." {
+        return "skin".to_owned();
+    }
+
+    let clamped: String = trimmed.chars().take(80).collect();
+    let final_trimmed = clamped.trim_matches(|c: char| c.is_whitespace() || c == '.' || c == '_');
+    if final_trimmed.is_empty() || final_trimmed == "." || final_trimmed == ".." {
+        "skin".to_owned()
+    } else {
+        final_trimmed.to_owned()
     }
 }
 
@@ -39,20 +75,7 @@ pub async fn add(
     command: InteractionCommand,
     args: SkinAdd,
 ) -> Result<()> {
-    let config = BotConfig::get();
-
-    let user = match command.user() {
-        Ok(user) => user,
-        Err(err) => {
-            command.error_callback(&ctx, GENERAL_ISSUE, false).await?;
-            return Err(err.wrap_err("failed to get user from command"));
-        }
-    };
-
-    if !config.owners.contains(&user.id) {
-        command
-            .error_callback(&ctx, crate::util::constants::NOT_OWNER, true)
-            .await?;
+    if !super::ensure_owner(&ctx, &command).await? {
         return Ok(());
     }
 
@@ -60,21 +83,27 @@ pub async fn add(
 
     let (bytes, filename) = match (skin, url) {
         (Some(skin), None) => {
-            let filename = match skin.filename.rsplit_once('.') {
-                Some((filename, "osk")) => filename.to_string(),
-                _ => {
-                    let content = "The attachment must be a .osk file!";
-                    command.error_callback(&ctx, content, true).await?;
-                    return Ok(());
-                }
-            };
-            let mut filename = crate::commands::danser::render_score::sanitize_filename(&filename);
-            if filename.is_empty() {
-                filename = "skin".to_string();
+            if !matches!(skin.filename.rsplit('.').next(), Some(ext) if ext.eq_ignore_ascii_case("osk")) {
+                let content = "The attachment must be a .osk file!";
+                command.error_callback(&ctx, content, true).await?;
+                return Ok(());
             }
+            if skin.size == 0 || skin.size > MAX_SKIN_BYTES as u64 {
+                let content = format!(
+                    "The `.osk` attachment must be between 1 byte and {} MB.",
+                    MAX_SKIN_BYTES / (1024 * 1024)
+                );
+                command.error_callback(&ctx, content, true).await?;
+                return Ok(());
+            }
+            let filename = sanitize_skin_dir_name(&skin.filename);
             let builder = MessageBuilder::new().embed("Downloading...");
             command.callback(&ctx, builder, false).await?;
-            let bytes = match ctx.client().get_discord_attachment(&skin).await {
+            let bytes = match ctx
+                .client()
+                .get_discord_attachment_limited(&skin, MAX_SKIN_BYTES)
+                .await
+            {
                 Ok(bytes) => bytes,
                 Err(err) => {
                     let _ = command.error(&ctx, "Failed to download attachment").await;
@@ -84,77 +113,42 @@ pub async fn add(
             (bytes, filename)
         }
         (None, Some(url)) => {
-            if !url.ends_with(".osk") {
-                command
-                    .error_callback(&ctx, "The URL must point to a .osk file!", true)
-                    .await?;
-                return Ok(());
-            }
+            command.defer(&ctx, false).await?;
 
-            let parsed = match reqwest::Url::parse(&url) {
-                Ok(u) => u,
-                Err(_) => {
-                    command.error_callback(&ctx, "Invalid URL!", true).await?;
+            let target = match validate_and_resolve_url(&url).await {
+                Ok(t) => t,
+                Err(err) => {
+                    command
+                        .error(&ctx, format!("Invalid or disallowed URL: {err}"))
+                        .await?;
                     return Ok(());
                 }
             };
 
-            if parsed.scheme() != "http" && parsed.scheme() != "https" {
+            if !target.url.path().to_ascii_lowercase().ends_with(".osk") {
                 command
-                    .error_callback(&ctx, "URL must use http or https scheme!", true)
+                    .error(&ctx, "The URL must point to a .osk file!")
                     .await?;
                 return Ok(());
             }
 
-            if let Some(host) = parsed.host_str() {
-                let h = host.to_ascii_lowercase();
-                let is_blocked = if h == "localhost" {
-                    true
-                } else if let Ok(ip) = h.parse::<std::net::IpAddr>() {
-                    is_private_or_local_ip(ip)
-                } else if let Ok(mut addrs) = tokio::net::lookup_host(format!("{h}:443")).await {
-                    addrs.any(|addr| is_private_or_local_ip(addr.ip()))
-                } else {
-                    false
-                };
-
-                if is_blocked {
-                    command
-                        .error_callback(
-                            &ctx,
-                            "Local or private network addresses are not allowed!",
-                            true,
-                        )
-                        .await?;
-                    return Ok(());
-                }
-            }
-
             let builder = MessageBuilder::new().embed("Downloading from URL...");
-            command.callback(&ctx, builder, false).await?;
+            command.update(&ctx, &builder).await?;
 
             let bytes = match ctx.client().get_skin_from_url(&url).await {
                 Ok(b) => b,
                 Err(err) => {
                     let _ = command.error(&ctx, "Failed to download from URL").await;
-                    return Err(Report::from(err).wrap_err("failed to download skin from url"));
+                    return Err(err.wrap_err("failed to download skin from url"));
                 }
             };
 
-            let raw_filename = url
-                .split('/')
-                .last()
-                .unwrap_or("skin")
-                .trim_end_matches(".osk");
-            let decoded_filename = if let Some(pos) = raw_filename.find('?') {
-                &raw_filename[..pos]
-            } else {
-                raw_filename
-            };
-            let mut filename = crate::commands::danser::render_score::sanitize_filename(decoded_filename);
-            if filename.is_empty() {
-                filename = "skin".to_string();
-            }
+            let raw_filename = target
+                .url
+                .path_segments()
+                .and_then(|mut segs| segs.next_back())
+                .unwrap_or("skin");
+            let filename = sanitize_skin_dir_name(raw_filename);
 
             (bytes, filename)
         }
@@ -172,45 +166,32 @@ pub async fn add(
         }
     };
 
-    let mut builder = MessageBuilder::new().embed("Zipping...");
+    let mut builder = MessageBuilder::new().embed("Generating skin name...");
     command.update(&ctx, &builder).await?;
 
-    let cursor = Cursor::new(bytes);
+    let skins_root = BotConfig::get().paths.skins();
+    let mut skin_file = skins_root.clone();
 
-    let mut archive = match ZipArchive::new(cursor) {
-        Ok(archive) => archive,
-        Err(err) => {
-            let _ = command.error(&ctx, GENERAL_ISSUE).await;
-            let err = Report::from(err).wrap_err("failed to create zip archive");
-
-            return Err(err);
-        }
+    let filename_bytes = filename.as_bytes();
+    let search_res = {
+        let mut skin_list = ctx.skin_list();
+        let skins = skin_list.get()?;
+        skins.binary_search_by(|skin| {
+            skin.as_encoded_bytes()
+                .iter()
+                .map(u8::to_ascii_lowercase)
+                .cmp(filename_bytes.iter().map(u8::to_ascii_lowercase))
+        })
     };
 
-    // Slight optimization by re-using the builder and overwriting the previous embed
-    builder = builder.embed("Generating skin name...");
-    command.update(&ctx, &builder).await?;
-
-    let mut skin_file = BotConfig::get().paths.skins();
-
-    let skin_list: Vec<_> = ctx
-        .skin_list()
-        .get()?
-        .iter()
-        .map(|skin| skin.to_ascii_lowercase())
-        .collect();
-
-    let mut needle = OsString::from(filename.clone());
-    needle.make_ascii_lowercase();
-
-    let idx = match skin_list.binary_search(&needle) {
+    let idx = match search_res {
         Ok(idx) => {
             let mut suffix = 1;
 
             loop {
                 skin_file.push(format!("{filename}_{suffix}"));
 
-                if !skin_file.exists() {
+                if !tokio::fs::try_exists(&skin_file).await.unwrap_or(false) {
                     break idx + suffix + 1;
                 }
 
@@ -219,61 +200,86 @@ pub async fn add(
             }
         }
         Err(idx) => {
-            skin_file.push(filename);
+            skin_file.push(&filename);
 
             idx + 1
         }
     };
 
+    if skin_file.parent() != Some(skins_root.as_path()) {
+        let _ = command.error(&ctx, "Invalid target skin directory.").await;
+        eyre::bail!("resolved skin path {:?} escapes {:?}", skin_file, skins_root);
+    }
+
     builder = builder.embed("Extracting...");
     command.update(&ctx, &builder).await?;
 
-    const MAX_UNCOMPRESSED_SKIN_BYTES: u64 = 400 * 1024 * 1024; // 400 MB
+    const MAX_UNCOMPRESSED_SKIN_BYTES: u64 = 512 * 1024 * 1024; // 512 MB
+    const MAX_SKIN_ENTRIES: usize = 5_000;
+    let staging_seq = FLATTEN_SEQ.fetch_add(1, Ordering::Relaxed);
+    let staging_dir = skins_root.join(format!(".tmp_skin_{staging_seq}"));
+    let staging_dir_clone = staging_dir.clone();
     let skin_file_clone = skin_file.clone();
-    let extract_res = tokio::task::spawn_blocking(move || -> Result<(), Report> {
-        let mut total_size: u64 = 0;
-        for i in 0..archive.len() {
-            let file = archive
-                .by_index(i)
-                .map_err(|e| Report::from(e).wrap_err("corrupt zip entry in skin archive"))?;
-            total_size += file.size();
-            if total_size > MAX_UNCOMPRESSED_SKIN_BYTES {
-                eyre::bail!("Skin archive exceeds 400MB uncompressed limit!");
+    let skins_root_clone = skins_root.clone();
+    let extract_res = tokio::task::spawn_blocking(move || -> Result<bool, Report> {
+        extract_zip_safely(
+            &bytes,
+            &staging_dir_clone,
+            MAX_UNCOMPRESSED_SKIN_BYTES,
+            MAX_SKIN_ENTRIES,
+        )?;
+
+        let mut skin_ini_path = staging_dir_clone.clone();
+        skin_ini_path.push("skin.ini");
+
+        if !(case_insensitive_exists(&skin_ini_path)?
+            || move_directory(&skins_root_clone, &staging_dir_clone)?)
+        {
+            if staging_dir_clone.parent() == Some(skins_root_clone.as_path()) {
+                fs::remove_dir_all(&staging_dir_clone).with_context(|| {
+                    format!(
+                        "failed to remove staging directory after failing to assure skin.ini for {staging_dir_clone:?}"
+                    )
+                })?;
             }
+            return Ok(false);
         }
-        archive
-            .extract(&skin_file_clone)
-            .map_err(|e| Report::from(e).wrap_err("failed to extract zip archive"))?;
-        Ok(())
+
+        if skin_file_clone.exists() {
+            let _ = fs::remove_dir_all(&staging_dir_clone);
+            eyre::bail!("target skin directory `{skin_file_clone:?}` already exists");
+        }
+
+        fs::rename(&staging_dir_clone, &skin_file_clone).with_context(|| {
+            format!(
+                "failed moving validated skin from {staging_dir_clone:?} to {skin_file_clone:?}"
+            )
+        })?;
+
+        Ok(true)
     })
     .await;
 
+    if !matches!(extract_res, Ok(Ok(true))) && staging_dir.parent() == Some(skins_root.as_path()) {
+        let _ = tokio::fs::remove_dir_all(&staging_dir).await;
+    }
+
     match extract_res {
-        Ok(Ok(())) => {}
+        Ok(Ok(true)) => {}
+        Ok(Ok(false)) => {
+            let content = "There was an error getting the folder containing the skin elements! \
+                Try re-exporting the skin!";
+            command.error(&ctx, content).await?;
+            return Ok(());
+        }
         Ok(Err(err)) => {
-            let msg = err.to_string();
-            let _ = command.error(&ctx, msg).await;
+            let _ = command.error(&ctx, err.to_string()).await;
             return Err(err);
         }
         Err(err) => {
             let _ = command.error(&ctx, GENERAL_ISSUE).await;
             return Err(Report::from(err).wrap_err("extraction task panicked"));
         }
-    }
-
-    let mut skin_ini_path = skin_file.clone();
-    skin_ini_path.push("skin.ini");
-
-    if !(case_insensitive_exists(skin_ini_path)? || move_directory(&skin_file)?) {
-        let content = "There was an error getting the folder containing the skin elements! \
-            Try re-exporting the skin!";
-        command.error(&ctx, content).await?;
-
-        fs::remove_dir_all(&skin_file).with_context(|| {
-            format!("failed to remove directory after failing to assure skin.ini for {skin_file:?}")
-        })?;
-
-        return Ok(());
     }
 
     // Reset the skin list cache
@@ -286,72 +292,44 @@ pub async fn add(
     Ok(())
 }
 
-fn move_directory(to: &PathBuf) -> Result<bool> {
-    let mut skin_folder =
-        fs::read_dir(to).with_context(|| format!("failed to read directory at {to:?}"))?;
+fn move_directory(skins_root: &Path, to: &Path) -> Result<bool> {
+    let entries = fs::read_dir(to).with_context(|| format!("failed to read directory at {to:?}"))?;
 
-    let inner_folder = match skin_folder.next() {
-        Some(res) => res.with_context(|| format!("failed to read entry of directory at {to:?}"))?,
-        None => return Ok(false),
+    let mut inner_dir: Option<PathBuf> = None;
+    for res in entries {
+        let entry = res.with_context(|| format!("failed to read entry of directory at {to:?}"))?;
+        let name = entry.file_name();
+        let lossy = name.to_string_lossy();
+        if lossy == "__MACOSX" || lossy.starts_with('.') {
+            continue;
+        }
+        let path = entry.path();
+        if path.is_dir() && case_insensitive_exists(path.join("skin.ini"))? {
+            inner_dir = Some(path);
+            break;
+        }
+    }
+
+    let Some(from) = inner_dir else {
+        return Ok(false);
     };
 
-    let from = inner_folder.path();
+    let seq = FLATTEN_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp_dir = skins_root.join(format!(".flatten_tmp_{seq}"));
+    fs::rename(&from, &tmp_dir)
+        .with_context(|| format!("failed to move {from:?} to temp flatten path {tmp_dir:?}"))?;
 
-    let mut skin_ini = to.to_owned();
-    skin_ini.push("skin.ini");
-
-    if copy_all(from, to).is_ok() && case_insensitive_exists(&skin_ini)? {
-        fs::remove_dir_all(inner_folder.path())
-            .with_context(|| format!("failed to remove directory at {:?}", inner_folder.path()))?;
-        Ok(true)
-    } else {
-        Ok(false)
-    }
-}
-
-#[allow(clippy::ptr_arg)]
-fn copy_all(from: PathBuf, to: &PathBuf) -> Result<()> {
-    let output_root = to;
-    let input_root = from.components().count();
-
-    let mut stack = vec![from];
-
-    while let Some(working_path) = stack.pop() {
-        // Generate a relative path
-        let src: PathBuf = working_path.components().skip(input_root).collect();
-
-        // Create a destination if missing
-        let dest = if src.components().count() == 0 {
-            output_root.clone()
-        } else {
-            output_root.join(&src)
-        };
-
-        if !dest.exists() {
-            fs::create_dir_all(&dest)
-                .with_context(|| format!("failed to create directory {dest:?}"))?;
-        }
-
-        let folder = fs::read_dir(&working_path)
-            .with_context(|| format!("failed to read directory at {working_path:?}"))?;
-
-        for entry in folder {
-            let path = entry
-                .with_context(|| format!("failed to read entry of directory at {working_path:?}"))?
-                .path();
-
-            if path.is_dir() {
-                stack.push(path);
-            } else if let Some(filename) = path.file_name() {
-                let dest_path = dest.join(filename);
-
-                fs::copy(&path, &dest_path)
-                    .with_context(|| format!("failed to copy {path:?} to {dest_path:?}"))?;
-            }
-        }
+    if let Err(err) = fs::remove_dir_all(to) {
+        let _ = fs::rename(&tmp_dir, &from);
+        return Err(err).with_context(|| format!("failed to remove outer directory at {to:?}"));
     }
 
-    Ok(())
+    if let Err(err) = fs::rename(&tmp_dir, to) {
+        let _ = fs::remove_dir_all(&tmp_dir);
+        return Err(err).with_context(|| format!("failed to rename {tmp_dir:?} into {to:?}"));
+    }
+
+    case_insensitive_exists(to.join("skin.ini"))
 }
 
 fn case_insensitive_exists(path_with_file: impl AsRef<Path>) -> Result<bool> {
@@ -384,4 +362,24 @@ fn case_insensitive_exists(path_with_file: impl AsRef<Path>) -> Result<bool> {
     }
 
     Ok(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_skin_dir_name;
+
+    #[test]
+    fn test_sanitize_skin_dir_name() {
+        assert_eq!(sanitize_skin_dir_name("...osk"), "skin");
+        assert_eq!(sanitize_skin_dir_name("..osk"), "skin");
+        assert_eq!(
+            sanitize_skin_dir_name("My%20Custom%20Skin.osk"),
+            "My Custom Skin"
+        );
+        assert_eq!(
+            sanitize_skin_dir_name("../../etc/passwd.osk"),
+            "etc_passwd"
+        );
+        assert_eq!(sanitize_skin_dir_name("clean_skin.ZIP"), "clean_skin");
+    }
 }

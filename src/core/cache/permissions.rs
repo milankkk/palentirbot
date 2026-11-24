@@ -12,39 +12,47 @@ use crate::core::BotConfig;
 use super::Cache;
 
 impl Cache {
-    pub fn get_guild_permissions(
+    fn get_guild_permissions(
         &self,
         user: Id<UserMarker>,
         guild: Id<GuildMarker>,
-    ) -> (Permissions, RolesLookup) {
+    ) -> (Permissions, Option<Vec<Id<RoleMarker>>>) {
         if BotConfig::get().owners.contains(&user) {
-            return (Permissions::all(), RolesLookup::NotChecked);
+            return (Permissions::all(), None);
         }
 
         match self.is_guild_owner(guild, user) {
             Ok(false) => {}
-            Ok(true) => return (Permissions::all(), RolesLookup::NotChecked),
-            Err(_) => return (Permissions::empty(), RolesLookup::NotChecked),
+            Ok(true) => return (Permissions::all(), None),
+            Err(_) => return (Permissions::empty(), None),
         }
 
         let member_roles = match self.member(guild, user, |m| m.roles().to_owned()) {
             Ok(roles) => roles,
-            Err(_) => return (Permissions::empty(), RolesLookup::NotFound),
+            Err(_) => return (Permissions::empty(), None),
         };
 
-        let mut permissions = Permissions::empty();
+        // Discord excludes the @everyone role (id == guild_id) from member.roles,
+        // so seed base permissions from it before merging explicit roles.
+        let mut permissions = self
+            .role(guild.cast(), |r| r.permissions)
+            .unwrap_or_else(|_| Permissions::empty());
+
+        if permissions.contains(Permissions::ADMINISTRATOR) {
+            return (Permissions::all(), Some(member_roles));
+        }
 
         for &role in &member_roles {
             if let Ok(role_permissions) = self.role(role, |r| r.permissions) {
                 if role_permissions.contains(Permissions::ADMINISTRATOR) {
-                    return (Permissions::all(), RolesLookup::Found(member_roles));
+                    return (Permissions::all(), Some(member_roles));
                 }
 
                 permissions |= role_permissions;
             }
         }
 
-        (permissions, RolesLookup::Found(member_roles))
+        (permissions, Some(member_roles))
     }
 
     pub fn get_channel_permissions(
@@ -64,24 +72,47 @@ impl Cache {
             return Permissions::all();
         }
 
-        if let Ok(Some(permission_overwrites)) =
-            self.channel(channel, |c| c.permission_overwrites.clone())
-        {
-            let member_roles = match roles {
-                RolesLookup::Found(roles) => Some(roles),
-                RolesLookup::NotChecked => self.member(guild, user, |m| m.roles().to_owned()).ok(),
-                RolesLookup::NotFound => None,
-            };
-
-            if let Some(roles) = member_roles {
-                Self::text_channel_permissions(
-                    &mut permissions,
-                    user,
-                    guild,
-                    permission_overwrites,
-                    roles,
-                )
+        match self.channel(channel, |c| {
+            if let (Some(overwrites), Some(roles)) =
+                (c.permission_overwrites.as_deref(), roles.as_deref())
+            {
+                Self::text_channel_permissions(&mut permissions, user, guild, overwrites, roles);
+                None
+            } else if c.permission_overwrites.is_none() {
+                c.parent_id
+            } else {
+                None
             }
+        }) {
+            Ok(Some(parent_id)) => {
+                if let Some(roles) = roles.as_deref() {
+                    let _ = self.channel(parent_id, |c| {
+                        if let Some(overwrites) = c.permission_overwrites.as_deref() {
+                            Self::text_channel_permissions(
+                                &mut permissions,
+                                user,
+                                guild,
+                                overwrites,
+                                roles,
+                            );
+                        }
+                    });
+                }
+            }
+            Ok(None) => {}
+            Err(_) => return Permissions::empty(),
+        }
+
+        if !permissions.contains(Permissions::VIEW_CHANNEL) {
+            return Permissions::empty();
+        }
+        if !permissions.contains(Permissions::SEND_MESSAGES) {
+            permissions.remove(
+                Permissions::EMBED_LINKS
+                    | Permissions::ATTACH_FILES
+                    | Permissions::MENTION_EVERYONE
+                    | Permissions::SEND_TTS_MESSAGES,
+            );
         }
 
         permissions
@@ -91,8 +122,8 @@ impl Cache {
         permissions: &mut Permissions,
         user: Id<UserMarker>,
         guild: Id<GuildMarker>,
-        permission_overwrites: Vec<PermissionOverwrite>,
-        roles: Vec<Id<RoleMarker>>,
+        permission_overwrites: &[PermissionOverwrite],
+        roles: &[Id<RoleMarker>],
     ) {
         let mut everyone_allowed = Permissions::empty();
         let mut everyone_denied = Permissions::empty();
@@ -101,7 +132,7 @@ impl Cache {
         let mut role_allowed = Permissions::empty();
         let mut role_denied = Permissions::empty();
 
-        for overwrite in &permission_overwrites {
+        for overwrite in permission_overwrites {
             match overwrite.kind {
                 PermissionOverwriteType::Member => {
                     if overwrite.id.cast() == user {
@@ -131,10 +162,4 @@ impl Cache {
         *permissions &= !user_denied;
         *permissions |= user_allowed;
     }
-}
-
-pub enum RolesLookup {
-    Found(Vec<Id<RoleMarker>>),
-    NotChecked,
-    NotFound,
 }

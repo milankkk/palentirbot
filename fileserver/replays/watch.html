@@ -1,0 +1,1594 @@
+{{- $rawPath := .OriginalReq.URL.Path -}}
+{{- $rawId := trimPrefix "/watch/" $rawPath -}}
+{{- $slug := $rawId -}}
+{{- $linkTxt := printf "/.links/%s.txt" $rawId -}}
+{{- if and (not (fileExists (printf "/%s.mp4" $rawId))) (fileExists $linkTxt) -}}
+  {{- $candSlug := trim (readFile $linkTxt) -}}
+  {{- if and (ne $candSlug ".") (ne $candSlug "..") (regexMatch "^[A-Za-z0-9._-]+$" $candSlug) -}}
+    {{- $slug = $candSlug -}}
+  {{- end -}}
+{{- end -}}
+{{- $mp4Path := printf "/%s.mp4" $slug -}}
+{{- $thumbPath := printf "/%s.jpg" $slug -}}
+{{- $webpPath := printf "/%s.webp" $slug -}}
+{{- $metaPath := printf "/%s.json" $slug -}}
+{{- $hasMeta := fileExists $metaPath -}}
+{{- $hasThumb := fileExists $thumbPath -}}
+{{- $hasWebp := fileExists $webpPath -}}
+{{- $meta := dict -}}
+{{- if $hasMeta -}}
+  {{- $rawMeta := trim (readFile $metaPath) -}}
+  {{- if and (hasPrefix "{" $rawMeta) (hasSuffix "}" $rawMeta) -}}
+    {{- $meta = $rawMeta | fromJson -}}
+  {{- end -}}
+{{- end -}}
+{{- $title := toString (or (index $meta "title") $slug) -}}
+{{- $mapTitle := toString (or (index $meta "map_title") $title) -}}
+{{- $player := toString (or (index $meta "player") "") -}}
+{{- $rawBeatmap := toString (or (index $meta "beatmap") "") -}}
+{{- $beatmap := "" -}}
+{{- if or (hasPrefix "https://osu.ppy.sh/" $rawBeatmap) (hasPrefix "http://osu.ppy.sh/" $rawBeatmap) -}}
+  {{- $beatmap = $rawBeatmap -}}
+{{- end -}}
+{{- $width := int (float64 (or (index $meta "width") 1280)) -}}
+{{- $height := int (float64 (or (index $meta "height") 720)) -}}
+{{- $thumbWidth := int (float64 (or (index $meta "thumb_width") 1280)) -}}
+{{- $thumbHeight := int (float64 (or (index $meta "thumb_height") 720)) -}}
+{{- $fps := index $meta "fps" -}}
+{{- $duration := index $meta "duration" -}}
+{{- $sizeBytes := index $meta "size_bytes" -}}
+{{- $rawGrade := toString (or (index $meta "grade") "") -}}
+{{- $grade := "" -}}
+{{- if regexMatch "^(SSH|SS|SH|S|A|B|C|D|F|XH|X)$" $rawGrade -}}
+  {{- $grade = $rawGrade -}}
+{{- end -}}
+{{- $pp := index $meta "pp" -}}
+{{- $acc := index $meta "accuracy" -}}
+{{- $stars := index $meta "stars" -}}
+{{- $mods := toString (or (index $meta "mods") "") -}}
+{{- $maxCombo := index $meta "max_combo" -}}
+{{- $mapMaxCombo := index $meta "map_max_combo" -}}
+{{- $c300 := index $meta "count_300" -}}
+{{- $c100 := index $meta "count_100" -}}
+{{- $c50 := index $meta "count_50" -}}
+{{- $cmiss := index $meta "count_miss" -}}
+{{- $scheme := "https" -}}
+{{- $host := "replays.insertdomainname.be" -}}
+{{- if and .Req.Host (regexMatch "^(replays\\.insertdomainname\\.be|localhost(:[0-9]+)?|127\\.0\\.0\\.1(:[0-9]+)?)$" .Req.Host) -}}
+  {{- $host = .Req.Host -}}
+{{- end -}}
+{{- $base := printf "%s://%s" $scheme $host -}}
+{{- $rawShortId := toString (or (index $meta "short_id") "") -}}
+{{- $shortId := "" -}}
+{{- if regexMatch "^[a-z0-9]{6,16}$" $rawShortId -}}
+  {{- $shortId = $rawShortId -}}
+{{- end -}}
+{{- $videoUrl := printf "%s/%s.mp4" $base $slug -}}
+{{- $watchUrl := printf "%s/watch/%s" $base $slug -}}
+{{- if $shortId -}}
+  {{- $watchUrl = printf "%s/watch/%s" $base $shortId -}}
+{{- end -}}
+{{- $thumbUrl := printf "%s/fallback-thumb.jpg" $base -}}
+{{- if $hasThumb -}}
+  {{- $thumbUrl = printf "%s/%s.jpg" $base $slug -}}
+{{- end -}}
+{{- $posterPath := "/fallback-thumb.jpg" -}}
+{{- if $hasWebp -}}
+  {{- $posterPath = $webpPath -}}
+{{- else if $hasThumb -}}
+  {{- $posterPath = $thumbPath -}}
+{{- end -}}
+{{- $canEmbedVideo := true -}}
+{{- $sizeText := "" -}}
+{{- if $sizeBytes -}}
+  {{- $sb := float64 $sizeBytes -}}
+  {{- if gt $sb 510000000.0 -}}
+    {{- $canEmbedVideo = false -}}
+  {{- end -}}
+  {{- if ge $sb 1073741824.0 -}}
+    {{- $sizeText = printf "%.2f GB" (divf $sb 1073741824.0) -}}
+  {{- else if ge $sb 1048576.0 -}}
+    {{- $sizeText = printf "%.1f MB" (divf $sb 1048576.0) -}}
+  {{- else if ge $sb 1024.0 -}}
+    {{- $sizeText = printf "%.0f KB" (divf $sb 1024.0) -}}
+  {{- else -}}
+    {{- $sizeText = printf "%.0f B" $sb -}}
+  {{- end -}}
+{{- end -}}
+{{- $durText := "" -}}
+{{- if $duration -}}
+  {{- $ds := int (float64 $duration) -}}
+  {{- $dm := div $ds 60 -}}
+  {{- $dr := mod $ds 60 -}}
+  {{- $durText = printf "%d:%02d" $dm $dr -}}
+{{- end -}}
+{{- $ogParts := list -}}
+{{- if $grade -}}{{- $ogParts = append $ogParts (toString $grade) -}}{{- end -}}
+{{- if $pp -}}{{- $ogParts = append $ogParts (printf "%.0fpp" (float64 $pp)) -}}{{- end -}}
+{{- if $acc -}}{{- $ogParts = append $ogParts (printf "%.2f%%" (float64 $acc)) -}}{{- end -}}
+{{- if $maxCombo -}}
+  {{- if $mapMaxCombo -}}
+    {{- $ogParts = append $ogParts (printf "%v/%vx" $maxCombo $mapMaxCombo) -}}
+  {{- else -}}
+    {{- $ogParts = append $ogParts (printf "%vx" $maxCombo) -}}
+  {{- end -}}
+{{- end -}}
+{{- if ne $c300 nil -}}
+  {{- $ogParts = append $ogParts (printf "{%v/%v/%v/%v}" $c300 (or $c100 0) (or $c50 0) (or $cmiss 0)) -}}
+{{- end -}}
+{{- $ogParts = append $ogParts (printf "%vx%v" $width $height) -}}
+{{- if $durText -}}{{- $ogParts = append $ogParts $durText -}}{{- end -}}
+{{- if $sizeText -}}{{- $ogParts = append $ogParts $sizeText -}}{{- end -}}
+{{- if not $canEmbedVideo -}}{{- $ogParts = append $ogParts "Watch in browser" -}}{{- end -}}
+{{- $ogDesc := join " • " $ogParts -}}
+{{- $pageTitle := toString $title -}}
+{{- if and $pp (not (contains "pp" (lower $pageTitle))) -}}
+  {{- $pageTitle = printf "%s • %.0fpp" $pageTitle (float64 $pp) -}}
+{{- end -}}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{$pageTitle | html}}</title>
+  <meta name="description" content="{{$ogDesc | html}}">
+  <meta name="theme-color" content="#2e3440">
+  <link rel="canonical" href="{{$watchUrl | html}}">
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <script>(function(){try{var t=localStorage.getItem("osu_site_theme_v1");var ok=["nord-dark","nord-light","midnight","osu-pink","catppuccin-mocha","sakura-light","oled-pitch"];document.documentElement.dataset.theme=ok.indexOf(t)>=0?t:"nord-dark";}catch(_){document.documentElement.dataset.theme="nord-dark";}})();</script>
+
+  <!-- OpenGraph / Discord Embed -->
+  <meta property="og:site_name" content="Replays">
+  <meta property="og:title" content="{{$pageTitle | html}}">
+  <meta property="og:description" content="{{$ogDesc | html}}">
+  <meta property="og:url" content="{{$watchUrl | html}}">
+  <meta property="og:image" content="{{$thumbUrl | html}}">
+  <meta property="og:image:secure_url" content="{{$thumbUrl | html}}">
+  <meta property="og:image:type" content="image/jpeg">
+  <meta property="og:image:width" content="{{$thumbWidth}}">
+  <meta property="og:image:height" content="{{$thumbHeight}}">
+{{- if $canEmbedVideo }}
+  <meta property="og:type" content="video.other">
+  <meta property="og:video" content="{{$videoUrl | html}}">
+  <meta property="og:video:secure_url" content="{{$videoUrl | html}}">
+  <meta property="og:video:type" content="video/mp4">
+  <meta property="og:video:width" content="{{$width}}">
+  <meta property="og:video:height" content="{{$height}}">
+  <meta name="twitter:card" content="player">
+  <meta name="twitter:player" content="{{$watchUrl | html}}">
+  <meta name="twitter:player:stream" content="{{$videoUrl | html}}">
+  <meta name="twitter:player:stream:content_type" content="video/mp4">
+  <meta name="twitter:player:width" content="{{$width}}">
+  <meta name="twitter:player:height" content="{{$height}}">
+{{- else }}
+  <meta property="og:type" content="website">
+  <meta name="twitter:card" content="summary_large_image">
+{{- end }}
+  <meta name="twitter:title" content="{{$pageTitle | html}}">
+  <meta name="twitter:description" content="{{$ogDesc | html}}">
+  <meta name="twitter:image" content="{{$thumbUrl | html}}">
+
+  <style>
+    :root {
+      --bg: #2e3440;
+      --surface: #3b4252;
+      --surface-2: #434c5e;
+      --border: rgba(216, 222, 233, 0.13);
+      --border-hover: rgba(136, 192, 208, 0.56);
+      --text: #eceff4;
+      --text-dim: #d8dee9;
+      --text-muted: #9aa7bc;
+      --accent: #88c0d0;
+      --accent-2: #81a1c1;
+      --green: #a3be8c;
+      --amber: #ebcb8b;
+      --rose: #bf616a;
+      --radius: 15px;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      min-height: 100vh;
+      font-family: 'Segoe UI', system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+      background-color: var(--bg);
+      background-image:
+        radial-gradient(circle at 12% 8%, rgba(150, 223, 227, 0.12), transparent 36%),
+        radial-gradient(circle at 88% 86%, rgba(176, 102, 255, 0.11), transparent 36%);
+      background-attachment: fixed;
+      color: var(--text);
+      padding: 18px 18px 64px;
+    }
+    .wrap {
+      width: 100%;
+      max-width: 1180px;
+      margin: 0 auto;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      transition: max-width 0.2s ease;
+    }
+    body.theater .wrap { max-width: 1620px; }
+
+    /* Topbar */
+    .topbar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+    .back-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      text-decoration: none;
+      color: var(--text);
+      font-size: 0.86rem;
+      font-weight: 600;
+      padding: 7px 13px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.04);
+      transition: all 0.14s;
+    }
+    .back-btn:hover { border-color: var(--border-hover); background: rgba(150, 223, 227, 0.1); }
+    .top-nav { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+    .nav-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      text-decoration: none;
+      color: var(--text-dim);
+      font-size: 0.82rem;
+      font-weight: 600;
+      padding: 7px 11px;
+      border-radius: 9px;
+      border: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.03);
+      cursor: pointer;
+      transition: all 0.14s;
+    }
+    .nav-btn:hover { color: var(--text); border-color: var(--border-hover); background: rgba(150, 223, 227, 0.1); }
+    .nav-btn[disabled] { opacity: 0.32; pointer-events: none; }
+
+    /* Player Frame */
+    .player-card {
+      background: #05070c;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+      box-shadow: 0 22px 56px rgba(0, 0, 0, 0.5);
+    }
+    .video-stage {
+      position: relative;
+      width: 100%;
+      aspect-ratio: 16 / 9;
+      background: #000;
+      overflow: hidden;
+    }
+    body.theater .video-stage { max-height: 82vh; }
+    .video-stage.zoomed { cursor: grab; }
+    .video-stage.zoomed.dragging { cursor: grabbing; }
+    video#player {
+      width: 100%;
+      height: 100%;
+      display: block;
+      object-fit: contain;
+      transform-origin: center center;
+      transition: transform 0.08s ease-out;
+      outline: none;
+    }
+    .video-stage.dragging video#player { transition: none; }
+
+    .play-overlay {
+      position: absolute;
+      inset: 0;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      background: rgba(6, 9, 16, 0.36);
+      cursor: pointer;
+      z-index: 6;
+    }
+    .play-overlay.show { display: flex; }
+    .play-circle {
+      width: 72px;
+      height: 72px;
+      border-radius: 50%;
+      background: rgba(10, 14, 23, 0.88);
+      border: 2px solid var(--accent);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 12px 34px rgba(0, 0, 0, 0.55);
+      transition: transform 0.15s;
+    }
+    .play-overlay:hover .play-circle { transform: scale(1.07); }
+
+    .stage-hud {
+      position: absolute;
+      top: 14px;
+      right: 14px;
+      background: rgba(10, 14, 23, 0.88);
+      border: 1px solid rgba(150, 223, 227, 0.45);
+      color: var(--text);
+      font-size: 0.79rem;
+      font-weight: 700;
+      padding: 6px 12px;
+      border-radius: 9px;
+      opacity: 0;
+      transform: translateY(-4px);
+      transition: opacity 0.15s, transform 0.15s;
+      pointer-events: none;
+      z-index: 8;
+    }
+    .stage-hud.show { opacity: 1; transform: translateY(0); }
+
+    /* Organized 3-Zone Control Bar */
+    .control-bar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px 14px;
+      padding: 10px 14px;
+      background: rgba(16, 21, 34, 0.96);
+      border-top: 1px solid var(--border);
+    }
+    .ctrl-zone {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px;
+    }
+    .seg-group {
+      display: inline-flex;
+      align-items: center;
+      background: rgba(255, 255, 255, 0.035);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+    }
+    .seg-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 5px;
+      height: 32px;
+      padding: 0 10px;
+      border: none;
+      background: transparent;
+      color: var(--text-dim);
+      font-size: 0.78rem;
+      font-weight: 700;
+      cursor: pointer;
+      transition: background 0.13s, color 0.13s;
+      user-select: none;
+    }
+    .seg-btn:hover { background: rgba(255, 255, 255, 0.07); color: var(--text); }
+    .seg-btn + .seg-btn,
+    .seg-btn + .seg-select,
+    .seg-select + .seg-btn,
+    .seg-btn + .seg-tc,
+    .seg-tc + .seg-btn {
+      border-left: 1px solid var(--border);
+    }
+    .seg-select {
+      height: 32px;
+      padding: 0 8px;
+      border: none;
+      background: transparent;
+      color: var(--text);
+      font-size: 0.79rem;
+      font-weight: 700;
+      cursor: pointer;
+      outline: none;
+    }
+    .seg-select option { background: #121725; color: var(--text); }
+    .seg-tc {
+      height: 32px;
+      display: inline-flex;
+      align-items: center;
+      padding: 0 11px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.77rem;
+      color: var(--text-dim);
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+    .seg-tc strong { color: var(--text); font-weight: 700; }
+
+    .tool-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 5px;
+      height: 32px;
+      padding: 0 11px;
+      border-radius: 9px;
+      border: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.035);
+      color: var(--text-dim);
+      font-size: 0.78rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.13s;
+      user-select: none;
+    }
+    .tool-btn:hover { color: var(--text); border-color: rgba(255, 255, 255, 0.2); background: rgba(255, 255, 255, 0.07); }
+    .tool-btn.active {
+      color: #071318;
+      background: var(--accent);
+      border-color: var(--accent);
+      font-weight: 700;
+    }
+    .tool-btn.active-purple {
+      color: #160826;
+      background: var(--accent-2);
+      border-color: var(--accent-2);
+      font-weight: 700;
+    }
+
+    /* Collapsible A-B Loop Drawer */
+    .ab-drawer {
+      display: none;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 9px 14px;
+      background: rgba(176, 102, 255, 0.07);
+      border-top: 1px solid rgba(176, 102, 255, 0.24);
+    }
+    .ab-drawer.open { display: flex; }
+    .ab-left { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+    .ab-label {
+      font-size: 0.75rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: #d8b4fe;
+    }
+    .ab-readout {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.79rem;
+      font-weight: 700;
+      color: var(--text);
+      padding: 4px 10px;
+      border-radius: 7px;
+      background: rgba(10, 14, 23, 0.65);
+      border: 1px solid rgba(176, 102, 255, 0.3);
+    }
+
+    /* Info & Score Card */
+    .info-card {
+      background: rgba(18, 23, 37, 0.88);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px 22px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+    .info-head {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .title-col { display: flex; flex-direction: column; gap: 8px; min-width: 0; flex: 1 1 360px; }
+    .badge-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      font-size: 0.75rem;
+      font-weight: 700;
+      padding: 3px 9px;
+      border-radius: 7px;
+      border: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.05);
+      color: var(--text);
+    }
+    .b-star { color: var(--accent); border-color: rgba(150, 223, 227, 0.35); background: rgba(150, 223, 227, 0.1); }
+    .b-mod { color: #fde68a; border-color: rgba(251, 191, 36, 0.38); background: rgba(251, 191, 36, 0.1); }
+    .b-acc { color: #6ee7b7; border-color: rgba(52, 211, 153, 0.35); background: rgba(52, 211, 153, 0.1); }
+    .b-lazer { color: #f9a8d4; border-color: rgba(244, 114, 182, 0.4); background: rgba(244, 114, 182, 0.12); }
+    .b-grade { font-size: 0.83rem; padding: 3px 10px; font-weight: 800; }
+    .b-grade-SSH, .b-grade-SH { color: #f8fafc; border-color: rgba(226, 232, 240, 0.5); background: rgba(226, 232, 240, 0.14); }
+    .b-grade-SS, .b-grade-S { color: #fde047; border-color: rgba(250, 204, 21, 0.45); background: rgba(250, 204, 21, 0.14); }
+    .b-grade-A { color: #4ade80; border-color: rgba(74, 222, 128, 0.45); background: rgba(74, 222, 128, 0.12); }
+    .b-grade-B { color: #60a5fa; border-color: rgba(96, 165, 250, 0.45); background: rgba(96, 165, 250, 0.12); }
+    .b-grade-C { color: #d8b4fe; border-color: rgba(216, 180, 254, 0.45); background: rgba(216, 180, 254, 0.12); }
+    .b-grade-D, .b-grade-F { color: #fb7185; border-color: rgba(251, 113, 133, 0.45); background: rgba(251, 113, 133, 0.12); }
+
+    .b-pp { color: #071419; background: rgba(150, 223, 227, 0.94); border-color: var(--accent); font-weight: 800; }
+    .title-pp {
+      display: inline-block;
+      margin-left: 8px;
+      font-size: 0.96rem;
+      font-weight: 800;
+      color: var(--accent);
+      vertical-align: baseline;
+    }
+    h1.replay-title {
+      font-size: 1.24rem;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+      line-height: 1.32;
+      word-break: break-word;
+    }
+    .sub-line {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 6px 12px;
+      font-size: 0.84rem;
+      color: var(--text-dim);
+    }
+    .sub-line a { color: var(--accent); text-decoration: none; font-weight: 600; }
+    .sub-line a:hover { text-decoration: underline; }
+    .exp-pill {
+      display: inline-flex;
+      align-items: center;
+      font-size: 0.77rem;
+      font-weight: 700;
+      padding: 5px 11px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid var(--border);
+      color: var(--text-dim);
+      white-space: nowrap;
+    }
+    .exp-pill.warn { color: #fde68a; border-color: rgba(251, 191, 36, 0.4); background: rgba(251, 191, 36, 0.1); }
+    .exp-pill.urgent { color: #fda4af; border-color: rgba(251, 113, 133, 0.5); background: rgba(251, 113, 133, 0.12); }
+
+    /* Score breakdown grid */
+    .score-grid {
+      display: none;
+      grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+      gap: 12px;
+      padding: 13px 16px;
+      border-radius: 12px;
+      background: rgba(10, 14, 23, 0.62);
+      border: 1px solid var(--border);
+    }
+    .score-grid.show { display: grid; }
+    .sg-box { display: flex; flex-direction: column; gap: 3px; }
+    .sg-lbl {
+      font-size: 0.69rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--text-muted);
+      font-weight: 700;
+    }
+    .sg-val { font-size: 1.04rem; font-weight: 800; color: var(--text); }
+    .sg-sub { font-size: 0.75rem; color: var(--text-dim); }
+    .hits-row { display: flex; flex-wrap: wrap; gap: 9px; font-size: 0.88rem; font-weight: 800; }
+    .h300 { color: var(--accent); }
+    .h100 { color: #4ade80; }
+    .h50 { color: #fbbf24; }
+    .hmiss { color: #fb7185; }
+
+    /* Cleanly Grouped Action Footer */
+    .action-bar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding-top: 14px;
+      border-top: 1px solid var(--border);
+    }
+    .action-clusters {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 10px;
+    }
+    .split-btn {
+      display: inline-flex;
+      align-items: stretch;
+      border-radius: 10px;
+      overflow: hidden;
+      border: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.04);
+    }
+    .split-btn > a, .split-btn > button {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 8px 13px;
+      font-size: 0.83rem;
+      font-weight: 600;
+      color: var(--text);
+      text-decoration: none;
+      border: none;
+      background: transparent;
+      cursor: pointer;
+      transition: background 0.14s, color 0.14s;
+    }
+    .split-btn > a:hover, .split-btn > button:hover { background: rgba(150, 223, 227, 0.12); }
+    .split-btn > :not(:first-child) {
+      border-left: 1px solid var(--border);
+      color: var(--text-dim);
+      padding: 8px 11px;
+    }
+    .split-btn > :not(:first-child):hover { color: var(--text); }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      padding: 8px 14px;
+      border-radius: 10px;
+      font-size: 0.83rem;
+      font-weight: 700;
+      text-decoration: none;
+      border: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.04);
+      color: var(--text);
+      cursor: pointer;
+      transition: all 0.14s;
+    }
+    .btn:hover { border-color: var(--border-hover); background: rgba(150, 223, 227, 0.12); }
+    .btn-primary {
+      background: linear-gradient(135deg, var(--accent), #6ec8d8);
+      border-color: transparent;
+      color: #071419;
+    }
+    .btn-primary:hover { opacity: 0.93; background: linear-gradient(135deg, var(--accent), #6ec8d8); }
+
+    .specs-line {
+      font-size: 0.78rem;
+      color: var(--text-dim);
+      display: inline-flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      align-items: center;
+    }
+
+    /* More Replays Rail */
+    .more-section { display: none; flex-direction: column; gap: 12px; margin-top: 8px; }
+    .more-section.show { display: flex; }
+    .more-head { display: flex; align-items: center; justify-content: space-between; }
+    .more-head h2 { font-size: 0.98rem; font-weight: 700; }
+    .more-head a { color: var(--accent); text-decoration: none; font-size: 0.83rem; font-weight: 600; }
+    .more-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(215px, 1fr));
+      gap: 13px;
+    }
+    .m-card {
+      display: flex;
+      flex-direction: column;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 13px;
+      overflow: hidden;
+      text-decoration: none;
+      color: var(--text);
+      transition: transform 0.15s, border-color 0.15s;
+    }
+    .m-card:hover { transform: translateY(-2px); border-color: var(--border-hover); }
+    .m-thumb { position: relative; aspect-ratio: 16 / 9; background: #0c101b; overflow: hidden; }
+    .m-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+    .m-dur {
+      position: absolute;
+      right: 6px;
+      bottom: 6px;
+      font-size: 0.7rem;
+      font-weight: 700;
+      padding: 2px 6px;
+      border-radius: 5px;
+      background: rgba(5, 8, 14, 0.84);
+    }
+    .m-body { padding: 9px 11px 11px; display: flex; flex-direction: column; gap: 4px; }
+    .m-title {
+      font-size: 0.82rem;
+      font-weight: 600;
+      line-height: 1.32;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+    .m-meta { font-size: 0.74rem; color: var(--text-dim); display: flex; justify-content: space-between; gap: 6px; }
+
+    /* Shortcuts Modal */
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(4, 7, 12, 0.74);
+      backdrop-filter: blur(5px);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+      z-index: 120;
+    }
+    .modal-backdrop.show { display: flex; }
+    .modal {
+      width: 100%;
+      max-width: 520px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 22px 24px;
+      box-shadow: 0 24px 64px rgba(0, 0, 0, 0.6);
+    }
+    .modal-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; }
+    .modal-head h3 { font-size: 1.02rem; font-weight: 800; }
+    .modal-close {
+      background: none;
+      border: 1px solid var(--border);
+      color: var(--text-dim);
+      width: 30px;
+      height: 30px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 1.1rem;
+    }
+    .modal-close:hover { color: var(--text); border-color: var(--border-hover); }
+    .kb-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 16px; font-size: 0.82rem; }
+    @media (max-width: 520px) { .kb-grid { grid-template-columns: 1fr; } }
+    .kb-item { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 5px 0; border-bottom: 1px solid rgba(255,255,255,0.05); }
+    .kb-item span { color: var(--text-dim); }
+    kbd {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.74rem;
+      font-weight: 700;
+      padding: 2px 7px;
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid var(--border);
+      color: var(--text);
+      white-space: nowrap;
+    }
+
+    .toast {
+      position: fixed;
+      bottom: 22px;
+      left: 50%;
+      transform: translateX(-50%) translateY(18px);
+      background: rgba(16, 21, 34, 0.96);
+      border: 1px solid rgba(150, 223, 227, 0.45);
+      color: var(--text);
+      padding: 9px 16px;
+      border-radius: 10px;
+      font-size: 0.84rem;
+      font-weight: 600;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.18s, transform 0.18s;
+      z-index: 150;
+      box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+    }
+    .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  </style>
+  <link rel="stylesheet" href="/themes.css?v=2">
+</head>
+<body>
+  <div class="wrap">
+    <header class="topbar">
+      <a class="back-btn" href="/">&larr; Gallery</a>
+      <div class="top-nav">
+        <a class="nav-btn" id="prev-replay-btn" href="/" disabled title="Newer replay (Shift+P)">&larr; Prev</a>
+        <a class="nav-btn" id="next-replay-btn" href="/" disabled title="Older replay (Shift+N)">Next &rarr;</a>
+        <a class="nav-btn" href="/render">Render</a>
+        <a class="nav-btn" href="/config">Config</a>
+        <a class="nav-btn" href="/stats">Stats</a>
+        <button class="nav-btn" id="help-btn" type="button" title="Keyboard shortcuts (?)">Shortcuts</button>
+      </div>
+    </header>
+
+    <section class="player-card">
+      <div class="video-stage" id="video-stage">
+        <video
+          id="player"
+          src="{{$mp4Path | html}}"
+          poster="{{$posterPath | html}}"
+          controls
+          playsinline
+          preload="metadata"
+        ></video>
+        <div class="play-overlay" id="play-overlay" aria-label="Click to play video">
+          <div class="play-circle">
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="#96DFE3"><polygon points="6 4 20 12 6 20 6 4"/></svg>
+          </div>
+        </div>
+        <div class="stage-hud" id="stage-hud"></div>
+      </div>
+
+      <!-- Organized 3-Zone Control Bar -->
+      <div class="control-bar">
+        <!-- Zone 1: Playback Speed & Pitch -->
+        <div class="ctrl-zone">
+          <div class="seg-group" title="Playback speed ([ / ])">
+            <button class="seg-btn" id="speed-down" type="button" aria-label="Slower">&minus;</button>
+            <select class="seg-select" id="speed-select" aria-label="Playback speed">
+              <option value="0.1">0.1&times;</option>
+              <option value="0.25">0.25&times;</option>
+              <option value="0.5">0.5&times;</option>
+              <option value="0.75">0.75&times;</option>
+              <option value="1" selected>1&times;</option>
+              <option value="1.25">1.25&times;</option>
+              <option value="1.5">1.5&times;</option>
+              <option value="2">2&times;</option>
+            </select>
+            <button class="seg-btn" id="speed-up" type="button" aria-label="Faster">+</button>
+          </div>
+          <button class="tool-btn active" id="pitch-btn" type="button" title="Preserve audio pitch at non-1x speeds">Pitch</button>
+        </div>
+
+        <!-- Zone 2: Frame Step & Timecode -->
+        <div class="ctrl-zone">
+          <div class="seg-group">
+            <button class="seg-btn" id="frame-prev" type="button" title="Step back 1 frame (,)">&lsaquo;</button>
+            <span class="seg-tc" id="timecode"><strong>0:00.000</strong> &middot; F0</span>
+            <button class="seg-btn" id="frame-next" type="button" title="Step forward 1 frame (.)">&rsaquo;</button>
+          </div>
+        </div>
+
+        <!-- Zone 3: Replay Tools -->
+        <div class="ctrl-zone">
+          <button class="tool-btn" id="loop-btn" type="button" title="Loop replay (R)">Loop</button>
+          <button class="tool-btn" id="ab-toggle" type="button" title="A-B section loop (A / B / X)">A-B</button>
+          <button class="tool-btn" id="zoom-btn" type="button" title="Cycle aim zoom 1x / 1.75x / 2.5x (Z)">Zoom</button>
+          <button class="tool-btn" id="snap-btn" type="button" title="Save current frame as PNG (S)">PNG</button>
+          <button class="tool-btn" id="pip-btn" type="button" title="Picture-in-Picture (P)">PiP</button>
+          <button class="tool-btn" id="theater-btn" type="button" title="Theater mode (T)">Theater</button>
+        </div>
+      </div>
+
+      <!-- Contextual A-B Loop Sub-Bar (hidden until toggled or active) -->
+      <div class="ab-drawer" id="ab-drawer">
+        <div class="ab-left">
+          <span class="ab-label">A-B Loop</span>
+          <div class="seg-group">
+            <button class="seg-btn" id="ab-a" type="button" title="Set loop start (A)">Set A</button>
+            <button class="seg-btn" id="ab-b" type="button" title="Set loop end (B)">Set B</button>
+          </div>
+          <span class="ab-readout" id="ab-readout">A &mdash; &rarr; B &mdash;</span>
+        </div>
+        <button class="tool-btn" id="ab-clear" type="button" title="Clear A-B loop (X or \)">Clear</button>
+      </div>
+    </section>
+
+    <section class="info-card">
+      <div class="info-head">
+        <div class="title-col">
+          <div class="badge-row" id="badge-row">
+{{- if $grade }}            <span class="badge b-grade b-grade-{{$grade | html}}">{{$grade | html}}</span>{{end}}
+{{- if $pp }}            <span class="badge b-pp">{{printf "%.0f" (float64 $pp)}}pp</span>{{end}}
+{{- if $stars }}            <span class="badge b-star">{{printf "%.2f" (float64 $stars)}}&#9733;</span>{{end}}
+{{- if and $mods (ne $mods "NM") }}            <span class="badge b-mod">+{{$mods | html}}</span>{{end}}
+{{- if $acc }}            <span class="badge b-acc">{{printf "%.2f" (float64 $acc)}}%</span>{{end}}
+          </div>
+          <h1 class="replay-title" id="replay-title">{{$mapTitle | html}}{{if $pp}}<span class="title-pp">{{printf "%.0f" (float64 $pp)}}pp</span>{{end}}</h1>
+          <div class="sub-line" id="sub-line">
+{{- if $player }}            <span>Played by <a href="/?player={{$player | urlquery | html}}">{{$player | html}}</a></span>{{end}}
+            <span id="uploaded-rel"></span>
+          </div>
+        </div>
+        <span class="exp-pill" id="expiry-pill" style="display:none;"></span>
+      </div>
+
+      <div class="score-grid" id="score-grid"></div>
+
+      <div class="action-bar">
+        <div class="action-clusters">
+          <a class="btn btn-primary" href="{{$mp4Path | html}}" download="{{$slug | html}}.mp4">Download MP4</a>
+
+          <div class="split-btn">
+            <button id="copy-watch-btn" type="button" title="Copy clean watch link">Copy Link</button>
+            <button id="copy-time-btn" type="button" title="Copy link at current timestamp (Shift+C)">@ Time</button>
+          </div>
+
+          <button class="btn" id="copy-mp4-btn" type="button" title="Copy direct MP4 URL">Copy MP4</button>
+
+{{- if $beatmap }}
+          <div class="split-btn">
+            <a id="beatmap-btn" href="{{$beatmap | html}}" target="_blank" rel="noopener noreferrer">Beatmap &nearr;</a>
+            <button id="copy-bid-btn" type="button" style="display:none;" title="Copy Beatmap ID">ID</button>
+          </div>
+{{- end }}
+        </div>
+
+        <div class="specs-line" id="specs-pill">
+          <span>{{$width}}&times;{{$height}}{{if $fps}} &middot; {{toString $fps | html}}fps{{end}}</span>
+{{- if $durText }}          <span>&middot; {{$durText | html}}</span>{{end}}
+{{- if $sizeText }}          <span id="size-pill">&middot; {{$sizeText | html}}</span>{{end}}
+        </div>
+      </div>
+    </section>
+
+    <section class="more-section" id="more-section">
+      <div class="more-head">
+        <h2 id="more-heading">More Replays</h2>
+        <a href="/">Browse all &rarr;</a>
+      </div>
+      <div class="more-grid" id="more-grid"></div>
+    </section>
+  </div>
+
+  <div class="modal-backdrop" id="shortcuts-modal" role="dialog" aria-modal="true" aria-labelledby="shortcuts-title">
+    <div class="modal">
+      <div class="modal-head">
+        <h3 id="shortcuts-title">Keyboard Shortcuts</h3>
+        <button class="modal-close" id="modal-close" type="button" aria-label="Close">&times;</button>
+      </div>
+      <div class="kb-grid">
+        <div class="kb-item"><span>Play / Pause</span><kbd>Space</kbd> / <kbd>K</kbd></div>
+        <div class="kb-item"><span>Seek &plusmn;5s</span><kbd>&larr;</kbd> / <kbd>&rarr;</kbd></div>
+        <div class="kb-item"><span>Seek &plusmn;5s (YT)</span><kbd>J</kbd> / <kbd>L</kbd></div>
+        <div class="kb-item"><span>Fine Seek &plusmn;1s</span><kbd>Shift+&larr;/&rarr;</kbd></div>
+        <div class="kb-item"><span>Frame Step &minus;1 / +1</span><kbd>,</kbd> / <kbd>.</kbd></div>
+        <div class="kb-item"><span>Speed Down / Up</span><kbd>[</kbd> / <kbd>]</kbd></div>
+        <div class="kb-item"><span>A-B Loop Start / End</span><kbd>A</kbd> / <kbd>B</kbd></div>
+        <div class="kb-item"><span>Clear A-B Loop</span><kbd>X</kbd> / <kbd>\</kbd></div>
+        <div class="kb-item"><span>Toggle Loop</span><kbd>R</kbd></div>
+        <div class="kb-item"><span>Aim Zoom (drag pan)</span><kbd>Z</kbd></div>
+        <div class="kb-item"><span>Capture Frame PNG</span><kbd>S</kbd></div>
+        <div class="kb-item"><span>Copy Link @ Time</span><kbd>Shift+C</kbd></div>
+        <div class="kb-item"><span>Mute / Fullscreen</span><kbd>M</kbd> / <kbd>F</kbd></div>
+        <div class="kb-item"><span>Theater / PiP</span><kbd>T</kbd> / <kbd>P</kbd></div>
+        <div class="kb-item"><span>Prev / Next Replay</span><kbd>Shift+P</kbd> / <kbd>Shift+N</kbd></div>
+        <div class="kb-item"><span>Toggle Help</span><kbd>?</kbd></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <script id="replay-meta" type="application/json">{{- if $hasMeta -}}{{ readFile $metaPath | replace "<" "\\u003c" }}{{- else -}}{}{{- end -}}</script>
+  <script>
+    (function () {
+      const SLUG = {{printf "%q" $slug | replace "<" "\\u003c"}};
+      const CANONICAL_WATCH = {{printf "%q" $watchUrl | replace "<" "\\u003c"}};
+      const CANONICAL_MP4 = {{printf "%q" $videoUrl | replace "<" "\\u003c"}};
+      const PREF_KEY = "osu_replay_prefs_v1";
+      const RATES = [0.1, 0.25, 0.5, 0.75, 1, 1.25, 1.5, 2];
+      const ZOOMS = [1, 1.75, 2.5];
+
+      let meta = {};
+      try { meta = JSON.parse(document.getElementById("replay-meta").textContent || "{}") || {}; } catch (_) {}
+
+      const video = document.getElementById("player");
+      const stage = document.getElementById("video-stage");
+      const playOverlay = document.getElementById("play-overlay");
+      const stageHud = document.getElementById("stage-hud");
+      const toastEl = document.getElementById("toast");
+      const timecodeEl = document.getElementById("timecode");
+      const speedSelect = document.getElementById("speed-select");
+      const pitchBtn = document.getElementById("pitch-btn");
+      const loopBtn = document.getElementById("loop-btn");
+      const zoomBtn = document.getElementById("zoom-btn");
+      const theaterBtn = document.getElementById("theater-btn");
+      const pipBtn = document.getElementById("pip-btn");
+      const abToggleBtn = document.getElementById("ab-toggle");
+      const abDrawer = document.getElementById("ab-drawer");
+      const abABtn = document.getElementById("ab-a");
+      const abBBtn = document.getElementById("ab-b");
+      const abClearBtn = document.getElementById("ab-clear");
+      const abReadout = document.getElementById("ab-readout");
+      const modal = document.getElementById("shortcuts-modal");
+
+      const fps = Number(meta.fps) > 1 && Number(meta.fps) <= 1000 ? Number(meta.fps) : 60;
+      const frameDur = 1 / fps;
+
+      let hudTimer = null;
+      function showHud(txt) {
+        stageHud.textContent = txt;
+        stageHud.classList.add("show");
+        clearTimeout(hudTimer);
+        hudTimer = setTimeout(() => stageHud.classList.remove("show"), 1300);
+      }
+
+      let toastTimer = null;
+      function showToast(txt) {
+        toastEl.textContent = txt;
+        toastEl.classList.add("show");
+        clearTimeout(toastTimer);
+        toastTimer = setTimeout(() => toastEl.classList.remove("show"), 2000);
+      }
+
+      function fmtTc(sec) {
+        if (!isFinite(sec) || sec < 0) sec = 0;
+        const m = Math.floor(sec / 60);
+        const s = Math.floor(sec % 60);
+        const ms = Math.floor((sec % 1) * 1000);
+        return m + ":" + String(s).padStart(2, "0") + "." + String(ms).padStart(3, "0");
+      }
+      function fmtShortTime(sec) {
+        if (!isFinite(sec) || sec < 0) sec = 0;
+        const m = Math.floor(sec / 60);
+        const s = (sec % 60).toFixed(1).padStart(4, "0");
+        return m + ":" + s;
+      }
+      function fmtInt(n) { return Number(n).toLocaleString(); }
+      function fmtRelTime(ts) {
+        if (!ts) return "";
+        const diff = Math.max(0, Math.floor(Date.now() / 1000) - ts);
+        if (diff < 60) return "Uploaded just now";
+        if (diff < 3600) return "Uploaded " + Math.floor(diff / 60) + "m ago";
+        if (diff < 86400) return "Uploaded " + Math.floor(diff / 3600) + "h ago";
+        return "Uploaded " + Math.floor(diff / 86400) + "d ago";
+      }
+
+      // Enrich metadata UI
+      (function hydrateMetadata() {
+        const badgeRow = document.getElementById("badge-row");
+        if (meta.is_lazer) {
+          const sp = document.createElement("span");
+          sp.className = "badge b-lazer";
+          sp.textContent = "osu!lazer";
+          badgeRow.appendChild(sp);
+        }
+        if (meta.skin) {
+          let skinLabel = String(meta.skin);
+          try { skinLabel = decodeURIComponent(skinLabel); } catch (_) {}
+          skinLabel = skinLabel.replace(/_/g, " ");
+          const sp = document.createElement("span");
+          sp.className = "badge";
+          sp.textContent = "Skin: " + skinLabel;
+          badgeRow.appendChild(sp);
+        }
+
+        const subLine = document.getElementById("sub-line");
+        if (meta.player && meta.player !== "[UNKNOWN]" && meta.player.toLowerCase() !== "unknown") {
+          const prof = document.createElement("a");
+          prof.href = "https://osu.ppy.sh/users/" + encodeURIComponent(meta.player);
+          prof.target = "_blank";
+          prof.rel = "noopener noreferrer";
+          prof.textContent = "osu! profile ↗";
+          prof.style.fontSize = "0.79rem";
+          subLine.insertBefore(prof, document.getElementById("uploaded-rel"));
+        }
+
+        if (meta.uploaded_at) {
+          document.getElementById("uploaded-rel").textContent = fmtRelTime(meta.uploaded_at);
+          const retDays = Number(meta.retention_days) || 7;
+          const expTs = Number(meta.uploaded_at) + retDays * 86400;
+          const left = Math.max(0, expTs - Math.floor(Date.now() / 1000));
+          const expPill = document.getElementById("expiry-pill");
+          const d = Math.floor(left / 86400);
+          const h = Math.floor((left % 86400) / 3600);
+          if (left <= 0) {
+            expPill.textContent = "Expiring soon";
+            expPill.classList.add("urgent");
+          } else if (left < 86400) {
+            expPill.textContent = "Expires in " + (h > 0 ? h + "h" : "<1h");
+            expPill.classList.add("urgent");
+          } else if (left < 2 * 86400) {
+            expPill.textContent = "Expires in " + d + "d " + h + "h";
+            expPill.classList.add("warn");
+          } else {
+            expPill.textContent = "Expires in " + d + "d " + h + "h";
+          }
+          expPill.style.display = "inline-flex";
+        }
+
+        const sg = document.getElementById("score-grid");
+        const boxes = [];
+        if (meta.pp != null) {
+          const subParts = [];
+          if (meta.nochoke_pp != null && Math.abs(meta.nochoke_pp - meta.pp) >= 0.5) {
+            subParts.push("If FC: " + Number(meta.nochoke_pp).toFixed(0) + "pp");
+          }
+          if (meta.max_pp != null) subParts.push("SS: " + Number(meta.max_pp).toFixed(0) + "pp");
+          if (meta.aim_pp != null && meta.speed_pp != null && meta.acc_pp != null) {
+            subParts.push("Aim " + Math.round(meta.aim_pp) + " · Spd " + Math.round(meta.speed_pp) + " · Acc " + Math.round(meta.acc_pp));
+          }
+          boxes.push({ label: "Performance", val: Number(meta.pp).toFixed(2) + " pp", sub: subParts.join(" · ") });
+        }
+        if (meta.max_combo != null) {
+          const comboText = meta.map_max_combo
+            ? fmtInt(meta.max_combo) + " / " + fmtInt(meta.map_max_combo) + "x"
+            : fmtInt(meta.max_combo) + "x";
+          const isFc = meta.count_miss === 0 && meta.map_max_combo && meta.max_combo >= meta.map_max_combo - 10;
+          boxes.push({ label: "Max Combo", val: comboText, sub: isFc ? "Full Combo" : (meta.score ? "Score: " + fmtInt(meta.score) : "") });
+        } else if (meta.score != null) {
+          boxes.push({ label: "Score", val: fmtInt(meta.score), sub: "" });
+        }
+        if (meta.count_300 != null) {
+          const box = document.createElement("div");
+          box.className = "sg-box";
+          box.innerHTML =
+            '<div class="sg-lbl">Hit Breakdown</div>' +
+            '<div class="hits-row">' +
+            '<span class="h300" title="300s"></span>' +
+            '<span class="h100" title="100s"></span>' +
+            '<span class="h50" title="50s"></span>' +
+            '<span class="hmiss" title="Misses"></span>' +
+            '</div><div class="sg-sub"></div>';
+          box.querySelector(".h300").textContent = fmtInt(meta.count_300);
+          box.querySelector(".h100").textContent = fmtInt(meta.count_100 || 0);
+          box.querySelector(".h50").textContent = fmtInt(meta.count_50 || 0);
+          box.querySelector(".hmiss").textContent = fmtInt(meta.count_miss || 0) + "✗";
+          if (meta.play_timestamp) {
+            box.querySelector(".sg-sub").textContent =
+              "Set " + new Date(meta.play_timestamp * 1000).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+          }
+          boxes.push({ customEl: box });
+        }
+        if (boxes.length) {
+          boxes.forEach((b) => {
+            if (b.customEl) { sg.appendChild(b.customEl); return; }
+            const el = document.createElement("div");
+            el.className = "sg-box";
+            el.innerHTML = '<div class="sg-lbl"></div><div class="sg-val"></div><div class="sg-sub"></div>';
+            el.children[0].textContent = b.label;
+            el.children[1].textContent = b.val;
+            el.children[2].textContent = b.sub || "";
+            sg.appendChild(el);
+          });
+          sg.classList.add("show");
+        }
+
+        const specs = document.getElementById("specs-pill");
+        if (meta.bitrate_kbps) {
+          const sp = document.createElement("span");
+          sp.textContent = "· " + (meta.bitrate_kbps >= 1000 ? (meta.bitrate_kbps / 1000).toFixed(1) + " Mbps" : meta.bitrate_kbps + " kbps");
+          specs.appendChild(sp);
+        }
+        if (meta.video_codec) {
+          const sp = document.createElement("span");
+          sp.textContent = "· " + String(meta.video_codec).toUpperCase();
+          specs.appendChild(sp);
+        }
+
+        const bid = meta.beatmap_id || meta.mapset_id;
+        const bidBtn = document.getElementById("copy-bid-btn");
+        if (bid && bidBtn) {
+          bidBtn.style.display = "inline-flex";
+          bidBtn.textContent = "#" + bid;
+          bidBtn.title = "Copy beatmap ID (" + bid + ")";
+          bidBtn.onclick = () => {
+            navigator.clipboard?.writeText(String(bid))
+              .then(() => showToast("Copied ID: " + bid))
+              .catch(() => showToast(String(bid)));
+          };
+        }
+      })();
+
+      // Persistent Preferences
+      let prefs = { volume: 0.5, muted: false, rate: 1, loop: false, preservesPitch: true, theater: false };
+      try {
+        const stored = JSON.parse(localStorage.getItem(PREF_KEY) || "{}");
+        if (stored && typeof stored === "object") prefs = { ...prefs, ...stored };
+      } catch (_) {}
+
+      function savePrefs() {
+        try { localStorage.setItem(PREF_KEY, JSON.stringify(prefs)); } catch (_) {}
+      }
+
+      function applyPitchLock(val) {
+        prefs.preservesPitch = Boolean(val);
+        if ("preservesPitch" in video) video.preservesPitch = prefs.preservesPitch;
+        if ("mozPreservesPitch" in video) video.mozPreservesPitch = prefs.preservesPitch;
+        if ("webkitPreservesPitch" in video) video.webkitPreservesPitch = prefs.preservesPitch;
+        pitchBtn.classList.toggle("active", prefs.preservesPitch);
+      }
+
+      function setRate(rate, announce) {
+        const r = Math.max(0.1, Math.min(2, Number(rate) || 1));
+        prefs.rate = r;
+        video.playbackRate = r;
+        applyPitchLock(prefs.preservesPitch);
+        speedSelect.value = String(RATES.find((x) => Math.abs(x - r) < 0.01) || 1);
+        savePrefs();
+        if (announce) showHud("Speed " + r + "×");
+      }
+
+      function stepRate(dir) {
+        const idx = RATES.findIndex((r) => Math.abs(r - prefs.rate) < 0.01);
+        const cur = idx === -1 ? RATES.indexOf(1) : idx;
+        const next = Math.max(0, Math.min(RATES.length - 1, cur + dir));
+        setRate(RATES[next], true);
+      }
+
+      function setLoop(val, announce) {
+        prefs.loop = Boolean(val);
+        video.loop = prefs.loop;
+        loopBtn.classList.toggle("active", prefs.loop);
+        savePrefs();
+        if (announce) showHud(prefs.loop ? "Loop ON" : "Loop OFF");
+      }
+
+      function setTheater(val, announce) {
+        prefs.theater = Boolean(val);
+        document.body.classList.toggle("theater", prefs.theater);
+        theaterBtn.classList.toggle("active", prefs.theater);
+        savePrefs();
+        if (announce) showHud(prefs.theater ? "Theater Mode" : "Default View");
+      }
+
+      video.volume = Math.max(0, Math.min(1, Number(prefs.volume ?? 0.5)));
+      video.muted = Boolean(prefs.muted);
+      setRate(prefs.rate, false);
+      setLoop(prefs.loop, false);
+      setTheater(prefs.theater, false);
+
+      video.addEventListener("volumechange", () => {
+        prefs.volume = video.volume;
+        prefs.muted = video.muted;
+        savePrefs();
+      });
+
+      video.addEventListener("mouseup", () => { setTimeout(() => video.blur(), 0); });
+      video.addEventListener("play", () => { playOverlay.classList.remove("show"); });
+      video.addEventListener("pause", () => { updateTimecode(); });
+
+      // Deep-link ?t=
+      function parseTimestampParam() {
+        const raw = new URLSearchParams(location.search).get("t");
+        if (!raw) return null;
+        if (/^\d+(?:\.\d+)?$/.test(raw)) return parseFloat(raw);
+        const hms = raw.match(/^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+(?:\.\d+)?)s?)?$/i);
+        if (hms && (hms[1] || hms[2] || hms[3])) {
+          return (Number(hms[1] || 0) * 3600) + (Number(hms[2] || 0) * 60) + Number(hms[3] || 0);
+        }
+        const colon = raw.split(":").map(Number);
+        if (colon.length >= 2 && colon.every((n) => isFinite(n) && n >= 0)) {
+          return colon.reduce((acc, n) => acc * 60 + n, 0);
+        }
+        return null;
+      }
+
+      const startAt = parseTimestampParam();
+      let didInitPlay = false;
+      video.addEventListener("loadedmetadata", () => {
+        if (startAt != null && isFinite(video.duration)) {
+          video.currentTime = Math.max(0, Math.min(video.duration - 0.1, startAt));
+        }
+        updateTimecode();
+        if (!didInitPlay) {
+          didInitPlay = true;
+          const p = video.play();
+          if (p && typeof p.catch === "function") {
+            p.catch(() => { playOverlay.classList.add("show"); });
+          }
+        }
+      });
+
+      playOverlay.addEventListener("click", () => {
+        playOverlay.classList.remove("show");
+        video.play().catch(() => {});
+      });
+
+      // A-B Loop Drawer & Enforcement
+      let loopA = null;
+      let loopB = null;
+      let abDrawerOpen = false;
+
+      function updateABUI() {
+        const hasAny = loopA != null || loopB != null;
+        if (hasAny) abDrawerOpen = true;
+        abDrawer.classList.toggle("open", abDrawerOpen);
+        abToggleBtn.classList.toggle("active-purple", hasAny || abDrawerOpen);
+        abToggleBtn.textContent = (loopA != null && loopB != null) ? "A-B Active" : "A-B";
+        abReadout.textContent =
+          "A " + (loopA != null ? fmtShortTime(loopA) : "—") +
+          " → B " + (loopB != null ? fmtShortTime(loopB) : "—");
+      }
+
+      function setLoopA() {
+        loopA = video.currentTime || 0;
+        if (loopB != null && loopB <= loopA) loopB = null;
+        updateABUI();
+        showHud("Loop A = " + fmtShortTime(loopA));
+      }
+
+      function setLoopB() {
+        const cur = video.currentTime || 0;
+        if (loopA == null) loopA = 0;
+        if (cur <= loopA + 0.05) { showToast("Point B must be after Point A"); return; }
+        loopB = cur;
+        updateABUI();
+        video.currentTime = loopA;
+        showHud("Loop A-B Active");
+      }
+
+      function clearLoopAB() {
+        if (loopA == null && loopB == null) return;
+        loopA = null;
+        loopB = null;
+        updateABUI();
+        showHud("A-B Loop Cleared");
+      }
+
+      function enforceABLoop() {
+        if (loopA != null && loopB != null && loopB > loopA + 0.05) {
+          if (video.currentTime >= loopB || video.currentTime < loopA - 0.15) {
+            video.currentTime = loopA;
+          }
+        }
+      }
+
+      function updateTimecode() {
+        const cur = video.currentTime || 0;
+        const frame = Math.round(cur * fps);
+        timecodeEl.innerHTML = "<strong>" + fmtTc(cur) + "</strong> &middot; F" + frame;
+      }
+
+      if (typeof video.requestVideoFrameCallback === "function") {
+        const onFrame = () => {
+          updateTimecode();
+          enforceABLoop();
+          video.requestVideoFrameCallback(onFrame);
+        };
+        video.requestVideoFrameCallback(onFrame);
+      }
+      video.addEventListener("timeupdate", () => { updateTimecode(); enforceABLoop(); });
+      video.addEventListener("seeked", updateTimecode);
+
+      function stepFrame(delta) {
+        video.pause();
+        const next = Math.max(0, Math.min(video.duration || 0, (video.currentTime || 0) + delta * frameDur));
+        video.currentTime = next;
+        updateTimecode();
+        showHud((delta > 0 ? "+1" : "-1") + " frame (" + fmtTc(next) + ")");
+      }
+
+      // Aim Zoom / Pan
+      let zoomIdx = 0, panX = 0, panY = 0, isDragging = false, dragStartX = 0, dragStartY = 0;
+
+      function applyZoomTransform() {
+        const z = ZOOMS[zoomIdx];
+        if (z <= 1) {
+          panX = 0; panY = 0;
+          video.style.transform = "";
+          stage.classList.remove("zoomed");
+          zoomBtn.classList.remove("active");
+          zoomBtn.textContent = "Zoom";
+        } else {
+          const maxShiftX = (stage.clientWidth * (z - 1)) / (2 * z);
+          const maxShiftY = (stage.clientHeight * (z - 1)) / (2 * z);
+          panX = Math.max(-maxShiftX, Math.min(maxShiftX, panX));
+          panY = Math.max(-maxShiftY, Math.min(maxShiftY, panY));
+          video.style.transform = "scale(" + z + ") translate(" + panX.toFixed(1) + "px, " + panY.toFixed(1) + "px)";
+          stage.classList.add("zoomed");
+          zoomBtn.classList.add("active");
+          zoomBtn.textContent = z + "×";
+        }
+      }
+
+      function cycleZoom() {
+        zoomIdx = (zoomIdx + 1) % ZOOMS.length;
+        applyZoomTransform();
+        showHud("Zoom " + ZOOMS[zoomIdx] + "×");
+      }
+
+      stage.addEventListener("pointerdown", (e) => {
+        if (ZOOMS[zoomIdx] <= 1 || e.button !== 0) return;
+        const rect = stage.getBoundingClientRect();
+        if (e.clientY > rect.bottom - 52) return;
+        isDragging = true;
+        dragStartX = e.clientX;
+        dragStartY = e.clientY;
+        stage.classList.add("dragging");
+        stage.setPointerCapture(e.pointerId);
+      });
+      stage.addEventListener("pointermove", (e) => {
+        if (!isDragging) return;
+        const z = ZOOMS[zoomIdx];
+        panX += (e.clientX - dragStartX) / z;
+        panY += (e.clientY - dragStartY) / z;
+        dragStartX = e.clientX;
+        dragStartY = e.clientY;
+        applyZoomTransform();
+      });
+      stage.addEventListener("pointerup", () => { isDragging = false; stage.classList.remove("dragging"); });
+      stage.addEventListener("dblclick", () => {
+        if (ZOOMS[zoomIdx] > 1) { zoomIdx = 0; applyZoomTransform(); showHud("Zoom Reset 1×"); }
+      });
+
+      function captureFramePng() {
+        if (!video.videoWidth || !video.videoHeight) { showToast("Wait for video frame to load first"); return; }
+        try {
+          const canvas = document.createElement("canvas");
+          canvas.width = video.videoWidth;
+          canvas.height = video.videoHeight;
+          canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
+          canvas.toBlob((blob) => {
+            if (!blob) return;
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = SLUG + "_" + fmtTc(video.currentTime || 0).replace(/[:.]/g, "-") + ".png";
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            setTimeout(() => URL.revokeObjectURL(url), 4000);
+            showToast("Saved frame PNG (" + video.videoWidth + "×" + video.videoHeight + ")");
+          }, "image/png");
+        } catch (_) {
+          showToast("Unable to capture frame");
+        }
+      }
+
+      function copyText(txt, msg) {
+        navigator.clipboard?.writeText(txt).then(() => showToast(msg)).catch(() => showToast(txt));
+      }
+      function copyAtCurrentTime() {
+        const secs = Math.floor(video.currentTime || 0);
+        const url = secs > 0 ? CANONICAL_WATCH + "?t=" + secs : CANONICAL_WATCH;
+        copyText(url, secs > 0 ? "Copied link @ " + fmtShortTime(secs) : "Watch link copied!");
+      }
+
+      // Wire controls
+      speedSelect.addEventListener("change", () => setRate(speedSelect.value, true));
+      document.getElementById("speed-down").addEventListener("click", () => stepRate(-1));
+      document.getElementById("speed-up").addEventListener("click", () => stepRate(1));
+      pitchBtn.addEventListener("click", () => {
+        applyPitchLock(!prefs.preservesPitch);
+        savePrefs();
+        showHud(prefs.preservesPitch ? "Pitch Lock ON" : "Pitch Lock OFF");
+      });
+      document.getElementById("frame-prev").addEventListener("click", () => stepFrame(-1));
+      document.getElementById("frame-next").addEventListener("click", () => stepFrame(1));
+
+      abToggleBtn.addEventListener("click", () => { abDrawerOpen = !abDrawerOpen; updateABUI(); });
+      abABtn.addEventListener("click", setLoopA);
+      abBBtn.addEventListener("click", setLoopB);
+      abClearBtn.addEventListener("click", clearLoopAB);
+
+      loopBtn.addEventListener("click", () => setLoop(!prefs.loop, true));
+      zoomBtn.addEventListener("click", cycleZoom);
+      document.getElementById("snap-btn").addEventListener("click", captureFramePng);
+      theaterBtn.addEventListener("click", () => setTheater(!prefs.theater, true));
+
+      if (!document.pictureInPictureEnabled) {
+        pipBtn.style.display = "none";
+      } else {
+        pipBtn.addEventListener("click", () => {
+          if (document.pictureInPictureElement) document.exitPictureInPicture().catch(() => {});
+          else video.requestPictureInPicture().catch(() => showToast("PiP unavailable"));
+        });
+      }
+
+      document.getElementById("copy-watch-btn").addEventListener("click", () => copyText(CANONICAL_WATCH, "Clean watch link copied!"));
+      document.getElementById("copy-time-btn").addEventListener("click", copyAtCurrentTime);
+      document.getElementById("copy-mp4-btn").addEventListener("click", () => copyText(CANONICAL_MP4, "Direct MP4 URL copied!"));
+
+      const toggleModal = (force) => {
+        const next = typeof force === "boolean" ? force : !modal.classList.contains("show");
+        modal.classList.toggle("show", next);
+      };
+      document.getElementById("help-btn").addEventListener("click", () => toggleModal());
+      document.getElementById("modal-close").addEventListener("click", () => toggleModal(false));
+      modal.addEventListener("click", (e) => { if (e.target === modal) toggleModal(false); });
+
+      // Prev/Next + More Replays rail
+      let prevHref = null, nextHref = null;
+      fetch("/index.json", { cache: "no-cache" })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((data) => {
+          if (!data || !Array.isArray(data.replays) || data.replays.length < 2) return;
+          const list = data.replays;
+          const idx = list.findIndex((x) => x.slug === SLUG);
+          if (idx !== -1) {
+            if (idx > 0) {
+              prevHref = "/watch/" + encodeURIComponent(list[idx - 1].short_id || list[idx - 1].slug);
+              const pb = document.getElementById("prev-replay-btn");
+              pb.href = prevHref;
+              pb.removeAttribute("disabled");
+              pb.title = "Newer: " + (list[idx - 1].map_title || list[idx - 1].slug) + " (Shift+P)";
+            }
+            if (idx < list.length - 1) {
+              nextHref = "/watch/" + encodeURIComponent(list[idx + 1].short_id || list[idx + 1].slug);
+              const nb = document.getElementById("next-replay-btn");
+              nb.href = nextHref;
+              nb.removeAttribute("disabled");
+              nb.title = "Older: " + (list[idx + 1].map_title || list[idx + 1].slug) + " (Shift+N)";
+            }
+          }
+
+          const curPlayer = (meta.player || "").toLowerCase();
+          const others = list.filter((x) => x.slug !== SLUG);
+          const samePlayer = curPlayer ? others.filter((x) => (x.player || "").toLowerCase() === curPlayer) : [];
+          const rest = others.filter((x) => !samePlayer.includes(x));
+          const picks = [...samePlayer, ...rest].slice(0, 6);
+          if (!picks.length) return;
+
+          if (samePlayer.length > 0 && meta.player) {
+            document.getElementById("more-heading").textContent = "More by " + meta.player + " & Recent";
+          }
+          const grid = document.getElementById("more-grid");
+          picks.forEach((item) => {
+            const a = document.createElement("a");
+            a.className = "m-card";
+            a.href = "/watch/" + encodeURIComponent(item.short_id || item.slug);
+            const th = document.createElement("div");
+            th.className = "m-thumb";
+            const im = document.createElement("img");
+            im.loading = "lazy";
+            im.src = item.has_webp
+              ? "/" + encodeURIComponent(item.slug) + ".webp"
+              : item.has_thumb
+              ? "/" + encodeURIComponent(item.slug) + ".jpg"
+              : "/fallback-thumb.jpg";
+            im.alt = item.map_title || item.title || item.slug;
+            im.onerror = function () { this.src = "/fallback-thumb.jpg"; };
+            th.appendChild(im);
+            if (item.duration) {
+              const dur = document.createElement("span");
+              dur.className = "m-dur";
+              dur.textContent = Math.floor(item.duration / 60) + ":" + String(Math.floor(item.duration % 60)).padStart(2, "0");
+              th.appendChild(dur);
+            }
+            const bd = document.createElement("div");
+            bd.className = "m-body";
+            const ti = document.createElement("div");
+            ti.className = "m-title";
+            ti.textContent = item.map_title || item.title || item.slug;
+            const me = document.createElement("div");
+            me.className = "m-meta";
+            const l = document.createElement("span");
+            l.textContent = item.player || "Unknown";
+            const r = document.createElement("span");
+            r.textContent = (item.stars != null ? Number(item.stars).toFixed(2) + "★" : "") + (item.mods && item.mods !== "NM" ? " +" + item.mods : "");
+            me.append(l, r);
+            bd.append(ti, me);
+            a.append(th, bd);
+            grid.appendChild(a);
+          });
+          document.getElementById("more-section").classList.add("show");
+        })
+        .catch(() => {});
+
+      // Unified Keyboard Controller
+      document.addEventListener("keydown", (e) => {
+        const tag = (e.target && e.target.tagName) || "";
+        if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+        if (e.ctrlKey || e.metaKey || e.altKey) return;
+
+        if (e.key === "Escape" && modal.classList.contains("show")) { e.preventDefault(); toggleModal(false); return; }
+        if (e.key === "?") { e.preventDefault(); toggleModal(); return; }
+        if (modal.classList.contains("show")) return;
+
+        const key = e.key.toLowerCase();
+        if (e.shiftKey && key === "c") { e.preventDefault(); copyAtCurrentTime(); return; }
+        if (e.shiftKey && key === "p" && prevHref) { e.preventDefault(); location.href = prevHref; return; }
+        if (e.shiftKey && key === "n" && nextHref) { e.preventDefault(); location.href = nextHref; return; }
+
+        if (e.code === "Space" || key === "k") {
+          e.preventDefault(); e.stopPropagation();
+          if (video.paused) { video.play().catch(() => {}); showHud("Play"); }
+          else { video.pause(); showHud("Paused"); }
+        } else if (e.key === "ArrowLeft" || key === "j") {
+          e.preventDefault(); e.stopPropagation();
+          const step = e.shiftKey ? 1 : 5;
+          video.currentTime = Math.max(0, (video.currentTime || 0) - step);
+          showHud("-" + step + "s");
+        } else if (e.key === "ArrowRight" || key === "l") {
+          e.preventDefault(); e.stopPropagation();
+          const step = e.shiftKey ? 1 : 5;
+          video.currentTime = Math.min(video.duration || 0, (video.currentTime || 0) + step);
+          showHud("+" + step + "s");
+        } else if (e.key === ",") { e.preventDefault(); stepFrame(-1); }
+        else if (e.key === ".") { e.preventDefault(); stepFrame(1); }
+        else if (e.key === "[") { e.preventDefault(); stepRate(-1); }
+        else if (e.key === "]") { e.preventDefault(); stepRate(1); }
+        else if (key === "a") { e.preventDefault(); setLoopA(); }
+        else if (key === "b") { e.preventDefault(); setLoopB(); }
+        else if (key === "x" || e.key === "\\") { e.preventDefault(); clearLoopAB(); }
+        else if (key === "r") { e.preventDefault(); setLoop(!prefs.loop, true); }
+        else if (key === "m") {
+          e.preventDefault(); e.stopPropagation();
+          video.muted = !video.muted;
+          showHud(video.muted ? "Muted" : "Unmuted");
+        } else if (key === "f") {
+          e.preventDefault(); e.stopPropagation();
+          if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+          else stage.requestFullscreen().catch(() => video.requestFullscreen?.().catch(() => {}));
+        } else if (key === "t") { e.preventDefault(); setTheater(!prefs.theater, true); }
+        else if (key === "p") { e.preventDefault(); if (document.pictureInPictureEnabled) pipBtn.click(); }
+        else if (key === "s") { e.preventDefault(); captureFramePng(); }
+        else if (key === "z") { e.preventDefault(); cycleZoom(); }
+      }, true);
+    })();
+  </script>
+  <script src="/render-shared.js?v=6"></script>
+</body>
+</html>
